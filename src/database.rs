@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
-use rusqlite::{Connection, params};
+use rusqlite::{ffi::sqlite3_auto_extension, params, Connection};
+use sqlite_vec::sqlite3_vec_init;
 use std::path::Path;
+use zerocopy::AsBytes;
 
 pub struct Database {
     pub conn: Connection,
@@ -8,6 +10,11 @@ pub struct Database {
 
 impl Database {
     pub fn new(db_path: &Path) -> Result<Self> {
+        // Initialize sqlite-vec extension
+        unsafe {
+            sqlite3_auto_extension(Some(std::mem::transmute::<*const (), unsafe extern "C" fn()>(sqlite3_vec_init as *const ())));
+        }
+
         let conn = Connection::open(db_path)
             .with_context(|| format!("Failed to open database at {:?}", db_path))?;
 
@@ -17,7 +24,7 @@ impl Database {
     }
 
     fn initialize_schema(&mut self) -> Result<()> {
-        // Enable sqlite-vec extension
+        // Enable foreign keys
         self.conn.execute("PRAGMA foreign_keys = ON;", [])?;
 
         // Create images table
@@ -26,8 +33,15 @@ impl Database {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 path TEXT UNIQUE NOT NULL,
                 hash TEXT NOT NULL,
-                embedding BLOB NOT NULL,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )?;
+
+        // Create vector table for embeddings using sqlite-vec
+        self.conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS image_vectors USING vec0(
+                embedding float[512]
             )",
             [],
         )?;
@@ -48,18 +62,36 @@ impl Database {
     }
 
     pub fn insert_image(&mut self, path: &str, hash: &str, embedding: &[f32]) -> Result<()> {
-        // Convert f32 vector to bytes
-        let embedding_bytes: Vec<u8> = embedding
-            .iter()
-            .flat_map(|&f| f.to_le_bytes().to_vec())
-            .collect();
+        // Start a transaction for consistency
+        let tx = self.conn.transaction()?;
 
-        // Insert or replace existing entry
-        self.conn.execute(
-            "INSERT OR REPLACE INTO images (path, hash, embedding) VALUES (?1, ?2, ?3)",
-            params![path, hash, embedding_bytes],
+        // Insert into images table
+        tx.execute(
+            "INSERT OR REPLACE INTO images (path, hash) VALUES (?1, ?2)",
+            params![path, hash],
         )?;
 
+        // Get the image ID
+        let image_id: i64 = tx.query_row(
+            "SELECT id FROM images WHERE path = ?1",
+            params![path],
+            |row| row.get(0),
+        )?;
+
+        // Insert into vector table using sqlite-vec
+        // First delete any existing vector for this image
+        tx.execute(
+            "DELETE FROM image_vectors WHERE rowid = ?1",
+            params![image_id],
+        )?;
+
+        // Insert the new vector using zerocopy for efficiency
+        tx.execute(
+            "INSERT INTO image_vectors (rowid, embedding) VALUES (?1, ?2)",
+            params![image_id, embedding.as_bytes()],
+        )?;
+
+        tx.commit()?;
         Ok(())
     }
 
@@ -72,25 +104,41 @@ impl Database {
         Ok(count > 0)
     }
 
-    pub fn get_all_images(&self) -> Result<Vec<(String, Vec<f32>)>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT path, embedding FROM images ORDER BY id")?;
+    /// Search for similar images using sqlite-vec
+    pub fn search_similar_images(&self, query_embedding: &[f32], limit: usize) -> Result<Vec<(String, f32)>> {
+        // Use a reasonable k value that's at least the limit but not too large
+        let k = limit.clamp(1, 100);
+        
+        let query = format!(
+            "SELECT i.path, distance 
+             FROM image_vectors v
+             JOIN images i ON i.id = v.rowid
+             WHERE v.embedding MATCH ? AND k = {}
+             ORDER BY distance",
+            k
+        );
+        
+        let mut stmt = self.conn.prepare(&query)?;
 
-        let image_iter = stmt.query_map([], |row| {
-            let path: String = row.get(0)?;
-            let embedding_bytes: Vec<u8> = row.get(1)?;
-            Ok((path, embedding_bytes))
-        })?;
+        let results = stmt.query_map(
+            params![query_embedding.as_bytes()],
+            |row| {
+                let path: String = row.get(0)?;
+                let distance: f32 = row.get(1)?;
+                // Convert distance to similarity (1 - distance for cosine similarity)
+                // let similarity = 1.0 - distance;
+                Ok((path, distance))
+            }
+        )?;
 
-        let mut results = Vec::new();
-        for image in image_iter {
-            let (path, embedding_bytes) = image?;
-            let embedding = bytes_to_f32_vec(&embedding_bytes);
-            results.push((path, embedding));
+        let mut search_results = Vec::new();
+        for result in results {
+            search_results.push(result?);
         }
 
-        Ok(results)
+        // Limit results to the requested amount
+        search_results.truncate(limit);
+        Ok(search_results)
     }
 
     pub fn clean_missing_files(&mut self) -> Result<usize> {
@@ -123,9 +171,13 @@ impl Database {
             }
         }
 
-        // Delete missing files
+        // Delete missing files from both tables
         let mut removed_count = 0;
         for id in to_delete {
+            // Delete from vector table first
+            self.conn
+                .execute("DELETE FROM image_vectors WHERE rowid = ?1", params![id])?;
+            // Then delete from images table
             self.conn
                 .execute("DELETE FROM images WHERE id = ?1", params![id])?;
             removed_count += 1;
@@ -161,35 +213,5 @@ impl Database {
     #[allow(dead_code)]
     pub fn get_connection(&self) -> &Connection {
         &self.conn
-    }
-}
-
-fn bytes_to_f32_vec(bytes: &[u8]) -> Vec<f32> {
-    bytes
-        .chunks_exact(4)
-        .map(|chunk| {
-            let array: [u8; 4] = chunk.try_into().unwrap();
-            f32::from_le_bytes(array)
-        })
-        .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_bytes_conversion() {
-        let original = [1.0, -2.5, 3.15, 0.0];
-        let bytes: Vec<u8> = original
-            .iter()
-            .flat_map(|&f| (f as f32).to_le_bytes().to_vec())
-            .collect();
-        let converted = bytes_to_f32_vec(&bytes);
-
-        assert_eq!(original.len(), converted.len());
-        for (orig, conv) in original.iter().zip(converted.iter()) {
-            assert!((orig - conv).abs() < 1e-6);
-        }
     }
 }

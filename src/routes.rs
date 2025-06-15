@@ -13,7 +13,6 @@ use rust_embed::Embed;
 use std::sync::Arc;
 use tower::ServiceBuilder;
 use tower_http::compression::CompressionLayer;
-use tower_http::services::{ServeDir, ServeFile};
 
 #[derive(Embed)]
 #[folder = "site/build"]

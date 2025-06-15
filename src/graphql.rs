@@ -1,7 +1,7 @@
 use crate::context::GraphQLContext;
 
 use juniper::{
-    EmptyMutation, EmptySubscription, FieldError, FieldResult, RootNode, graphql_subscription,
+    EmptyMutation, EmptySubscription, FieldError, FieldResult, RootNode,
 };
 use tracing::error;
 
@@ -10,7 +10,7 @@ pub struct Query;
 #[juniper::graphql_object(Context = GraphQLContext)]
 impl Query {
     #[graphql(name = "search")]
-    pub fn search(context: &GraphQLContext) -> FieldResult<Vec<String>> {
+    pub fn search(_context: &GraphQLContext) -> FieldResult<Vec<String>> {
         Ok(vec![
             "Search result 1".to_string(),
             "Search result 2".to_string(),

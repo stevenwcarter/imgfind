@@ -2,7 +2,6 @@ use anyhow::Context;
 use axum::{Extension, Json, Router, extract::Path, response::IntoResponse, routing::get};
 use clipper::ClipEmbedder;
 use log::info;
-use rusqlite::params;
 
 use super::{AppError, middleware};
 use crate::{context::GraphQLContext, search::SearchEngine};
@@ -36,7 +35,7 @@ async fn search(
 }
 
 async fn file(
-    Extension(context): Extension<GraphQLContext>,
+    Extension(_context): Extension<GraphQLContext>,
     Path(filename): Path<String>,
 ) -> anyhow::Result<impl IntoResponse, AppError> {
     info!("Filename: {}", filename);
