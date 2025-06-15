@@ -91,7 +91,7 @@ export const Images = () => {
           images.map((image) => (
             <img
               key={image[0]}
-              className="w-[250px] cursor-pointer hover:opacity-80 transition-opacity rounded-lg shadow-md"
+              className="w-[250px] object-scale-down cursor-pointer hover:opacity-80 transition-opacity rounded-lg shadow-md"
               src={`/api/v1/search/file/${image[0]}`}
               alt={`${image[0]}`}
               onClick={() => handleImageClick(image[0])}
@@ -118,7 +118,7 @@ export const Images = () => {
 
             {/* Modal image */}
             <img
-              className="max-w-full max-h-full object-contain rounded-lg"
+              className="max-w-full max-h-full object-scale-down rounded-lg"
               src={`/api/v1/search/file/${selectedImage}`}
               alt={selectedImage}
             />
