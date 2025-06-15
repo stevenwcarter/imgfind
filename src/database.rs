@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rusqlite::{ffi::sqlite3_auto_extension, params, Connection};
+use rusqlite::{Connection, ffi::sqlite3_auto_extension, params};
 use sqlite_vec::sqlite3_vec_init;
 use std::path::Path;
 use zerocopy::AsBytes;
@@ -12,7 +12,11 @@ impl Database {
     pub fn new(db_path: &Path) -> Result<Self> {
         // Initialize sqlite-vec extension
         unsafe {
-            sqlite3_auto_extension(Some(std::mem::transmute::<*const (), unsafe extern "C" fn()>(sqlite3_vec_init as *const ())));
+            sqlite3_auto_extension(Some(
+                std::mem::transmute::<*const (), unsafe extern "C" fn()>(
+                    sqlite3_vec_init as *const (),
+                ),
+            ));
         }
 
         let conn = Connection::open(db_path)
@@ -105,31 +109,32 @@ impl Database {
     }
 
     /// Search for similar images using sqlite-vec
-    pub fn search_similar_images(&self, query_embedding: &[f32], limit: usize) -> Result<Vec<(String, f32)>> {
+    pub fn search_similar_images(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(String, f32)>> {
         // Use a reasonable k value that's at least the limit but not too large
         let k = limit.clamp(1, 100);
-        
+
         let query = format!(
             "SELECT i.path, distance 
              FROM image_vectors v
              JOIN images i ON i.id = v.rowid
-             WHERE v.embedding MATCH ? AND k = {}
-             ORDER BY distance",
-            k
+             WHERE v.embedding MATCH ? AND k={k} 
+            AND distance <= 1.22
+             ORDER BY distance LIMIT {k}"
         );
-        
+
         let mut stmt = self.conn.prepare(&query)?;
 
-        let results = stmt.query_map(
-            params![query_embedding.as_bytes()],
-            |row| {
-                let path: String = row.get(0)?;
-                let distance: f32 = row.get(1)?;
-                // Convert distance to similarity (1 - distance for cosine similarity)
-                // let similarity = 1.0 - distance;
-                Ok((path, distance))
-            }
-        )?;
+        let results = stmt.query_map(params![query_embedding.as_bytes()], |row| {
+            let path: String = row.get(0)?;
+            let distance: f32 = row.get(1)?;
+            // Convert distance to similarity (1 - distance for cosine similarity)
+            // let similarity = 1.0 - distance;
+            Ok((path, distance))
+        })?;
 
         let mut search_results = Vec::new();
         for result in results {

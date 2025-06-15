@@ -89,13 +89,15 @@ export const Images = () => {
         {images &&
           images.length > 0 &&
           images.map((image) => (
-            <img
-              key={image[0]}
-              className="w-[250px] object-scale-down cursor-pointer hover:opacity-80 transition-opacity rounded-lg shadow-md"
-              src={`/api/v1/search/file/${image[0]}`}
-              alt={`${image[0]}`}
-              onClick={() => handleImageClick(image[0])}
-            />
+            <div className="flex flex-col justify-center" key={image[0]}>
+              <img
+                className="w-[250px] object-scale-down cursor-pointer hover:opacity-80 transition-opacity rounded-lg shadow-md"
+                src={`/api/v1/search/file/${image[0]}`}
+                alt={`${image[0]}`}
+                onClick={() => handleImageClick(image[0])}
+              />
+              <span>{image[1]}</span>
+            </div>
           ))}
       </div>
       <p>end images</p>

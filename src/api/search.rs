@@ -4,7 +4,10 @@ use clipper::ClipEmbedder;
 use log::info;
 
 use super::{AppError, middleware};
-use crate::{context::GraphQLContext, search::SearchEngine};
+use crate::{
+    context::GraphQLContext,
+    search::{SearchEngine, normalize_vector},
+};
 
 pub fn routes(context: GraphQLContext) -> Router {
     Router::new()
@@ -24,11 +27,12 @@ async fn search(
     let query_embedding = model
         .get_text_embedding(search.as_str())
         .context("Failed to generate text embedding")?;
+    let normalized_query = normalize_vector(&query_embedding);
 
     let db = context.db.lock().unwrap();
     let search = SearchEngine::new(&db);
     let result = search
-        .search(&query_embedding, 30)
+        .search(&normalized_query, 30)
         .context("Failed to perform search")?;
 
     Ok(Json(result))

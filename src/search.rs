@@ -1,5 +1,5 @@
-use anyhow::Result;
 use crate::database::Database;
+use anyhow::Result;
 
 pub struct SearchEngine<'a> {
     db: &'a Database,
@@ -9,9 +9,39 @@ impl<'a> SearchEngine<'a> {
     pub fn new(db: &'a Database) -> Self {
         SearchEngine { db }
     }
-    
+
     pub fn search(&self, query_embedding: &[f32], limit: usize) -> Result<Vec<(String, f32)>> {
         // Use sqlite-vec for efficient similarity search
-        self.db.search_similar_images(query_embedding, limit)
+        let query_embedding = normalize_vector(query_embedding);
+        self.db.search_similar_images(&query_embedding, limit)
+    }
+}
+
+pub fn normalize_vector(vector: &[f32]) -> Vec<f32> {
+    let magnitude: f32 = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if magnitude == 0.0 {
+        return vector.to_vec();
+    }
+    vector.iter().map(|x| x / magnitude).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_vector() {
+        let vector = vec![3.0, 4.0];
+        let normalized = normalize_vector(&vector);
+        let magnitude: f32 = normalized.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((magnitude - 1.0).abs() < 1e-6);
+    }
+    #[test]
+    fn test_double_normalize_vector() {
+        let vector = vec![3.0, 4.0];
+        let normalized = normalize_vector(&vector);
+        let normalized2 = normalize_vector(&normalized);
+        let magnitude: f32 = normalized2.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((magnitude - 1.0).abs() < 1e-6);
     }
 }

@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use clipper::ClipEmbedder;
 use dirs::home_dir;
+use imgfind::config;
 use imgfind::context::GraphQLContext;
 use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, info, warn};
@@ -13,7 +14,7 @@ use walkdir::WalkDir;
 
 use imgfind::database::Database;
 use imgfind::routes::app;
-use imgfind::search::SearchEngine;
+use imgfind::search::{SearchEngine, normalize_vector};
 
 #[derive(Parser)]
 #[command(name = "imgfind")]
@@ -37,6 +38,9 @@ enum Commands {
         /// Quiet mode: suppress progress output
         #[arg(short, long)]
         quiet: bool,
+        /// Create database in current directory instead of using existing or global database
+        #[arg(long)]
+        root: bool,
     },
     /// Search for images using natural language
     Search {
@@ -51,12 +55,38 @@ enum Commands {
         /// Search recursively in subdirectories
         #[arg(short, long)]
         recursive: bool,
+        /// Search all images in the database
+        #[arg(short, long)]
+        all: bool,
     },
     /// Clean up missing files from database
     Clean,
     /// Show database status and statistics
     Status,
+    /// Configuration management
+    Config {
+        #[command(subcommand)]
+        config_command: ConfigCommands,
+    },
     Serve,
+}
+
+#[derive(Subcommand)]
+enum ConfigCommands {
+    /// Show current configuration
+    Show,
+    /// Add an ignore pattern
+    AddIgnore {
+        /// Pattern to add (regex supported)
+        pattern: String,
+    },
+    /// Remove an ignore pattern
+    RemoveIgnore {
+        /// Pattern to remove
+        pattern: String,
+    },
+    /// Reset configuration to defaults
+    Reset,
 }
 
 #[tokio::main]
@@ -64,15 +94,20 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let cli = Cli::parse();
-    let db_path = get_db_path()?;
-    let mut db = Database::new(&db_path)?;
 
     match cli.command {
         Commands::Index {
             dir,
             recursive,
             quiet,
+            root,
         } => {
+            let db_path = if root {
+                get_local_db_path()?
+            } else {
+                get_db_path()?
+            };
+            let mut db = Database::new(&db_path)?;
             index_directory(&mut db, &dir, recursive, quiet)?;
         }
         Commands::Search {
@@ -80,16 +115,28 @@ async fn main() -> Result<()> {
             limit,
             short,
             recursive,
+            all,
         } => {
-            search_images(&db, &prompt, limit, short, recursive)?;
+            let db_path = get_db_path()?;
+            let db = Database::new(&db_path)?;
+            search_images(&db, &prompt, limit, short, recursive, all)?;
         }
         Commands::Clean => {
+            let db_path = get_db_path()?;
+            let mut db = Database::new(&db_path)?;
             clean_database(&mut db)?;
         }
         Commands::Status => {
+            let db_path = get_db_path()?;
+            let db = Database::new(&db_path)?;
             show_status(&db, &db_path)?;
         }
+        Commands::Config { config_command } => {
+            handle_config_command(config_command)?;
+        }
         Commands::Serve => {
+            let db_path = get_db_path()?;
+            let db = Database::new(&db_path)?;
             serve(db).await?;
         }
     }
@@ -141,11 +188,28 @@ fn get_db_path() -> Result<PathBuf> {
     Ok(imgfind_dir.join("imgfind.db"))
 }
 
+fn get_local_db_path() -> Result<PathBuf> {
+    // Create .imgfind directory in current directory
+    let current_dir = std::env::current_dir()?;
+    let imgfind_dir = current_dir.join(".imgfind");
+    fs::create_dir_all(&imgfind_dir)?;
+    Ok(imgfind_dir.join("imgfind.db"))
+}
+
 fn index_directory(db: &mut Database, dir: &str, recursive: bool, quiet: bool) -> Result<()> {
     if !quiet {
         println!("Indexing directory: {}", dir);
     }
     info!("Indexing directory: {}", dir);
+
+    // Load configuration
+    let config = config::Config::load().context("Failed to load configuration")?;
+    if !quiet {
+        println!(
+            "Loaded configuration with {} ignore patterns",
+            config.ignore_patterns.len()
+        );
+    }
 
     // Check if directory exists
     let dir_path = std::path::Path::new(dir);
@@ -175,14 +239,32 @@ fn index_directory(db: &mut Database, dir: &str, recursive: bool, quiet: bool) -
     info!("Scanning for image files...");
 
     let walker = if recursive {
-        WalkDir::new(dir).into_iter()
+        WalkDir::new(dir)
     } else {
-        WalkDir::new(dir).max_depth(1).into_iter()
+        WalkDir::new(dir).max_depth(1)
     };
 
     let mut image_files = Vec::new();
-    for entry in walker.filter_map(|e| e.ok()) {
+    let mut walker_iter = walker.into_iter();
+
+    while let Some(entry_result) = walker_iter.next() {
+        let entry = match entry_result {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+
         let path = entry.path();
+
+        // Check if this path should be ignored based on configuration
+        if config.should_ignore_path(path) {
+            debug!("Ignoring path due to config pattern: {}", path.display());
+
+            // If this is a directory, skip traversing into it entirely
+            if path.is_dir() {
+                walker_iter.skip_current_dir();
+            }
+            continue;
+        }
 
         if !path.is_file() {
             continue;
@@ -320,6 +402,7 @@ fn search_images(
     limit: usize,
     short: bool,
     recursive: bool,
+    all: bool,
 ) -> Result<()> {
     info!("Searching for: \"{}\"", prompt);
 
@@ -394,13 +477,15 @@ fn search_images(
             if recursive {
                 // For recursive search, check if the image is in current directory or any subdirectory
                 abs_path.starts_with(&current_dir_canonical)
-            } else {
+            } else if !all {
                 // For non-recursive search, check if the image is directly in current directory
                 if let Some(parent) = abs_path.parent() {
                     parent == current_dir_canonical
                 } else {
                     false
                 }
+            } else {
+                true
             }
         })
         .take(limit)
@@ -500,23 +585,51 @@ fn show_status(db: &Database, db_path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn normalize_vector(vector: &[f32]) -> Vec<f32> {
-    let magnitude: f32 = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if magnitude == 0.0 {
-        return vector.to_vec();
-    }
-    vector.iter().map(|x| x / magnitude).collect()
-}
+fn handle_config_command(config_command: ConfigCommands) -> Result<()> {
+    match config_command {
+        ConfigCommands::Show => {
+            let config = config::Config::load()?;
+            let config_path = config::Config::get_config_path()?;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_normalize_vector() {
-        let vector = vec![3.0, 4.0];
-        let normalized = normalize_vector(&vector);
-        let magnitude: f32 = normalized.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!((magnitude - 1.0).abs() < 1e-6);
+            println!("Configuration file: {}", config_path.display());
+            println!("Ignore patterns:");
+            if config.ignore_patterns.is_empty() {
+                println!("  (none)");
+            } else {
+                for (i, pattern) in config.ignore_patterns.iter().enumerate() {
+                    println!("  {}. {}", i + 1, pattern);
+                }
+            }
+        }
+        ConfigCommands::AddIgnore { pattern } => {
+            let mut config = config::Config::load()?;
+            if !config.ignore_patterns.contains(&pattern) {
+                config.ignore_patterns.push(pattern.clone());
+                config.save()?;
+                println!("Added ignore pattern: {}", pattern);
+            } else {
+                println!("Pattern already exists: {}", pattern);
+            }
+        }
+        ConfigCommands::RemoveIgnore { pattern } => {
+            let mut config = config::Config::load()?;
+            if let Some(index) = config.ignore_patterns.iter().position(|x| x == &pattern) {
+                config.ignore_patterns.remove(index);
+                config.save()?;
+                println!("Removed ignore pattern: {}", pattern);
+            } else {
+                println!("Pattern not found: {}", pattern);
+            }
+        }
+        ConfigCommands::Reset => {
+            let default_config = config::Config::default();
+            default_config.save()?;
+            println!("Configuration reset to defaults");
+            println!("Default ignore patterns:");
+            for (i, pattern) in default_config.ignore_patterns.iter().enumerate() {
+                println!("  {}. {}", i + 1, pattern);
+            }
+        }
     }
+    Ok(())
 }
