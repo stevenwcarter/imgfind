@@ -7,14 +7,36 @@ use super::{AppError, middleware};
 use crate::{
     context::GraphQLContext,
     search::{SearchEngine, normalize_vector},
+    thumbnail::get_or_generate_thumbnail,
 };
 
 pub fn routes(context: GraphQLContext) -> Router {
     Router::new()
         .route("/{search}", get(search))
         .route("/file/{*filename}", get(file))
+        .route("/thumb:{size}/{*filename}", get(thumb))
         .layer(Extension(context.clone()))
         .layer(middleware())
+}
+
+async fn thumb(
+    Extension(context): Extension<GraphQLContext>,
+    Path((size, filename)): Path<(String, String)>,
+) -> anyhow::Result<impl IntoResponse, AppError> {
+    let filename = format!("/{}", filename);
+    info!("Size: {}, Filename: {}", size, filename);
+
+    let size = size.parse::<u32>().unwrap_or(300);
+    let mut db = context.db.lock().unwrap();
+    
+    // Get the image hash from the database
+    let hash = db.get_image_hash(&filename)
+        .with_context(|| format!("Failed to get hash for image: {}", filename))?;
+    
+    // Generate or retrieve thumbnail
+    let thumbnail_bytes = get_or_generate_thumbnail(&mut db, &filename, &hash, size)?;
+
+    Ok(thumbnail_bytes)
 }
 
 async fn search(
@@ -44,16 +66,6 @@ async fn file(
 ) -> anyhow::Result<impl IntoResponse, AppError> {
     info!("Filename: {}", filename);
     let filename = format!("/{}", filename);
-    // let db = context.db.lock().unwrap();
-    // let mut stmt = db
-    //     .conn
-    //     .prepare("SELECT COUNT(*) FROM images WHERE path = ?1")?;
-    //
-    // let count: i64 = stmt.query_row(params![filename], |row| row.get(0))?;
-    //
-    // if count == 0 {
-    //     return Err(AppError(anyhow::anyhow!("File not found in database")));
-    // }
 
     Ok(std::fs::read(&filename).unwrap())
 }

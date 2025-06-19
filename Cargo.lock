@@ -620,7 +620,7 @@ dependencies = [
  "candle-transformers",
  "clap",
  "hf-hub",
- "image 0.25.6",
+ "image",
  "tokenizers",
 ]
 
@@ -1831,24 +1831,6 @@ dependencies = [
 
 [[package]]
 name = "image"
-version = "0.24.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5690139d2f55868e080017335e4b94cb7414274c74f1669c84fb5feba2c9f69d"
-dependencies = [
- "bytemuck",
- "byteorder",
- "color_quant",
- "exr",
- "gif",
- "jpeg-decoder",
- "num-traits",
- "png",
- "qoi",
- "tiff",
-]
-
-[[package]]
-name = "image"
 version = "0.25.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db35664ce6b9810857a38a906215e75a9c879f0696556a39f59c62829710251a"
@@ -1892,13 +1874,14 @@ dependencies = [
  "diesel",
  "diesel_migrations",
  "dirs",
- "image 0.24.9",
+ "image",
  "indicatif",
  "juniper",
  "juniper_axum",
  "log",
  "mime_guess",
  "oshash",
+ "rayon",
  "regex",
  "rusqlite",
  "rust-embed",
@@ -2026,9 +2009,6 @@ name = "jpeg-decoder"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f5d4a7da358eff58addd2877a45865158f0d78c911d43a5784ceb7bbf52833b0"
-dependencies = [
- "rayon",
-]
 
 [[package]]
 name = "js-sys"

@@ -1,5 +1,43 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import Lightbox from 'yet-another-react-lightbox';
+import Zoom from 'yet-another-react-lightbox/plugins/zoom';
+import 'yet-another-react-lightbox/styles.css';
+
+const LightboxViewer = (props) => {
+  const { image } = props;
+  const [isOpen, setIsOpen] = useState(false);
+
+  const zoomRef = useRef(null);
+
+  const handleClick = (e: any) => {
+    if (e.ctrlKey) {
+      window.open(props.mainSrc, '_blank');
+    } else {
+      setIsOpen(true);
+    }
+  };
+
+  // TODO - update this to dynamically set size
+  return (
+    <div className={`flex justify-center`}>
+      <img
+        className="w-[250px] object-scale-down cursor-pointer hover:opacity-80 transition-opacity rounded-lg shadow-md"
+        src={`/api/v1/search/thumb:300/${image[0]}`}
+        alt={`${image[0]}`}
+        onClick={() => handleClick(image[0])}
+      />
+      <Lightbox
+        plugins={[Zoom]}
+        zoom={{ ref: zoomRef, scrollToZoom: true, maxZoomPixelRatio: 2 }}
+        open={isOpen}
+        slides={[{ src: `/api/v1/search/file/${image[0]}` }]}
+        // mainSrcThumbnail={props.mainSrcThumbnail}
+        close={() => setIsOpen(false)}
+      />
+    </div>
+  );
+};
 
 export const Images = () => {
   const [search, setSearch] = useSearchParams();
@@ -13,19 +51,8 @@ export const Images = () => {
     }
   };
 
-  const handleImageClick = (imagePath: string) => {
-    setSelectedImage(imagePath);
-  };
-
   const closeModal = () => {
     setSelectedImage(null);
-  };
-
-  const handleModalClick = (event: React.MouseEvent<HTMLDivElement>) => {
-    // Close modal if clicking on the backdrop (not the image)
-    if (event.target === event.currentTarget) {
-      closeModal();
-    }
   };
 
   // Handle escape key to close modal
@@ -90,43 +117,11 @@ export const Images = () => {
           images.length > 0 &&
           images.map((image) => (
             <div className="flex flex-col justify-center" key={image[0]}>
-              <img
-                className="w-[250px] object-scale-down cursor-pointer hover:opacity-80 transition-opacity rounded-lg shadow-md"
-                src={`/api/v1/search/file/${image[0]}`}
-                alt={`${image[0]}`}
-                onClick={() => handleImageClick(image[0])}
-              />
-              <span>{image[1]}</span>
+              <LightboxViewer image={image} />
             </div>
           ))}
       </div>
       <p>end images</p>
-
-      {/* Modal */}
-      {selectedImage && (
-        <div
-          className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50"
-          onClick={handleModalClick}
-        >
-          <div className="relative max-w-[90vw] max-h-[90vh] flex items-center justify-center">
-            {/* Close button */}
-            <button
-              className="absolute top-4 right-4 text-white text-2xl font-bold bg-black bg-opacity-50 rounded-full w-8 h-8 flex items-center justify-center hover:bg-opacity-75 transition-colors z-10"
-              onClick={closeModal}
-              aria-label="Close modal"
-            >
-              ×
-            </button>
-
-            {/* Modal image */}
-            <img
-              className="max-w-full max-h-full object-scale-down rounded-lg"
-              src={`/api/v1/search/file/${selectedImage}`}
-              alt={selectedImage}
-            />
-          </div>
-        </div>
-      )}
     </div>
   );
 };

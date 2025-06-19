@@ -1,20 +1,19 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use clipper::ClipEmbedder;
-use dirs::home_dir;
-use imgfind::config;
 use imgfind::context::GraphQLContext;
+use imgfind::{config, get_db_path, get_local_db_path};
 use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, info, warn};
 use oshash::oshash;
 use std::collections::HashSet;
-use std::fs;
 use std::path::PathBuf;
 use walkdir::WalkDir;
 
 use imgfind::database::Database;
 use imgfind::routes::app;
 use imgfind::search::{SearchEngine, normalize_vector};
+use imgfind::thumbnail::generate_missing_thumbnails_batch;
 
 #[derive(Parser)]
 #[command(name = "imgfind")]
@@ -67,6 +66,15 @@ enum Commands {
     Config {
         #[command(subcommand)]
         config_command: ConfigCommands,
+    },
+    /// Generate thumbnails in batches
+    Thumbnails {
+        /// Thumbnail size (default: 300)
+        #[arg(short, long, default_value_t = 300)]
+        size: u32,
+        /// Number of thumbnails to generate in this batch (default: 50)
+        #[arg(short, long, default_value_t = 50)]
+        count: usize,
     },
     Serve,
 }
@@ -134,6 +142,11 @@ async fn main() -> Result<()> {
         Commands::Config { config_command } => {
             handle_config_command(config_command)?;
         }
+        Commands::Thumbnails { size, count } => {
+            let db_path = get_db_path()?;
+            let mut db = Database::new(&db_path)?;
+            generate_thumbnails_batch(&mut db, size, count)?;
+        }
         Commands::Serve => {
             let db_path = get_db_path()?;
             let db = Database::new(&db_path)?;
@@ -162,38 +175,6 @@ async fn serve(db: Database) -> Result<()> {
     server.await.expect("Server failed to start");
 
     Ok(())
-}
-
-fn get_db_path() -> Result<PathBuf> {
-    // First, try to find existing database by walking up directory tree
-    let mut current_dir = std::env::current_dir()?;
-
-    loop {
-        let potential_db = current_dir.join(".imgfind").join("imgfind.db");
-        if potential_db.exists() {
-            return Ok(potential_db);
-        }
-
-        if let Some(parent) = current_dir.parent() {
-            current_dir = parent.to_path_buf();
-        } else {
-            break;
-        }
-    }
-
-    // Default to ~/.imgfind/imgfind.db
-    let home = home_dir().context("Could not find home directory")?;
-    let imgfind_dir = home.join(".imgfind");
-    fs::create_dir_all(&imgfind_dir)?;
-    Ok(imgfind_dir.join("imgfind.db"))
-}
-
-fn get_local_db_path() -> Result<PathBuf> {
-    // Create .imgfind directory in current directory
-    let current_dir = std::env::current_dir()?;
-    let imgfind_dir = current_dir.join(".imgfind");
-    fs::create_dir_all(&imgfind_dir)?;
-    Ok(imgfind_dir.join("imgfind.db"))
 }
 
 fn index_directory(db: &mut Database, dir: &str, recursive: bool, quiet: bool) -> Result<()> {
@@ -631,5 +612,34 @@ fn handle_config_command(config_command: ConfigCommands) -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+/// Generate thumbnails in batches for images that don't have cached thumbnails
+fn generate_thumbnails_batch(db: &mut Database, size: u32, count: usize) -> Result<()> {
+    info!(
+        "Starting thumbnail generation: size={}px, batch_count={}",
+        size, count
+    );
+
+    let generated = generate_missing_thumbnails_batch(db, size, count)
+        .context("Failed to generate thumbnails")?;
+
+    if generated == 0 {
+        println!("No images found that need thumbnails of size {}px", size);
+    } else {
+        println!("Generated {} thumbnails of size {}px", generated, size);
+
+        // Check if there are more images that need thumbnails
+        let remaining = db.count_images_without_thumbnails(size)?;
+        if remaining != 0 {
+            println!(
+                "There are more images without thumbnails ({remaining}). Run the command again to generate more.",
+            );
+        } else {
+            println!("All images now have thumbnails of size {}px", size);
+        }
+    }
+
     Ok(())
 }

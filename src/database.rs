@@ -62,6 +62,25 @@ impl Database {
             [],
         )?;
 
+        // Create thumbnails table for caching resized images
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS thumbnails (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                image_hash TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                thumbnail_data BLOB NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(image_hash, size)
+            )",
+            [],
+        )?;
+
+        // Create index on hash and size for faster thumbnail lookups
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_thumbnails_hash_size ON thumbnails(image_hash, size)",
+            [],
+        )?;
+
         Ok(())
     }
 
@@ -218,5 +237,85 @@ impl Database {
     #[allow(dead_code)]
     pub fn get_connection(&self) -> &Connection {
         &self.conn
+    }
+
+    /// Insert a thumbnail into the database cache
+    pub fn insert_thumbnail(
+        &mut self,
+        image_hash: &str,
+        size: u32,
+        thumbnail_data: &[u8],
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO thumbnails (image_hash, size, thumbnail_data) VALUES (?1, ?2, ?3)",
+            params![image_hash, size as i64, thumbnail_data],
+        )?;
+        Ok(())
+    }
+
+    /// Get a thumbnail from the database cache
+    pub fn get_thumbnail(&self, image_hash: &str, size: u32) -> Result<Vec<u8>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT thumbnail_data FROM thumbnails WHERE image_hash = ?1 AND size = ?2")?;
+
+        let thumbnail_data: Vec<u8> =
+            stmt.query_row(params![image_hash, size as i64], |row| row.get(0))?;
+
+        Ok(thumbnail_data)
+    }
+
+    /// Get the hash for an image by its path
+    pub fn get_image_hash(&self, path: &str) -> Result<String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT hash FROM images WHERE path = ?1")?;
+        let hash: String = stmt.query_row(params![path], |row| row.get(0))?;
+        Ok(hash)
+    }
+
+    /// Get images that don't have thumbnails of a specific size
+    /// Returns a list of (path, hash) tuples for images missing thumbnails
+    pub fn get_images_without_thumbnails(
+        &self,
+        size: u32,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>> {
+        let query = "
+            SELECT i.path, i.hash 
+            FROM images i 
+            LEFT JOIN thumbnails t ON i.hash = t.image_hash AND t.size = ?1
+            WHERE t.id IS NULL
+            LIMIT ?2
+        ";
+
+        let mut stmt = self.conn.prepare(query)?;
+        let results = stmt.query_map(params![size as i64, limit], |row| {
+            let path: String = row.get(0)?;
+            let hash: String = row.get(1)?;
+            Ok((path, hash))
+        })?;
+
+        let mut images = Vec::new();
+        for result in results {
+            images.push(result?);
+        }
+
+        Ok(images)
+    }
+    /// Count images that don't have thumbnails of a specific size
+    /// Returns the count of images missing thumbnails
+    pub fn count_images_without_thumbnails(&self, size: u32) -> Result<usize> {
+        let query = "
+            SELECT COUNT(*)
+            FROM images i 
+            LEFT JOIN thumbnails t ON i.hash = t.image_hash AND t.size = ?1
+            WHERE t.id IS NULL
+        ";
+
+        let mut stmt = self.conn.prepare(query)?;
+        stmt.query_row(params![size as i64], |row| row.get(0))
+            .context("Failed to count images without thumbnails")
+            .map(|count: i64| count as usize)
     }
 }
