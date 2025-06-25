@@ -4,6 +4,8 @@ import { useSearchParams } from 'react-router-dom';
 import Lightbox from 'yet-another-react-lightbox';
 import Zoom from 'yet-another-react-lightbox/plugins/zoom';
 import 'yet-another-react-lightbox/styles.css';
+import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
+import { faTimesCircle } from '@fortawesome/free-solid-svg-icons';
 
 const LightboxViewer = (props) => {
   const { image } = props;
@@ -121,14 +123,24 @@ export const Images = () => {
   return (
     <div>
       <h1 className="mb-4">imgfind</h1>
-      <input
-        type="text"
-        value={query}
-        className="border border-gray-300 rounded p-2 mb-4 bg-gray-600 text-white"
-        onChange={(event) => setQuery(event.currentTarget.value)}
-        onKeyUp={handleKeyUp}
-        placeholder="Search images..."
-      />
+      <div className="relative max-w-[200px] items-center">
+        <input
+          type="text"
+          value={query}
+          className="w-full border border-gray-300 rounded p-2 mb-4 bg-gray-600 text-white"
+          onChange={(event) => setQuery(event.currentTarget.value)}
+          onKeyUp={handleKeyUp}
+          placeholder="Search images..."
+        />
+        {query !== '' && (
+          <FontAwesomeIcon
+            icon={faTimesCircle}
+            className="absolute right-2 top-3 cursor-pointer hover:scale-125"
+            onClick={() => setQuery('')}
+          />
+        )}
+      </div>
+
       <div className="flex flex-wrap gap-4 p-4">
         {images &&
           images.length > 0 &&

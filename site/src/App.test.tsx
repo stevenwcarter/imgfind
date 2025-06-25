@@ -7,7 +7,7 @@ describe('AxumReactStarter', () => {
     render(<App />);
 
     await waitFor(async () => {
-      const h1 = screen.getByText('Clients');
+      const h1 = screen.getByText('imgfind');
 
       expect(h1).toBeInTheDocument();
     });
