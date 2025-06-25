@@ -8,6 +8,9 @@ pub struct Database {
     pub conn: Connection,
 }
 
+// https://chatgpt.com/c/6854c675-e160-800d-a033-fe236a615de4
+// TODO: Add extension load for diesel
+
 impl Database {
     pub fn new(db_path: &Path) -> Result<Self> {
         // Initialize sqlite-vec extension

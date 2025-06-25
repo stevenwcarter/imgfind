@@ -23,16 +23,23 @@ async fn thumb(
     Extension(context): Extension<GraphQLContext>,
     Path((size, filename)): Path<(String, String)>,
 ) -> anyhow::Result<impl IntoResponse, AppError> {
-    let filename = format!("/{}", filename);
+    let filename = match filename.starts_with("/") {
+        true => filename,
+        false => {
+            // If the filename does not start with '/', prepend it
+            format!("/{}", filename)
+        }
+    };
     info!("Size: {}, Filename: {}", size, filename);
 
     let size = size.parse::<u32>().unwrap_or(300);
     let mut db = context.db.lock().unwrap();
-    
+
     // Get the image hash from the database
-    let hash = db.get_image_hash(&filename)
+    let hash = db
+        .get_image_hash(&filename)
         .with_context(|| format!("Failed to get hash for image: {}", filename))?;
-    
+
     // Generate or retrieve thumbnail
     let thumbnail_bytes = get_or_generate_thumbnail(&mut db, &filename, &hash, size)?;
 
@@ -65,7 +72,14 @@ async fn file(
     Path(filename): Path<String>,
 ) -> anyhow::Result<impl IntoResponse, AppError> {
     info!("Filename: {}", filename);
-    let filename = format!("/{}", filename);
+
+    let filename = match filename.starts_with("/") {
+        true => filename,
+        false => {
+            // If the filename does not start with '/', prepend it
+            format!("/{}", filename)
+        }
+    };
 
     Ok(std::fs::read(&filename).unwrap())
 }

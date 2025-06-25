@@ -1,3 +1,4 @@
+import clsx from 'clsx';
 import { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import Lightbox from 'yet-another-react-lightbox';
@@ -18,15 +19,31 @@ const LightboxViewer = (props) => {
     }
   };
 
+  const classes = clsx(
+    'max-w-[300px] max-h-[300px]',
+    'object-scale-down',
+    'cursor-pointer',
+    'hover:opacity-80',
+    'transition-all ease-in-out duration-100',
+    'rounded-lg',
+    'shadow-md hover:shadow-white',
+    'hover:scale-105',
+  );
+
   // TODO - update this to dynamically set size
   return (
-    <div className={`flex justify-center`}>
-      <img
-        className="w-[250px] object-scale-down cursor-pointer hover:opacity-80 transition-opacity rounded-lg shadow-md"
-        src={`/api/v1/search/thumb:300/${image[0]}`}
-        alt={`${image[0]}`}
-        onClick={() => handleClick(image[0])}
-      />
+    <div className={`flex justify-center items-center`}>
+      <div className="relative group">
+        <img
+          className={classes}
+          src={`/api/v1/search/thumb:300/${image[0]}`}
+          alt={`${image[0]}`}
+          onClick={() => handleClick(image[0])}
+        />
+        <span className="absolute bottom-0.5 right-2 opacity-0 group-hover:opacity-80 transition-opacity">
+          {image[1]}
+        </span>
+      </div>
       <Lightbox
         plugins={[Zoom]}
         zoom={{ ref: zoomRef, scrollToZoom: true, maxZoomPixelRatio: 2 }}
@@ -103,25 +120,20 @@ export const Images = () => {
 
   return (
     <div>
-      <h1>Images Page</h1>
+      <h1 className="mb-4">imgfind</h1>
       <input
         type="text"
         value={query}
+        className="border border-gray-300 rounded p-2 mb-4 bg-gray-600 text-white"
         onChange={(event) => setQuery(event.currentTarget.value)}
         onKeyUp={handleKeyUp}
         placeholder="Search images..."
       />
-      <p>This is the images page content.</p>
       <div className="flex flex-wrap gap-4 p-4">
         {images &&
           images.length > 0 &&
-          images.map((image) => (
-            <div className="flex flex-col justify-center" key={image[0]}>
-              <LightboxViewer image={image} />
-            </div>
-          ))}
+          images.map((image) => <LightboxViewer key={image[0]} image={image} />)}
       </div>
-      <p>end images</p>
     </div>
   );
 };
