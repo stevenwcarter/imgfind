@@ -6,6 +6,7 @@ use imgfind::{config, get_db_path, get_local_db_path};
 use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, info, warn};
 use oshash::oshash;
+use rayon::prelude::*;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use walkdir::WalkDir;
@@ -54,6 +55,11 @@ enum Commands {
         /// Search recursively in subdirectories
         #[arg(short, long)]
         recursive: bool,
+
+        /// Display image results
+        #[arg(short, long)]
+        display: bool,
+
         /// Search all images in the database
         #[arg(short, long)]
         all: bool,
@@ -124,10 +130,11 @@ async fn main() -> Result<()> {
             short,
             recursive,
             all,
+            display,
         } => {
             let db_path = get_db_path()?;
             let db = Database::new(&db_path)?;
-            search_images(&db, &prompt, limit, short, recursive, all)?;
+            search_images(&db, &prompt, limit, short, recursive, all, display)?;
         }
         Commands::Clean => {
             let db_path = get_db_path()?;
@@ -384,6 +391,7 @@ fn search_images(
     short: bool,
     recursive: bool,
     all: bool,
+    display: bool,
 ) -> Result<()> {
     info!("Searching for: \"{}\"", prompt);
 
@@ -496,6 +504,9 @@ fn search_images(
         // Short format: just output paths, one per line
         for (path, _score) in filtered_results.iter() {
             println!("{}", path);
+            if display {
+                print_image(path).context("Failed to display image")?;
+            }
         }
     } else {
         // Standard format: detailed output with scores
@@ -514,10 +525,26 @@ fn search_images(
 
         for (i, (path, score)) in filtered_results.iter().enumerate() {
             println!("{:3}. {:<60} (similarity: {:.4})", i + 1, path, score);
+            if display {
+                print_image(path).context("Failed to display image")?;
+            }
         }
 
         println!();
     }
+
+    Ok(())
+}
+
+fn print_image(path: &str) -> Result<()> {
+    let bytes = std::fs::read(path).context("Failed to read image file for display")?;
+    let image = iterm2img::from_bytes(bytes)
+        .width_auto()
+        .height_percent(33)
+        .preserve_aspect_ratio(true)
+        .inline(true)
+        .build();
+    println!("{}", image);
 
     Ok(())
 }
