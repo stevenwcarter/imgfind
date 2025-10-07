@@ -44,7 +44,8 @@ pub fn generate_missing_thumbnails_batch(
                     log::info!("Generated thumbnail for: {}", path);
                 }
                 Err(e) => {
-                    log::warn!("Failed to generate thumbnail for {}: {}", path, e);
+                    panic!("Error {e}");
+                    // log::warn!("Failed to generate thumbnail for {}: {}", path, e);
                     // Continue with the next image instead of failing the entire batch
                 }
             }

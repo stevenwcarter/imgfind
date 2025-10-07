@@ -6,7 +6,6 @@ use imgfind::{config, get_db_path, get_local_db_path};
 use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, info, warn};
 use oshash::oshash;
-use rayon::prelude::*;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use walkdir::WalkDir;
