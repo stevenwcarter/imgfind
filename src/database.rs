@@ -1,11 +1,14 @@
 use anyhow::{Context, Result};
-use rusqlite::{Connection, ffi::sqlite3_auto_extension, params};
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
+use rusqlite::{ffi::sqlite3_auto_extension, params};
 use sqlite_vec::sqlite3_vec_init;
-use std::{path::Path, sync::Mutex};
+use std::path::Path;
 use zerocopy::AsBytes;
 
+#[derive(Debug, Clone)]
 pub struct Database {
-    pub conn: Mutex<Connection>,
+    pub pool: Pool<SqliteConnectionManager>,
 }
 
 // https://chatgpt.com/c/6854c675-e160-800d-a033-fe236a615de4
@@ -15,19 +18,14 @@ impl Database {
     pub fn new(db_path: &Path) -> Result<Self> {
         // Initialize sqlite-vec extension
         unsafe {
-            sqlite3_auto_extension(Some(
-                std::mem::transmute::<*const (), unsafe extern "C" fn()>(
-                    sqlite3_vec_init as *const (),
-                ),
-            ));
+            sqlite3_auto_extension(Some(std::mem::transmute(sqlite3_vec_init as *const ())));
         }
 
-        let conn = Connection::open(db_path)
+        let manager = SqliteConnectionManager::file(db_path);
+        let pool = r2d2::Pool::new(manager)
             .with_context(|| format!("Failed to open database at {:?}", db_path))?;
 
-        let mut db = Database {
-            conn: Mutex::new(conn),
-        };
+        let mut db = Database { pool };
         db.initialize_schema()?;
         Ok(db)
     }
@@ -35,7 +33,7 @@ impl Database {
     fn initialize_schema(&mut self) -> Result<()> {
         // Enable foreign keys
 
-        let conn = self.conn.lock().unwrap();
+        let conn = self.pool.get().context("Failed to get DB connection")?;
         conn.execute("PRAGMA foreign_keys = ON;", [])?;
 
         // Create images table
@@ -93,41 +91,49 @@ impl Database {
 
     pub fn insert_image(&mut self, path: &str, hash: &str, embedding: &[f32]) -> Result<()> {
         // Start a transaction for consistency
-        let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
+        {
+            let mut conn = self
+                .pool
+                .get()
+                .context("Failed to get DB connection to insert image")?;
+            let tx = conn.transaction()?;
 
-        // Insert into images table
-        tx.execute(
-            "INSERT OR REPLACE INTO images (path, hash) VALUES (?1, ?2)",
-            params![path, hash],
-        )?;
+            // Insert into images table
+            tx.execute(
+                "INSERT OR REPLACE INTO images (path, hash) VALUES (?1, ?2)",
+                params![path, hash],
+            )?;
 
-        // Get the image ID
-        let image_id: i64 = tx.query_row(
-            "SELECT id FROM images WHERE path = ?1",
-            params![path],
-            |row| row.get(0),
-        )?;
+            // Get the image ID
+            let image_id: i64 = tx.query_row(
+                "SELECT id FROM images WHERE path = ?1",
+                params![path],
+                |row| row.get(0),
+            )?;
 
-        // Insert into vector table using sqlite-vec
-        // First delete any existing vector for this image
-        tx.execute(
-            "DELETE FROM image_vectors WHERE rowid = ?1",
-            params![image_id],
-        )?;
+            // Insert into vector table using sqlite-vec
+            // First delete any existing vector for this image
+            tx.execute(
+                "DELETE FROM image_vectors WHERE rowid = ?1",
+                params![image_id],
+            )?;
 
-        // Insert the new vector using zerocopy for efficiency
-        tx.execute(
-            "INSERT INTO image_vectors (rowid, embedding) VALUES (?1, ?2)",
-            params![image_id, embedding.as_bytes()],
-        )?;
+            // Insert the new vector using zerocopy for efficiency
+            tx.execute(
+                "INSERT INTO image_vectors (rowid, embedding) VALUES (?1, ?2)",
+                params![image_id, embedding.as_bytes()],
+            )?;
 
-        tx.commit()?;
+            tx.commit()?;
+        }
         Ok(())
     }
 
     pub fn is_image_indexed(&self, path: &str, hash: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self
+            .pool
+            .get()
+            .context("Failed to get DB connection to check if image is indexed")?;
         let mut stmt = conn.prepare("SELECT COUNT(*) FROM images WHERE path = ?1 AND hash = ?2")?;
 
         let count: i64 = stmt.query_row(params![path, hash], |row| row.get(0))?;
@@ -152,7 +158,10 @@ impl Database {
              ORDER BY distance LIMIT {k}"
         );
 
-        let conn = self.conn.lock().unwrap();
+        let conn = self
+            .pool
+            .get()
+            .context("Failed to get DB connection for searching similar images")?;
         let mut stmt = conn.prepare(&query)?;
 
         let results = stmt.query_map(params![query_embedding.as_bytes()], |row| {
@@ -175,7 +184,10 @@ impl Database {
 
     pub fn clean_missing_files(&mut self) -> Result<usize> {
         // Get all paths from database
-        let conn = self.conn.lock().unwrap();
+        let conn = self
+            .pool
+            .get()
+            .context("Failed to get DB connection to clean missing files")?;
         let mut stmt = conn.prepare("SELECT id, path FROM images")?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
@@ -206,7 +218,10 @@ impl Database {
 
         // Delete missing files from both tables
         let mut removed_count = 0;
-        let conn = self.conn.lock().unwrap();
+        let conn = self
+            .pool
+            .get()
+            .context("Failed to get DB connection to delete missing files")?;
         for id in to_delete {
             // Delete from vector table first
             conn.execute("DELETE FROM image_vectors WHERE rowid = ?1", params![id])?;
@@ -219,14 +234,20 @@ impl Database {
     }
 
     pub fn get_image_count(&self) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self
+            .pool
+            .get()
+            .context("Failed to get DB connection to count images")?;
         let mut stmt = conn.prepare("SELECT COUNT(*) FROM images")?;
         let count: i64 = stmt.query_row([], |row| row.get(0))?;
         Ok(count)
     }
 
     pub fn get_sample_images(&self, limit: usize) -> Result<Vec<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self
+            .pool
+            .get()
+            .context("Failed to get DB connection to get sample images")?;
         let mut stmt = conn.prepare("SELECT path FROM images ORDER BY created_at DESC LIMIT ?1")?;
 
         let image_iter = stmt.query_map([limit], |row| {
@@ -254,16 +275,23 @@ impl Database {
         size: u32,
         thumbnail_data: &[u8],
     ) -> Result<()> {
-        self.conn.lock().unwrap().execute(
+        let conn = self
+            .pool
+            .get()
+            .context("Failed to get DB connection to insert thumbnail")?;
+        conn.execute(
             "INSERT OR REPLACE INTO thumbnails (image_hash, size, thumbnail_data) VALUES (?1, ?2, ?3)",
             params![image_hash, size as i64, thumbnail_data],
-        )?;
+        ).context("failed to insert or replace")?;
         Ok(())
     }
 
     /// Get a thumbnail from the database cache
     pub fn get_thumbnail(&self, image_hash: &str, size: u32) -> Result<Vec<u8>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self
+            .pool
+            .get()
+            .context("Failed to get DB connection to get thumbnail")?;
         let mut stmt = conn
             .prepare("SELECT thumbnail_data FROM thumbnails WHERE image_hash = ?1 AND size = ?2")?;
 
@@ -275,7 +303,10 @@ impl Database {
 
     /// Get the hash for an image by its path
     pub fn get_image_hash(&self, path: &str) -> Result<String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self
+            .pool
+            .get()
+            .context("Failed to get DB connection to get image hash")?;
         let mut stmt = conn.prepare("SELECT hash FROM images WHERE path = ?1")?;
         let hash: String = stmt.query_row(params![path], |row| row.get(0))?;
         Ok(hash)
@@ -297,7 +328,10 @@ impl Database {
         ";
 
         let images = {
-            let conn = self.conn.lock().unwrap();
+            let conn = self
+                .pool
+                .get()
+                .context("Failed to get DB connection for getting images without thumbnails")?;
             let mut stmt = conn.prepare(query)?;
             let results = stmt.query_map(params![size as i64, limit], |row| {
                 let path: String = row.get(0)?;
@@ -325,7 +359,10 @@ impl Database {
             WHERE t.id IS NULL
         ";
 
-        let conn = self.conn.lock().unwrap();
+        let conn = self
+            .pool
+            .get()
+            .context("Failed to get DB connection for counting images without thumbnails")?;
         let mut stmt = conn.prepare(query)?;
         stmt.query_row(params![size as i64], |row| row.get(0))
             .context("Failed to count images without thumbnails")

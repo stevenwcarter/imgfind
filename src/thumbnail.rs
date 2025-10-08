@@ -33,36 +33,23 @@ pub fn generate_missing_thumbnails_batch(
 
     let generated_count: AtomicUsize = AtomicUsize::new(0);
 
+    let db_path = get_db_path().unwrap();
+    let db = Database::new(&db_path).unwrap();
+
     images_without_thumbnails
         .par_iter()
         .for_each(|(path, hash)| {
-            let db_path = get_db_path().unwrap();
-            let mut db = Database::new(&db_path).unwrap();
-            match generate_and_store_thumbnail(&mut db, path, hash, size) {
+            match generate_and_store_thumbnail(&mut db.clone(), path, hash, size) {
                 Ok(_) => {
                     generated_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     log::info!("Generated thumbnail for: {}", path);
                 }
                 Err(e) => {
-                    panic!("Error {e}");
-                    // log::warn!("Failed to generate thumbnail for {}: {}", path, e);
+                    log::warn!("Failed to generate thumbnail for {}: {:?}", path, e);
                     // Continue with the next image instead of failing the entire batch
                 }
             }
         });
-    //
-    // for (path, hash) in images_without_thumbnails.par_iter() {
-    //     match generate_and_store_thumbnail(db, &path, &hash, size) {
-    //         Ok(_) => {
-    //             generated_count += 1;
-    //             log::info!("Generated thumbnail for: {}", path);
-    //         }
-    //         Err(e) => {
-    //             log::warn!("Failed to generate thumbnail for {}: {}", path, e);
-    //             // Continue with the next image instead of failing the entire batch
-    //         }
-    //     }
-    // }
 
     Ok(generated_count.into_inner())
 }
