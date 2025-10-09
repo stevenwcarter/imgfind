@@ -23,13 +23,6 @@ async fn thumb(
     Extension(context): Extension<GraphQLContext>,
     Path((size, filename)): Path<(String, String)>,
 ) -> anyhow::Result<impl IntoResponse, AppError> {
-    let filename = match filename.starts_with("/") {
-        true => filename,
-        false => {
-            // If the filename does not start with '/', prepend it
-            format!("/{}", filename)
-        }
-    };
     info!("Size: {}, Filename: {}", size, filename);
 
     let size = size.parse::<u32>().unwrap_or(300);
@@ -72,14 +65,6 @@ async fn file(
     Path(filename): Path<String>,
 ) -> anyhow::Result<impl IntoResponse, AppError> {
     info!("Filename: {}", filename);
-
-    let filename = match filename.starts_with("/") {
-        true => filename,
-        false => {
-            // If the filename does not start with '/', prepend it
-            format!("/{}", filename)
-        }
-    };
 
     Ok(std::fs::read(&filename).unwrap())
 }

@@ -429,32 +429,8 @@ fn search_images(
         .filter(|(path, _score)| {
             let path_buf = std::path::Path::new(path);
 
-            // Convert stored path to absolute path for comparison
-            let abs_path = if path_buf.is_absolute() {
-                path_buf.to_path_buf()
-            } else {
-                // For relative paths, they were stored relative to some working directory
-                // Try to resolve against current directory first, then against likely project root
-                let current_resolved = current_dir.join(path_buf);
-                if current_resolved.exists() {
-                    current_resolved
-                } else {
-                    // Try resolving from potential project root locations
-                    let mut search_dir = current_dir.clone();
-                    loop {
-                        let candidate = search_dir.join(path_buf);
-                        if candidate.exists() {
-                            break candidate;
-                        }
-                        if let Some(parent) = search_dir.parent() {
-                            search_dir = parent.to_path_buf();
-                        } else {
-                            // Fallback to current directory resolution
-                            break current_resolved;
-                        }
-                    }
-                }
-            };
+            // The paths returned from the database are already absolute paths
+            let abs_path = path_buf.to_path_buf();
 
             // Canonicalize paths to handle . and .. components and get absolute paths
             let abs_path = abs_path.canonicalize().unwrap_or(abs_path);
@@ -462,18 +438,19 @@ fn search_images(
                 .canonicalize()
                 .unwrap_or_else(|_| current_dir.clone());
 
-            if recursive {
+            if all {
+                // For --all flag, include all results regardless of location
+                true
+            } else if recursive {
                 // For recursive search, check if the image is in current directory or any subdirectory
                 abs_path.starts_with(&current_dir_canonical)
-            } else if !all {
+            } else {
                 // For non-recursive search, check if the image is directly in current directory
                 if let Some(parent) = abs_path.parent() {
                     parent == current_dir_canonical
                 } else {
                     false
                 }
-            } else {
-                true
             }
         })
         .take(limit)

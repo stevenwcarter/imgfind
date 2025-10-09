@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use dirs::home_dir;
-use std::{fs, path::PathBuf};
+use std::{fs, path::{Path, PathBuf}};
 
 pub mod api;
 pub mod config;
@@ -41,4 +41,40 @@ pub fn get_local_db_path() -> Result<PathBuf> {
     let imgfind_dir = current_dir.join(".imgfind");
     fs::create_dir_all(&imgfind_dir)?;
     Ok(imgfind_dir.join("imgfind.db"))
+}
+
+/// Get the parent directory where the database is located
+/// This is the directory that contains the .imgfind folder
+pub fn get_db_parent_dir(db_path: &Path) -> Result<PathBuf> {
+    // The database path is something like /path/to/parent/.imgfind/imgfind.db
+    // We want to return /path/to/parent
+    
+    // Handle the case where the database file doesn't exist yet
+    let imgfind_dir = db_path.parent()
+        .context("Database path has no parent directory")?;
+    
+    // Verify that this is indeed an .imgfind directory
+    if imgfind_dir.file_name().and_then(|name| name.to_str()) != Some(".imgfind") {
+        return Err(anyhow::anyhow!(
+            "Database path is not in expected .imgfind directory structure: {:?}", 
+            db_path
+        ));
+    }
+    
+    let parent_dir = imgfind_dir.parent()
+        .context(".imgfind directory has no parent")?;
+    
+    Ok(parent_dir.to_path_buf())
+}
+
+/// Convert an absolute path to a path relative to the database parent directory
+pub fn abs_to_relative_path(abs_path: &Path, db_parent: &Path) -> Result<PathBuf> {
+    abs_path.strip_prefix(db_parent)
+        .map(|p| p.to_path_buf())
+        .context("Path is not within database parent directory")
+}
+
+/// Convert a relative path (stored in database) to an absolute path
+pub fn relative_to_abs_path(rel_path: &Path, db_parent: &Path) -> PathBuf {
+    db_parent.join(rel_path)
 }

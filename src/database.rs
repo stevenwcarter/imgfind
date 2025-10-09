@@ -1,14 +1,17 @@
+use crate::{abs_to_relative_path, get_db_parent_dir, relative_to_abs_path};
 use anyhow::{Context, Result};
+use base64::{Engine as _, engine::general_purpose};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{ffi::sqlite3_auto_extension, params};
 use sqlite_vec::sqlite3_vec_init;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use zerocopy::AsBytes;
 
 #[derive(Debug, Clone)]
 pub struct Database {
     pub pool: Pool<SqliteConnectionManager>,
+    pub parent_dir: PathBuf,
 }
 
 // https://chatgpt.com/c/6854c675-e160-800d-a033-fe236a615de4
@@ -25,7 +28,8 @@ impl Database {
         let pool = r2d2::Pool::new(manager)
             .with_context(|| format!("Failed to open database at {:?}", db_path))?;
 
-        let mut db = Database { pool };
+        let parent_dir = get_db_parent_dir(db_path)?;
+        let mut db = Database { pool, parent_dir };
         db.initialize_schema()?;
         Ok(db)
     }
@@ -90,6 +94,12 @@ impl Database {
     }
 
     pub fn insert_image(&mut self, path: &str, hash: &str, embedding: &[f32]) -> Result<()> {
+        // Convert absolute path to relative path for storage
+        let abs_path = Path::new(path);
+        let rel_path = abs_to_relative_path(abs_path, &self.parent_dir)
+            .with_context(|| format!("Failed to convert path {} to relative path", path))?;
+        let rel_path_str = rel_path.to_string_lossy();
+
         // Start a transaction for consistency
         {
             let mut conn = self
@@ -98,16 +108,16 @@ impl Database {
                 .context("Failed to get DB connection to insert image")?;
             let tx = conn.transaction()?;
 
-            // Insert into images table
+            // Insert into images table with relative path
             tx.execute(
                 "INSERT OR REPLACE INTO images (path, hash) VALUES (?1, ?2)",
-                params![path, hash],
+                params![rel_path_str.as_ref(), hash],
             )?;
 
             // Get the image ID
             let image_id: i64 = tx.query_row(
                 "SELECT id FROM images WHERE path = ?1",
-                params![path],
+                params![rel_path_str.as_ref()],
                 |row| row.get(0),
             )?;
 
@@ -130,13 +140,19 @@ impl Database {
     }
 
     pub fn is_image_indexed(&self, path: &str, hash: &str) -> Result<bool> {
+        // Convert absolute path to relative path for database lookup
+        let abs_path = Path::new(path);
+        let rel_path = abs_to_relative_path(abs_path, &self.parent_dir)
+            .with_context(|| format!("Failed to convert path {} to relative path", path))?;
+        let rel_path_str = rel_path.to_string_lossy();
+
         let conn = self
             .pool
             .get()
             .context("Failed to get DB connection to check if image is indexed")?;
         let mut stmt = conn.prepare("SELECT COUNT(*) FROM images WHERE path = ?1 AND hash = ?2")?;
 
-        let count: i64 = stmt.query_row(params![path, hash], |row| row.get(0))?;
+        let count: i64 = stmt.query_row(params![rel_path_str.as_ref(), hash], |row| row.get(0))?;
         Ok(count > 0)
     }
 
@@ -154,7 +170,7 @@ impl Database {
              FROM image_vectors v
              JOIN images i ON i.id = v.rowid
              WHERE v.embedding MATCH ? AND k={k} 
-            AND distance <= 1.22
+            AND distance <= 1.3
              ORDER BY distance LIMIT {k}"
         );
 
@@ -165,11 +181,14 @@ impl Database {
         let mut stmt = conn.prepare(&query)?;
 
         let results = stmt.query_map(params![query_embedding.as_bytes()], |row| {
-            let path: String = row.get(0)?;
+            let rel_path: String = row.get(0)?;
             let distance: f32 = row.get(1)?;
-            // Convert distance to similarity (1 - distance for cosine similarity)
-            // let similarity = 1.0 - distance;
-            Ok((path, distance))
+
+            // Convert relative path back to absolute path
+            // let abs_path = relative_to_abs_path(Path::new(&rel_path), &self.parent_dir);
+            // let abs_path_str = abs_path.to_string_lossy().to_string();
+
+            Ok((rel_path, distance))
         })?;
 
         let mut search_results = Vec::new();
@@ -196,7 +215,7 @@ impl Database {
               JOIN images i ON i.id = v.rowid
               LEFT OUTER JOIN thumbnails t ON i.hash = t.image_hash AND t.size = 300
               WHERE v.embedding MATCH ? AND k={k} 
-            AND distance <= 1.22
+            AND distance <= 1.3
               ORDER BY distance LIMIT {k}"
         );
 
@@ -207,13 +226,17 @@ impl Database {
         let mut stmt = conn.prepare(&query)?;
 
         let results = stmt.query_map(params![query_embedding.as_bytes()], |row| {
-            let path: String = row.get(0)?;
+            let rel_path: String = row.get(0)?;
             let distance: f32 = row.get(1)?;
             let thumbnail_data: Option<Vec<u8>> = row.get(2)?;
-            let base64_thumbnail = thumbnail_data.map(|data| base64::encode(data));
-            // Convert distance to similarity (1 - distance for cosine similarity)
-            // let similarity = 1.0 - distance;
-            Ok((path, distance, base64_thumbnail))
+
+            // Convert relative path back to absolute path
+            // let abs_path = relative_to_abs_path(Path::new(&rel_path), &self.parent_dir);
+            // let abs_path_str = abs_path.to_string_lossy().to_string();
+
+            let base64_thumbnail =
+                thumbnail_data.map(|data| general_purpose::STANDARD.encode(data));
+            Ok((rel_path, distance, base64_thumbnail))
         })?;
 
         let mut search_results = Vec::new();
@@ -239,23 +262,12 @@ impl Database {
 
         let mut to_delete = Vec::new();
         for row in rows {
-            let (id, path) = row?;
+            let (id, rel_path) = row?;
 
-            // Handle both absolute and relative paths
-            let path_buf = Path::new(&path);
-            let file_exists = if path_buf.is_absolute() {
-                // For absolute paths, check directly
-                path_buf.exists()
-            } else {
-                // For relative paths, try to resolve them
-                // This handles legacy entries that might have been stored as relative paths
-                let current_dir =
-                    std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
-                let resolved_path = current_dir.join(path_buf);
-                resolved_path.exists()
-            };
+            // Convert relative path to absolute path for file existence check
+            let abs_path = relative_to_abs_path(Path::new(&rel_path), &self.parent_dir);
 
-            if !file_exists {
+            if !abs_path.exists() {
                 to_delete.push(id);
             }
         }
@@ -295,8 +307,10 @@ impl Database {
         let mut stmt = conn.prepare("SELECT path FROM images ORDER BY created_at DESC LIMIT ?1")?;
 
         let image_iter = stmt.query_map([limit], |row| {
-            let path: String = row.get(0)?;
-            Ok(path)
+            let rel_path: String = row.get(0)?;
+            // Convert relative path back to absolute path
+            let abs_path = relative_to_abs_path(Path::new(&rel_path), &self.parent_dir);
+            Ok(abs_path.to_string_lossy().to_string())
         })?;
 
         let mut results = Vec::new();
@@ -347,12 +361,23 @@ impl Database {
 
     /// Get the hash for an image by its path
     pub fn get_image_hash(&self, path: &str) -> Result<String> {
+        // Convert absolute path to relative path for database lookup
+        let path = if path.starts_with("/") {
+            let abs_path = Path::new(path);
+            let rel_path = abs_to_relative_path(abs_path, &self.parent_dir)
+                .with_context(|| format!("Failed to convert path {} to relative path", path))?;
+            let rel_path_str = rel_path.to_string_lossy();
+            rel_path_str.to_string()
+        } else {
+            path.to_string()
+        };
+
         let conn = self
             .pool
             .get()
             .context("Failed to get DB connection to get image hash")?;
         let mut stmt = conn.prepare("SELECT hash FROM images WHERE path = ?1")?;
-        let hash: String = stmt.query_row(params![path], |row| row.get(0))?;
+        let hash: String = stmt.query_row(params![&path], |row| row.get(0))?;
         Ok(hash)
     }
 
@@ -378,9 +403,14 @@ impl Database {
                 .context("Failed to get DB connection for getting images without thumbnails")?;
             let mut stmt = conn.prepare(query)?;
             let results = stmt.query_map(params![size as i64, limit], |row| {
-                let path: String = row.get(0)?;
+                let rel_path: String = row.get(0)?;
                 let hash: String = row.get(1)?;
-                Ok((path, hash))
+
+                // Convert relative path back to absolute path
+                let abs_path = relative_to_abs_path(Path::new(&rel_path), &self.parent_dir);
+                let abs_path_str = abs_path.to_string_lossy().to_string();
+
+                Ok((abs_path_str, hash))
             })?;
 
             let mut images = Vec::new();
