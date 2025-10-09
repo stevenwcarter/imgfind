@@ -1,8 +1,14 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faTimesCircle } from '@fortawesome/free-solid-svg-icons';
 import LightboxViewer from 'components/LightboxViewer';
+import Lightbox from 'yet-another-react-lightbox';
+import Download from 'yet-another-react-lightbox/plugins/download';
+import Thumbnails from 'yet-another-react-lightbox/plugins/thumbnails';
+import Zoom from 'yet-another-react-lightbox/plugins/zoom';
+import 'yet-another-react-lightbox/styles.css';
+import 'yet-another-react-lightbox/plugins/thumbnails.css';
 
 export type ImageFromServer = [string, string, string | null]; // [filename, filesize, base64]
 
@@ -11,6 +17,10 @@ export const Images = () => {
   const [query, setQuery] = useState(search.get('query') || '');
   const [images, setImages] = useState<ImageFromServer[]>([]);
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
+  const [isOpen, setIsOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const zoomRef = useRef(null);
+  const thumbnailsRef = useRef(null);
 
   const handleKeyUp = (event: React.KeyboardEvent<HTMLInputElement>) => {
     if (event.key === 'Enter') {
@@ -58,6 +68,16 @@ export const Images = () => {
     }
   };
 
+  const handleClick = (e: any, image: ImageFromServer) => {
+    if (e.ctrlKey) {
+      const mainSrc = `/api/v1/search/file/${image[0]}`;
+      window.open(mainSrc, '_blank');
+    } else {
+      setActiveIndex(images.findIndex((img) => img[0] === image[0]));
+      setIsOpen(true);
+    }
+  };
+
   useEffect(() => {
     const s = search.get('query');
 
@@ -90,8 +110,26 @@ export const Images = () => {
       <div className="flex flex-wrap gap-4 p-4">
         {images &&
           images.length > 0 &&
-          images.map((image) => <LightboxViewer key={image[0]} image={image} />)}
+          images.map((image) => (
+            <LightboxViewer key={image[0]} image={image} handleClick={handleClick} />
+          ))}
       </div>
+      {images && images.length > 0 && (
+        <Lightbox
+          plugins={[Download, Thumbnails, Zoom]}
+          thumbnails={{ ref: thumbnailsRef, showToggle: true }}
+          carousel={{ preload: 3 }}
+          zoom={{ ref: zoomRef, scrollToZoom: true, maxZoomPixelRatio: 2 }}
+          open={isOpen}
+          slides={images.map((img) => ({
+            src: `/api/v1/search/file/${img[0]}`,
+            thumbnail: `/api/v1/search/thumb:300/${img[0]}`,
+          }))}
+          // mainSrcThumbnail={props.mainSrcThumbnail}
+          close={() => setIsOpen(false)}
+          index={activeIndex}
+        />
+      )}
     </div>
   );
 };
