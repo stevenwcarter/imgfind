@@ -22,7 +22,7 @@ diesel = { version = "2.0", features = [
 diesel_migrations = "2.0"
 rusqlite = { version = "0.37", features = ["bundled"] }
 sqlite-vec = "0.1"
-zerocopy = "0.7"
+zerocopy = "0.8"
 walkdir = "2.0"
 image = "0.25"
 anyhow = "1.0"
