@@ -15,6 +15,16 @@ impl<'a> SearchEngine<'a> {
         let query_embedding = normalize_vector(query_embedding);
         self.db.search_similar_images(&query_embedding, limit)
     }
+    pub fn search_with_thumbnails(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(String, f32, Option<String>)>> {
+        // Use sqlite-vec for efficient similarity search
+        let query_embedding = normalize_vector(query_embedding);
+        self.db
+            .search_similar_images_with_blob(&query_embedding, limit)
+    }
 }
 
 pub fn normalize_vector(vector: &[f32]) -> Vec<f32> {

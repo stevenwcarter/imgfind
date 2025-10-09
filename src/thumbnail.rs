@@ -2,7 +2,12 @@ use crate::{database::Database, get_db_path};
 use anyhow::{Context, Result};
 use image::ImageReader;
 use rayon::prelude::*;
-use std::{io::Cursor, sync::atomic::AtomicUsize};
+use rusqlite::params;
+use std::io::Cursor;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, mpsc::Sender};
+use std::thread;
+use std::time::Duration;
 
 /// Generate thumbnails in batches for images that don't have cached thumbnails
 ///
@@ -28,39 +33,131 @@ pub fn generate_missing_thumbnails_batch(
     size: u32,
     count: usize,
 ) -> Result<usize> {
-    // Get images that don't have thumbnails of the specified size
+    // Enable WAL mode for better concurrent performance
+    {
+        let conn = db
+            .pool
+            .get()
+            .context("Failed to get connection for WAL setup")?;
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .context("Failed to enable WAL mode")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")
+            .context("Failed to set synchronous mode")?;
+        log::info!("Database configured with WAL mode");
+    }
+
+    // Fetch image paths/hashes lacking thumbnails of this size.
     let images_without_thumbnails = db.get_images_without_thumbnails(size, count)?;
 
-    let generated_count: AtomicUsize = AtomicUsize::new(0);
+    // Channel used by producer tasks (thumbnail generators) to send bytes to a single DB writer.
+    let (tx, rx) = std::sync::mpsc::channel::<(String, u32, Vec<u8>)>();
 
-    let db_path = get_db_path().unwrap();
-    let db = Database::new(&db_path).unwrap();
+    // Atomic counter shared with writer thread to record successful inserts.
+    let generated_count = Arc::new(AtomicUsize::new(0));
+    let writer_count = Arc::clone(&generated_count);
 
+    // Open a single database connection in the writer thread to avoid write deadlocks.
+    let db_path = get_db_path().context("Failed to resolve database path")?;
+    let writer_db = match Database::new(&db_path) {
+        Ok(db) => db,
+        Err(e) => {
+            log::error!("Writer thread failed to open database: {:?}", e);
+            panic!("Cannot proceed without DB access");
+        }
+    };
+    let writer_handle = thread::spawn(move || {
+        // Single pooled connection reused across flushes.
+        let mut conn = match writer_db.pool.get() {
+            Ok(c) => c,
+            Err(e) => {
+                log::error!("Writer thread failed to get pooled connection: {:?}", e);
+                return;
+            }
+        };
+        // Improve concurrency resilience.
+        if let Err(e) = conn.busy_timeout(Duration::from_secs(5)) {
+            log::warn!("Failed setting busy timeout: {:?}", e);
+        }
+
+        let mut buffer: Vec<(String, u32, Vec<u8>)> = Vec::with_capacity(10);
+
+        // Helper to flush current buffer using a transaction.
+        let mut flush = |buf: &mut Vec<(String, u32, Vec<u8>)>| {
+            if buf.is_empty() {
+                return;
+            }
+            log::info!("Flushing {} thumbnails to database", buf.len());
+            let txn = match conn.transaction() {
+                Ok(t) => t,
+                Err(e) => {
+                    log::error!("Failed to start transaction: {:?}", e);
+                    return;
+                }
+            };
+            let mut stmt = match txn.prepare(
+                "INSERT OR REPLACE INTO thumbnails (image_hash, size, thumbnail_data) VALUES (?1, ?2, ?3)",
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    log::error!("Failed to prepare insert statement: {:?}", e);
+                    return;
+                }
+            };
+            log::info!("Inserting {} thumbnails", buf.len());
+            for (hash, size, bytes) in buf.drain(..) {
+                log::info!("Inserting thumbnail hash={} size={}", hash, size);
+                match stmt.execute(params![&hash, size as i64, &bytes]) {
+                    Ok(_) => {
+                        writer_count.fetch_add(1, Ordering::SeqCst);
+                        log::debug!("Inserted thumbnail hash={} size={}", hash, size);
+                    }
+                    Err(e) => {
+                        log::warn!("Insert failed for hash {} size {}: {:?}", hash, size, e);
+                    }
+                }
+            }
+            // Drop statement before commit.
+            drop(stmt);
+            if let Err(e) = txn.commit() {
+                log::error!("Failed to commit thumbnail batch: {:?}", e);
+            }
+        };
+
+        for item in rx {
+            log::debug!("Writer received hash {}", item.0);
+            buffer.push(item);
+            if buffer.len() >= 10 {
+                flush(&mut buffer);
+            }
+        }
+        // Final flush after channel close.
+        flush(&mut buffer);
+    });
+
+    // Parallel generation of thumbnails (CPU-bound); each task sends bytes to single writer.
     images_without_thumbnails
         .par_iter()
         .for_each(|(path, hash)| {
-            match generate_and_store_thumbnail(&mut db.clone(), path, hash, size) {
-                Ok(_) => {
-                    generated_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    log::info!("Generated thumbnail for: {}", path);
-                }
-                Err(e) => {
-                    log::warn!("Failed to generate thumbnail for {}: {:?}", path, e);
-                    // Continue with the next image instead of failing the entire batch
-                }
+            if let Err(e) = generate_and_store_thumbnail(path, hash, size, &tx) {
+                log::warn!("Failed to generate thumbnail for {}: {:?}", path, e);
+            } else {
+                log::info!("Generated thumbnail for: {}", path);
             }
         });
 
-    Ok(generated_count.into_inner())
+    log::info!("All thumbnail generation tasks completed.");
+    // Close the sending side so the writer thread can finish once queue is drained.
+    drop(tx);
+    log::info!("Waiting for writer thread to finish...");
+    if let Err(e) = writer_handle.join() {
+        log::error!("Writer thread panicked: {:?}", e);
+    }
+
+    Ok(generated_count.load(Ordering::SeqCst))
 }
 
-/// Generate and store a single thumbnail
-fn generate_and_store_thumbnail(
-    db: &mut Database,
-    filepath: &str,
-    hash: &str,
-    size: u32,
-) -> Result<()> {
+// Generate resized JPEG bytes for a thumbnail (pure function aside from file IO)
+fn generate_thumbnail_bytes(filepath: &str, size: u32) -> Result<Vec<u8>> {
     let image = ImageReader::open(filepath)
         .with_context(|| format!("Failed to open image: {}", filepath))?
         .decode()
@@ -72,11 +169,19 @@ fn generate_and_store_thumbnail(
     resized_image
         .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Jpeg)
         .context("Failed to encode thumbnail as JPEG")?;
+    Ok(bytes)
+}
 
-    // Store the thumbnail in the database
-    db.insert_thumbnail(hash, size, &bytes)
-        .context("Failed to store thumbnail in database")?;
-
+/// Generate thumbnail bytes and send them for insertion via channel.
+fn generate_and_store_thumbnail(
+    filepath: &str,
+    hash: &str,
+    size: u32,
+    tx: &Sender<(String, u32, Vec<u8>)>,
+) -> Result<()> {
+    let bytes = generate_thumbnail_bytes(filepath, size)?;
+    tx.send((hash.to_string(), size, bytes))
+        .context("Failed to send thumbnail bytes over channel")?;
     Ok(())
 }
 
@@ -104,8 +209,10 @@ pub fn get_or_generate_thumbnail(
         return Ok(thumbnail_data);
     }
 
-    // If not found, generate and store the thumbnail
-    generate_and_store_thumbnail(db, filepath, hash, size)?;
+    // If not found, generate bytes and insert directly (synchronous path)
+    let bytes = generate_thumbnail_bytes(filepath, size)?;
+    db.insert_thumbnail(hash, size, &bytes)
+        .context("Failed to store thumbnail in database")?;
 
     // Return the newly generated thumbnail
     db.get_thumbnail(hash, size)

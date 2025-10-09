@@ -1,0 +1,16 @@
+[files]
+exclude = [
+  "site",
+  "migrations",
+  "logs",
+  "node_modules",
+  "db",
+  ".vscode-test",
+  ".vscode",
+  ".idea",
+  ".git",
+  ".github",
+  ".gitignore",
+  ".gitattributes",
+  ".DS_Store",
+]

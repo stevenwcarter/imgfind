@@ -61,7 +61,7 @@ async fn search(
     let db = context.db.lock().unwrap();
     let search = SearchEngine::new(&db);
     let result = search
-        .search(&normalized_query, 80)
+        .search_with_thumbnails(&normalized_query, 80)
         .context("Failed to perform search")?;
 
     Ok(Json(result))

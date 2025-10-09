@@ -182,6 +182,50 @@ impl Database {
         Ok(search_results)
     }
 
+    pub fn search_similar_images_with_blob(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(String, f32, Option<String>)>> {
+        // Use a reasonable k value that's at least the limit but not too large
+        let k = limit.clamp(1, 100);
+
+        let query = format!(
+            "SELECT i.path, distance, t.thumbnail_data
+              FROM image_vectors v
+              JOIN images i ON i.id = v.rowid
+              LEFT OUTER JOIN thumbnails t ON i.hash = t.image_hash AND t.size = 300
+              WHERE v.embedding MATCH ? AND k={k} 
+            AND distance <= 1.22
+              ORDER BY distance LIMIT {k}"
+        );
+
+        let conn = self
+            .pool
+            .get()
+            .context("Failed to get DB connection for searching similar images")?;
+        let mut stmt = conn.prepare(&query)?;
+
+        let results = stmt.query_map(params![query_embedding.as_bytes()], |row| {
+            let path: String = row.get(0)?;
+            let distance: f32 = row.get(1)?;
+            let thumbnail_data: Option<Vec<u8>> = row.get(2)?;
+            let base64_thumbnail = thumbnail_data.map(|data| base64::encode(data));
+            // Convert distance to similarity (1 - distance for cosine similarity)
+            // let similarity = 1.0 - distance;
+            Ok((path, distance, base64_thumbnail))
+        })?;
+
+        let mut search_results = Vec::new();
+        for result in results {
+            search_results.push(result?);
+        }
+
+        // Limit results to the requested amount
+        search_results.truncate(limit);
+        Ok(search_results)
+    }
+
     pub fn clean_missing_files(&mut self) -> Result<usize> {
         // Get all paths from database
         let conn = self

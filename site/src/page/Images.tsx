@@ -1,67 +1,15 @@
-import clsx from 'clsx';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import Lightbox from 'yet-another-react-lightbox';
-import Zoom from 'yet-another-react-lightbox/plugins/zoom';
-import 'yet-another-react-lightbox/styles.css';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faTimesCircle } from '@fortawesome/free-solid-svg-icons';
+import LightboxViewer from 'components/LightboxViewer';
 
-const LightboxViewer = (props) => {
-  const { image } = props;
-  const [isOpen, setIsOpen] = useState(false);
-
-  const zoomRef = useRef(null);
-
-  const handleClick = (e: any) => {
-    if (e.ctrlKey) {
-      window.open(props.mainSrc, '_blank');
-    } else {
-      setIsOpen(true);
-    }
-  };
-
-  const classes = clsx(
-    'max-w-[300px] max-h-[300px]',
-    'object-scale-down',
-    'cursor-pointer',
-    'hover:opacity-80',
-    'transition-all ease-in-out duration-100',
-    'rounded-lg',
-    'shadow-md hover:shadow-white',
-    'hover:scale-105',
-  );
-
-  // TODO - update this to dynamically set size
-  return (
-    <div className={`flex justify-center items-center`}>
-      <div className="relative group">
-        <img
-          className={classes}
-          src={`/api/v1/search/thumb:300/${image[0]}`}
-          alt={`${image[0]}`}
-          onClick={() => handleClick(image[0])}
-        />
-        <span className="absolute bottom-0.5 right-2 opacity-0 group-hover:opacity-80 transition-opacity">
-          {image[1]}
-        </span>
-      </div>
-      <Lightbox
-        plugins={[Zoom]}
-        zoom={{ ref: zoomRef, scrollToZoom: true, maxZoomPixelRatio: 2 }}
-        open={isOpen}
-        slides={[{ src: `/api/v1/search/file/${image[0]}` }]}
-        // mainSrcThumbnail={props.mainSrcThumbnail}
-        close={() => setIsOpen(false)}
-      />
-    </div>
-  );
-};
+export type ImageFromServer = [string, string, string | null]; // [filename, filesize, base64]
 
 export const Images = () => {
   const [search, setSearch] = useSearchParams();
   const [query, setQuery] = useState(search.get('query') || '');
-  const [images, setImages] = useState<string[]>([]);
+  const [images, setImages] = useState<ImageFromServer[]>([]);
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
 
   const handleKeyUp = (event: React.KeyboardEvent<HTMLInputElement>) => {
@@ -117,8 +65,6 @@ export const Images = () => {
       getImages(s);
     }
   }, [search]);
-
-  console.log('IMAGES: ', images);
 
   return (
     <div>
