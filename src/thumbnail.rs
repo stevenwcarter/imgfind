@@ -130,7 +130,7 @@ pub fn generate_missing_thumbnails_batch(
         for item in rx {
             log::debug!("Writer received hash {}", item.0);
             buffer.push(item);
-            if buffer.len() >= 10 {
+            if buffer.len() >= 40 {
                 flush(&mut buffer);
             }
         }
