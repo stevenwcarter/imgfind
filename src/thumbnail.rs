@@ -25,7 +25,11 @@ use std::time::Duration;
 /// # Example
 /// ```rust
 /// // Generate thumbnails for up to 10 images that don't have 300px thumbnails
-/// let generated = generate_missing_thumbnails_batch(&mut db, 300, 10)?;
+/// use imgfind::database::Database;
+/// use imgfind::thumbnail::generate_missing_thumbnails_batch;
+/// use std::path::Path;
+/// let mut db = Database::new(Path::new("/tmp/.imgfind/imgfind.db")).unwrap();
+/// let generated = generate_missing_thumbnails_batch(&mut db, 300, 10).unwrap();
 /// println!("Generated {} thumbnails", generated);
 /// ```
 pub fn generate_missing_thumbnails_batch(
