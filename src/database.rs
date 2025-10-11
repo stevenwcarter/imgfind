@@ -21,8 +21,18 @@ impl Database {
     pub fn new(db_path: &Path) -> Result<Self> {
         // Initialize sqlite-vec extension
         unsafe {
-            sqlite3_auto_extension(Some(std::mem::transmute(sqlite3_vec_init as *const ())));
+            sqlite3_auto_extension(Some(std::mem::transmute::<
+                *const (),
+                unsafe extern "C" fn(
+                    *mut rusqlite::ffi::sqlite3,
+                    *mut *mut i8,
+                    *const rusqlite::ffi::sqlite3_api_routines,
+                ) -> i32,
+            >(sqlite3_vec_init as *const ())));
         }
+
+        let parent_path = db_path.parent().context("DB path has no parent")?;
+        std::fs::create_dir_all(parent_path).context("Failed to create DB parent directory")?;
 
         let manager = SqliteConnectionManager::file(db_path);
         let pool = r2d2::Pool::new(manager)
