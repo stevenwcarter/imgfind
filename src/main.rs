@@ -1,3 +1,4 @@
+#![allow(clippy::collapsible_if)]
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use clipper::ClipEmbedder;
