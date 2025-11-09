@@ -24,12 +24,19 @@ use tokio::{
 use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler as _;
 
+/// Represents an image with its associated data and protocol
+pub struct ImageEntry {
+    pub path: String,
+    pub score: f32,
+    pub protocol: ThreadProtocol,
+    pub rx: UnboundedReceiver<ResizeRequest>,
+}
+
 /// Application.
 pub struct App {
     pub db: Database,
     pub picker: Picker,
-    pub protocol: ThreadProtocol,
-    pub images: Vec<(String, f32, ThreadProtocol)>,
+    pub images: Vec<ImageEntry>,
     /// Is the application running?
     pub running: bool,
     /// Counter.
@@ -40,7 +47,6 @@ pub struct App {
     pub events: EventHandler,
     pub rx: UnboundedReceiver<ResizeRequest>,
     pub tx: UnboundedSender<ResizeRequest>,
-    // pub image: StatefulImage<StatefulProtocol>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -54,17 +60,14 @@ impl App {
     /// Constructs a new instance of [`App`].
     pub fn new(db: Database) -> Result<Self> {
         let (tx, rx) = unbounded_channel();
-        let image = ImageReader::open("./test-images/test.jpg")?.decode()?;
         let picker = Picker::from_query_stdio().unwrap();
 
-        let protocol = picker.new_resize_protocol(image);
         Ok(Self {
             db,
             images: Vec::new(),
             input: Input::default(),
             input_mode: InputMode::Normal,
             picker,
-            protocol: ThreadProtocol::new(tx.clone(), Some(protocol)),
             running: true,
             counter: 0,
             events: EventHandler::new(),
@@ -77,20 +80,27 @@ impl App {
     /// Run the application's main loop.
     pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
         while self.running {
+            // Handle resize requests for all images first
+            self.handle_image_resize_requests();
+
             terminal.draw(|frame| frame.render_widget(&mut self, frame.area()))?;
 
             select! {
                 Ok(event) = self.events.next().fuse() => self.handle_event(event),
-                Some(request) = self.rx.recv().fuse() => self.handle_request(request)?,
             }
         }
         Ok(())
     }
 
-    pub fn handle_request(&mut self, request: ResizeRequest) -> Result<()> {
-        self.protocol
-            .update_resized_protocol(request.resize_encode()?);
-        Ok(())
+    /// Handle resize requests for all loaded images
+    fn handle_image_resize_requests(&mut self) {
+        for image_entry in &mut self.images {
+            if let Ok(request) = image_entry.rx.try_recv()
+                && let Ok(resized) = request.resize_encode()
+            {
+                image_entry.protocol.update_resized_protocol(resized);
+            }
+        }
     }
 
     pub fn handle_event(&mut self, event: Event) {
@@ -113,8 +123,6 @@ impl App {
                         eprintln!("Error handling search: {:?}", err);
                     }
                 }
-                AppEvent::Increment => self.increment_counter(),
-                AppEvent::Decrement => self.decrement_counter(),
                 AppEvent::Quit => self.quit(),
             },
         }
@@ -130,8 +138,6 @@ impl App {
                 KeyCode::Char('c' | 'C') if key_event.modifiers == KeyModifiers::CONTROL => {
                     self.events.send(AppEvent::Quit)
                 }
-                KeyCode::Right => self.events.send(AppEvent::Increment),
-                KeyCode::Left => self.events.send(AppEvent::Decrement),
                 _ => {}
             },
             InputMode::Editing => match key_event.code {
@@ -140,8 +146,10 @@ impl App {
                 }
                 KeyCode::Enter => {
                     // Handle the input submission here.
+                    self.input_mode = InputMode::Normal;
                     self.events
                         .send(AppEvent::HandleSearch(self.input.value().to_string()));
+                    self.input.reset();
                 }
                 _ => {
                     self.input.handle_event(&CrosstermEvent::Key(key_event));
@@ -153,27 +161,23 @@ impl App {
             KeyCode::Char('c' | 'C') if key_event.modifiers == KeyModifiers::CONTROL => {
                 self.events.send(AppEvent::Quit)
             }
-            KeyCode::Right => self.events.send(AppEvent::Increment),
-            KeyCode::Left => self.events.send(AppEvent::Decrement),
             // Other handlers you could add here.
             _ => {}
         }
     }
 
     pub fn handle_search(&mut self, query: &str) -> Result<()> {
-        eprintln!("Handling search for query: {}", query);
         self.images.clear();
         // Here you would implement the logic to handle the search query.
         // For example, you might want to use the picker to search for images.
         // For now, we'll just print the query to the console.
         // info!("Searching for: \"{}\"", query);
 
-        // Get current directory for filtering results
-        let current_dir = std::env::current_dir().context("Failed to get current directory")?;
+        // Get current directory for filtering results (not used in this simplified version)
+        let _current_dir = std::env::current_dir().context("Failed to get current directory")?;
 
         // Check if database has any images
         let total_images = self.db.get_image_count()?;
-        eprintln!("Total images in database: {}", total_images);
         if total_images == 0 {
             return Ok(());
         }
@@ -195,38 +199,12 @@ impl App {
         let search_engine = SearchEngine::new(&self.db);
         let all_results = search_engine.search(&normalized_query, usize::MAX)?; // Get all results first
 
-        eprintln!("Total results found: {}", all_results.len());
-
         // Filter results based on current directory and recursive flag
         let filtered_results: Vec<_> = all_results
             .into_iter()
-            .filter(|(path, _score)| {
-                let path_buf = std::path::Path::new(path);
-
-                // The paths returned from the database are already absolute paths
-                let abs_path = path_buf.to_path_buf();
-
-                // Canonicalize paths to handle . and .. components and get absolute paths
-                let abs_path = abs_path.canonicalize().unwrap_or(abs_path);
-                let current_dir_canonical = current_dir
-                    .canonicalize()
-                    .unwrap_or_else(|_| current_dir.clone());
-
+            .filter(|(_path, _score)| {
+                // For now, just include all results (you can add filtering logic later)
                 true
-                // if all {
-                //     // For --all flag, include all results regardless of location
-                //     true
-                // } else if recursive {
-                //     // For recursive search, check if the image is in current directory or any subdirectory
-                //     abs_path.starts_with(&current_dir_canonical)
-                // } else {
-                //     // For non-recursive search, check if the image is directly in current directory
-                //     if let Some(parent) = abs_path.parent() {
-                //         parent == current_dir_canonical
-                //     } else {
-                //         false
-                //     }
-                // }
             })
             .take(9)
             .collect();
@@ -251,18 +229,25 @@ impl App {
             return Ok(());
         }
 
-        for (i, (path, score)) in filtered_results.iter().enumerate() {
+        for (path, score) in filtered_results.iter() {
             // info!("{:3}. {:<60} (similarity: {:.4})", i + 1, path, score);
             let image = ImageReader::open(path)
                 .with_context(|| format!("Failed to open image at path: {}", path))?
                 .decode()
                 .with_context(|| format!("Failed to decode image at path: {}", path))?;
+
+            // Create a separate channel for each image's resize requests
+            let (image_tx, image_rx) = unbounded_channel();
             let protocol = self.picker.new_resize_protocol(image);
-            self.images.push((
-                path.clone(),
-                *score,
-                ThreadProtocol::new(self.tx.clone(), Some(protocol)),
-            ));
+
+            let image_entry = ImageEntry {
+                path: path.clone(),
+                score: *score,
+                protocol: ThreadProtocol::new(image_tx, Some(protocol)),
+                rx: image_rx,
+            };
+
+            self.images.push(image_entry);
         }
 
         Ok(())
