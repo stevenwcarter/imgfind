@@ -44,16 +44,17 @@ pub struct EventHandler {
     /// Event receiver channel.
     receiver: mpsc::UnboundedReceiver<Event>,
 }
-
-impl EventHandler {
+impl Default for EventHandler {
     /// Constructs a new instance of [`EventHandler`] and spawns a new thread to handle events.
-    pub fn new() -> Self {
+    fn default() -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
         let actor = EventTask::new(sender.clone());
         tokio::spawn(async { actor.run().await });
         Self { sender, receiver }
     }
+}
 
+impl EventHandler {
     /// Receives an event from the sender.
     ///
     /// This function blocks until an event is received.

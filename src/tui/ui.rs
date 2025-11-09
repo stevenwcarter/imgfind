@@ -19,10 +19,15 @@ impl App {
             InputMode::Normal => Style::default(),
             InputMode::Editing => Color::Yellow.into(),
         };
+        let title = if let Some(query) = self.last_search.as_ref() {
+            format!("Search query (current: {})", query)
+        } else {
+            "Search query".to_string()
+        };
         let input = Paragraph::new(self.input.value())
             .style(style)
             .scroll((0, scroll as u16))
-            .block(Block::bordered().title("Input"));
+            .block(Block::bordered().title(title));
         input.render(area, buf);
 
         if self.input_mode == InputMode::Editing {
