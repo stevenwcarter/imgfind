@@ -20,7 +20,11 @@ impl App {
             InputMode::Editing => Color::Yellow.into(),
         };
         let title = if let Some(query) = self.last_search.as_ref() {
-            format!("Search query (current: {})", query)
+            if self.is_searching {
+                format!("Search query (searching '{}'...)", query)
+            } else {
+                format!("Search query (current: {})", query)
+            }
         } else {
             "Search query".to_string()
         };
