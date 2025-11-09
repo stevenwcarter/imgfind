@@ -42,6 +42,7 @@ enum Commands {
         #[arg(long)]
         root: bool,
     },
+    Tui {},
     /// Search for images using natural language
     Search {
         /// Search query
@@ -110,6 +111,11 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Tui {} => {
+            let db_path = get_db_path()?;
+            let db = Database::new(&db_path)?;
+            imgfind::tui::tui(db).await?;
+        }
         Commands::Index {
             dir,
             recursive,

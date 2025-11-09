@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 use dirs::home_dir;
-use std::{fs, path::{Path, PathBuf}};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 pub mod api;
 pub mod config;
@@ -10,6 +13,7 @@ pub mod graphql;
 pub mod routes;
 pub mod search;
 pub mod thumbnail;
+pub mod tui;
 
 pub fn get_db_path() -> Result<PathBuf> {
     // First, try to find existing database by walking up directory tree
@@ -48,28 +52,31 @@ pub fn get_local_db_path() -> Result<PathBuf> {
 pub fn get_db_parent_dir(db_path: &Path) -> Result<PathBuf> {
     // The database path is something like /path/to/parent/.imgfind/imgfind.db
     // We want to return /path/to/parent
-    
+
     // Handle the case where the database file doesn't exist yet
-    let imgfind_dir = db_path.parent()
+    let imgfind_dir = db_path
+        .parent()
         .context("Database path has no parent directory")?;
-    
+
     // Verify that this is indeed an .imgfind directory
     if imgfind_dir.file_name().and_then(|name| name.to_str()) != Some(".imgfind") {
         return Err(anyhow::anyhow!(
-            "Database path is not in expected .imgfind directory structure: {:?}", 
+            "Database path is not in expected .imgfind directory structure: {:?}",
             db_path
         ));
     }
-    
-    let parent_dir = imgfind_dir.parent()
+
+    let parent_dir = imgfind_dir
+        .parent()
         .context(".imgfind directory has no parent")?;
-    
+
     Ok(parent_dir.to_path_buf())
 }
 
 /// Convert an absolute path to a path relative to the database parent directory
 pub fn abs_to_relative_path(abs_path: &Path, db_parent: &Path) -> Result<PathBuf> {
-    abs_path.strip_prefix(db_parent)
+    abs_path
+        .strip_prefix(db_parent)
         .map(|p| p.to_path_buf())
         .context("Path is not within database parent directory")
 }

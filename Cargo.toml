@@ -10,6 +10,13 @@ lto = true
 
 [profile.dev.package.image]
 opt-level = 3
+[profile.dev.package.ratatui-image]
+opt-level = 3
+
+[features]
+default = ["tui"]
+tui = ["crossterm", "futures", "ratatui", "ratatui-image", "tui-input"]
+ratatui-image = ["dep:ratatui-image"]
 
 [dependencies]
 clipper = { version = "0.1.0", path = "../clipper" }
@@ -54,3 +61,9 @@ iterm2img = "0.1.0"
 r2d2_sqlite = { version = "0.31.0", features = ["bundled"] }
 r2d2 = "0.8.10"
 base64 = "0.22.1"
+
+crossterm = { version = "0.28.1", features = ["event-stream"], optional = true }
+futures = { version = "0.3.31", optional = true }
+ratatui = { version = "0.29.0", optional = true }
+ratatui-image = { version = "8.0.2", features = ["tokio"], optional = true }
+tui-input = { version = "0.14.0", optional = true }
