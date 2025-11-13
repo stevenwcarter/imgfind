@@ -3,6 +3,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use clipper::ClipEmbedder;
 use imgfind::context::GraphQLContext;
+use imgfind::logging::init_tracing;
 use imgfind::{config, get_db_path, get_local_db_path};
 use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, info, warn};
@@ -106,7 +107,7 @@ enum ConfigCommands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    init_tracing().context("Failed to initialize logging")?;
 
     let cli = Cli::parse();
 

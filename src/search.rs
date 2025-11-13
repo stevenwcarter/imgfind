@@ -1,4 +1,4 @@
-use crate::database::Database;
+use crate::database::{Database, ImageSearchResult};
 use anyhow::Result;
 
 pub struct SearchEngine<'a> {
@@ -24,6 +24,17 @@ impl<'a> SearchEngine<'a> {
         let query_embedding = normalize_vector(query_embedding);
         self.db
             .search_similar_images_with_blob(&query_embedding, limit)
+    }
+    pub fn search_with_thumbnails_raw(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+        offset: usize,
+    ) -> ImageSearchResult {
+        // Use sqlite-vec for efficient similarity search
+        let query_embedding = normalize_vector(query_embedding);
+        self.db
+            .search_similar_images_with_raw_blob(&query_embedding, limit, offset)
     }
 }
 

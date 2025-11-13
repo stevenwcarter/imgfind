@@ -6,7 +6,7 @@ use super::event::{AppEvent, EventHandler};
 use anyhow::{Context, Result};
 use clipper::ClipEmbedder;
 use futures::FutureExt;
-use image::{DynamicImage, ImageReader};
+use image::{DynamicImage, load_from_memory};
 use ratatui::crossterm::event::Event as CrosstermEvent;
 use ratatui::{
     DefaultTerminal,
@@ -21,6 +21,7 @@ use tokio::{
     sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
     task::JoinHandle,
 };
+use tracing::{error, info};
 use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler as _;
 
@@ -33,8 +34,10 @@ pub struct ImageEntry {
 }
 
 /// Search result from background task
+#[derive(Clone)]
 pub struct SearchResult {
     pub images: Vec<(String, f32, DynamicImage)>,
+    pub result_count: usize,
     pub query: String,
 }
 
@@ -46,8 +49,11 @@ pub struct App {
     /// Is the application running?
     pub running: bool,
     pub input: Input,
+    pub page: usize,
     pub input_mode: InputMode,
+    pub result_count: usize,
     pub last_search: Option<String>,
+    pub search_result: Option<SearchResult>,
     /// Event handler.
     pub events: EventHandler,
     /// Channel to receive search results
@@ -79,6 +85,9 @@ impl App {
             input_mode: InputMode::Normal,
             picker,
             running: true,
+            page: 0,
+            result_count: 0,
+            search_result: None,
             events: EventHandler::default(),
             last_search: None,
             search_rx,
@@ -99,7 +108,7 @@ impl App {
             select! {
                 Ok(event) = self.events.next().fuse() => self.handle_event(event).await,
                 Some(search_result) = self.search_rx.recv().fuse() => {
-                    self.handle_search_result(search_result);
+                    self.handle_search_result(search_result)?;
                 }
             }
         }
@@ -118,12 +127,45 @@ impl App {
     }
 
     /// Handle search results from background task
-    fn handle_search_result(&mut self, search_result: SearchResult) {
+    fn handle_search_result(&mut self, search_result: SearchResult) -> Result<()> {
         self.is_searching = false;
         self.current_search_task = None;
         self.images.clear();
+        self.result_count = search_result.result_count;
+        self.search_result = Some(search_result);
 
-        for (path, score, image) in search_result.images.iter() {
+        self.update_page()
+    }
+
+    fn update_page(&mut self) -> Result<()> {
+        let result_count = self
+            .search_result
+            .as_ref()
+            .map_or(0, |res| res.result_count);
+        info!(
+            "Updating to page {}, with {} results",
+            self.page, result_count
+        );
+        if self.search_result.is_none()
+            || self.search_result.as_ref().unwrap().images.len() <= self.page * 9
+        {
+            error!(
+                "End of results, have {}",
+                self.search_result.as_ref().unwrap().images.len()
+            );
+            return Ok(());
+        }
+        self.images.clear();
+
+        for (path, score, image) in self
+            .search_result
+            .as_ref()
+            .context("grabbing search results")?
+            .images
+            .iter()
+            .skip(self.page * 9)
+            .take(9)
+        {
             // Create a separate channel for each image's resize requests
             let (image_tx, image_rx) = unbounded_channel();
             let protocol = self.picker.new_resize_protocol(image.clone());
@@ -137,6 +179,8 @@ impl App {
 
             self.images.push(image_entry);
         }
+
+        Ok(())
     }
 
     pub async fn handle_event(&mut self, event: Event) {
@@ -152,10 +196,29 @@ impl App {
             },
             Event::App(app_event) => match app_event {
                 AppEvent::HandleSearch(query) => {
+                    self.page = 0;
                     if let Err(err) = self.handle_search(&query) {
                         // Handle the error, e.g., log it or display a message to the user.
                         // For now, we'll just print it to the console.
                         eprintln!("Error handling search: {:?}", err);
+                    }
+                }
+                AppEvent::NextPage => {
+                    if let Some(result) = &self.search_result
+                        && (self.page + 1) * 9 >= result.result_count
+                    {
+                        // No more pages
+                        return;
+                    }
+                    self.page += 1;
+                    if let Err(err) = self.update_page() {
+                        eprintln!("Error updating page: {:?}", err);
+                    }
+                }
+                AppEvent::PreviousPage => {
+                    self.page = self.page.saturating_sub(1);
+                    if let Err(err) = self.update_page() {
+                        eprintln!("Error updating page: {:?}", err);
                     }
                 }
                 AppEvent::Quit => self.quit(),
@@ -173,7 +236,9 @@ impl App {
                 KeyCode::Char('c' | 'C') if key_event.modifiers == KeyModifiers::CONTROL => {
                     self.events.send(AppEvent::Quit)
                 }
-                KeyCode::Esc | KeyCode::Char('q') => self.events.send(AppEvent::Quit),
+                KeyCode::Char('L') => self.events.send(AppEvent::NextPage),
+                KeyCode::Char('H') => self.events.send(AppEvent::PreviousPage),
+                KeyCode::Char('q') => self.events.send(AppEvent::Quit),
                 _ => {}
             },
             InputMode::Editing => match key_event.code {
@@ -218,6 +283,7 @@ impl App {
                 if total_images == 0 {
                     return Ok(SearchResult {
                         images,
+                        result_count: 0,
                         query: query.clone(),
                     });
                 }
@@ -235,33 +301,39 @@ impl App {
 
                 // Search database
                 let search_engine = SearchEngine::new(&db);
-                let all_results = search_engine.search(&normalized_query, usize::MAX)?;
+                let all_results =
+                    search_engine.search_with_thumbnails_raw(&normalized_query, 99, 0)?;
+
+                let result_count = all_results.len();
 
                 // Filter results
                 let filtered_results: Vec<_> = all_results
                     .into_iter()
-                    .filter(|(_path, _score)| true) // Add filtering logic as needed
-                    .take(9)
+                    .filter(|(_path, _score, _image)| true) // Add filtering logic as needed
+                    // .skip(page * 9)
+                    // .take(9)
                     .collect();
 
                 if filtered_results.is_empty() {
                     return Ok(SearchResult {
                         images,
+                        result_count,
                         query: query.clone(),
                     });
                 }
 
-                for (path, score) in filtered_results.iter() {
-                    let image = ImageReader::open(path)
-                        .with_context(|| format!("Failed to open image at path: {}", path))?
-                        .decode()
-                        .with_context(|| format!("Failed to decode image at path: {}", path))?;
-
-                    images.push((path.clone(), *score, image));
+                for (path, score, image) in filtered_results.iter() {
+                    if let Some(image) = image {
+                        let image = load_from_memory(image).with_context(|| {
+                            format!("Failed to decode image blob for path: {}", path)
+                        })?;
+                        images.push((path.clone(), *score, image));
+                    }
                 }
 
                 Ok(SearchResult {
                     images,
+                    result_count,
                     query: query.clone(),
                 })
             }
@@ -277,6 +349,7 @@ impl App {
                     // Send empty result on error
                     let _ = search_tx.send(SearchResult {
                         images: Vec::new(),
+                        result_count: 0,
                         query: query.clone(),
                     });
                 }

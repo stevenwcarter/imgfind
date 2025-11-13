@@ -32,6 +32,8 @@ pub enum Event {
 #[derive(Clone, Debug)]
 pub enum AppEvent {
     HandleSearch(String),
+    NextPage,
+    PreviousPage,
     /// Quit the application.
     Quit,
 }

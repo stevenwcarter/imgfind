@@ -14,6 +14,8 @@ pub struct Database {
     pub parent_dir: PathBuf,
 }
 
+pub type ImageSearchResult = Result<Vec<(String, f32, Option<Vec<u8>>)>>;
+
 // https://chatgpt.com/c/6854c675-e160-800d-a033-fe236a615de4
 // TODO: Add extension load for diesel
 
@@ -211,11 +213,12 @@ impl Database {
         Ok(search_results)
     }
 
-    pub fn search_similar_images_with_blob(
+    pub fn search_similar_images_with_raw_blob(
         &self,
         query_embedding: &[f32],
         limit: usize,
-    ) -> Result<Vec<(String, f32, Option<String>)>> {
+        offset: usize,
+    ) -> ImageSearchResult {
         // Use a reasonable k value that's at least the limit but not too large
         let k = limit.clamp(1, 100);
 
@@ -226,7 +229,7 @@ impl Database {
               LEFT OUTER JOIN thumbnails t ON i.hash = t.image_hash AND t.size = 300
               WHERE v.embedding MATCH ? AND k={k} 
             AND distance <= 1.3
-              ORDER BY distance LIMIT {k}"
+              ORDER BY distance LIMIT {k} OFFSET {offset}"
         );
 
         let conn = self
@@ -240,13 +243,7 @@ impl Database {
             let distance: f32 = row.get(1)?;
             let thumbnail_data: Option<Vec<u8>> = row.get(2)?;
 
-            // Convert relative path back to absolute path
-            // let abs_path = relative_to_abs_path(Path::new(&rel_path), &self.parent_dir);
-            // let abs_path_str = abs_path.to_string_lossy().to_string();
-
-            let base64_thumbnail =
-                thumbnail_data.map(|data| general_purpose::STANDARD.encode(data));
-            Ok((rel_path, distance, base64_thumbnail))
+            Ok((rel_path, distance, thumbnail_data))
         })?;
 
         let mut search_results = Vec::new();
@@ -256,6 +253,22 @@ impl Database {
 
         // Limit results to the requested amount
         search_results.truncate(limit);
+        Ok(search_results)
+    }
+    pub fn search_similar_images_with_blob(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(String, f32, Option<String>)>> {
+        let search_results = self.search_similar_images_with_raw_blob(query_embedding, limit, 0)?;
+        let search_results: Vec<(String, f32, Option<String>)> = search_results
+            .into_iter()
+            .map(|(path, distance, thumbnail_data)| {
+                let thumbnail_base64 =
+                    thumbnail_data.map(|data| general_purpose::STANDARD.encode(&data));
+                (path, distance, thumbnail_base64)
+            })
+            .collect();
         Ok(search_results)
     }
 
