@@ -80,8 +80,6 @@ pub struct App {
     pub page: usize,
     /// Determines whether we're editing the search box or not
     pub input_mode: InputMode,
-    /// How many total results were found
-    pub result_count: usize,
     /// What the last search string was
     pub last_search: Option<String>,
     /// The results for the latest search
@@ -112,7 +110,7 @@ pub enum InputMode {
 impl App {
     /// Constructs a new instance of [`App`].
     pub fn new(db: Database) -> Result<Self> {
-        let picker = Picker::from_query_stdio().unwrap();
+        let picker = Picker::from_query_stdio().context("could not determine tui environment")?;
         let (search_tx, search_rx) = unbounded_channel();
         let (zoom_tx, zoom_rx) = unbounded_channel();
 
@@ -125,7 +123,6 @@ impl App {
             picker,
             running: true,
             page: 0,
-            result_count: 0,
             zoomed_image_index: None,
             zoomed_image: None,
             search_result: None,
@@ -151,7 +148,6 @@ impl App {
             select! {
                 Ok(event) = self.events.next().fuse() => self.handle_event(event).await,
                 Some(image_entry) = self.zoom_rx.recv().fuse() => {
-                    debug!("Received zoomed image: {}", image_entry.path);
                     self.zoomed_image = Some(image_entry);
                 },
                 Some(search_result) = self.search_rx.recv().fuse() => {
@@ -168,7 +164,6 @@ impl App {
             && let Ok(request) = image_entry.rx.try_recv()
             && let Ok(resized) = request.resize_encode()
         {
-            debug!("Resizing image");
             image_entry.protocol.update_resized_protocol(resized);
         }
         for image_entry in &mut self.images {
@@ -180,24 +175,27 @@ impl App {
         }
     }
 
+    fn result_count(&self) -> Option<usize> {
+        Some(self.search_result.as_ref()?.result_count)
+    }
+
     /// Handle search results from background task
     fn handle_search_result(&mut self, search_result: SearchResult) -> Result<()> {
         self.is_searching = false;
         self.current_search_task = None;
         self.images.clear();
+
+        // clear previous zoomed state
         self.zoomed_image = None;
         self.zoomed_image_index = None;
-        self.result_count = search_result.result_count;
+
         self.search_result = Some(search_result);
 
         self.update_page()
     }
 
     fn update_page(&mut self) -> Result<()> {
-        let result_count = self
-            .search_result
-            .as_ref()
-            .map_or(0, |res| res.result_count);
+        let result_count = self.result_count().unwrap_or(0);
         debug!(
             "Updating to page {}, with {} results",
             self.page, result_count
