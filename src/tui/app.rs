@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::database::Database;
 use crate::search::{SearchEngine, normalize_vector};
 use crate::tui::event::Event;
