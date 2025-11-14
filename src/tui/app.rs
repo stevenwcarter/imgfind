@@ -33,6 +33,15 @@ pub struct ImageEntry {
     pub rx: UnboundedReceiver<ResizeRequest>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum FocusDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+use FocusDirection::{Down, Left, Right, Up};
+
 /// Search result from background task
 #[derive(Clone)]
 pub struct SearchResult {
@@ -50,6 +59,7 @@ pub struct App {
     pub running: bool,
     pub zoomed_image_index: Option<u8>,
     pub zoomed_image: Option<ImageEntry>,
+    pub focused_image_index: u8,
     pub input: Input,
     pub page: usize,
     pub input_mode: InputMode,
@@ -85,6 +95,7 @@ impl App {
 
         Ok(Self {
             db,
+            focused_image_index: 0,
             images: Vec::new(),
             input: Input::default(),
             input_mode: InputMode::Normal,
@@ -246,13 +257,23 @@ impl App {
                 AppEvent::ZoomImage(zoom) => {
                     self.handle_zoom_image(zoom);
                 }
+                AppEvent::Focus(direction) => self.handle_focus(direction),
                 AppEvent::Quit => self.quit(),
             },
         }
     }
 
+    /// Handle focus movement in the image grid
+    /// Focus wraps to the next/previous row when moving up/down
+    pub fn handle_focus(&mut self, direction: FocusDirection) {
+        let images_len = self.images.len() as u8;
+        let current_index = self.focused_image_index;
+
+        self.focused_image_index = calculate_new_focus_index(images_len, current_index, direction);
+    }
+
     pub fn handle_zoom_image(&mut self, zoom: Option<u8>) {
-        if self.zoomed_image_index == zoom {
+        if self.zoomed_image_index == zoom || zoom.is_none() {
             self.zoomed_image_index = None;
             self.zoomed_image = None;
         } else {
@@ -274,7 +295,7 @@ impl App {
                         .expect("could not open")
                         .decode()
                         .expect("could not decoded");
-                    let image = image.resize(800, 800, ratatui_image::FilterType::Triangle);
+                    // let image = image.resize(800, 800, ratatui_image::FilterType::Triangle);
                     debug!("Image decoded successfully");
 
                     let (image_tx, image_rx) = unbounded_channel();
@@ -306,21 +327,25 @@ impl App {
                 }
                 KeyCode::Char('L') => self.events.send(AppEvent::NextPage),
                 KeyCode::Char('H') => self.events.send(AppEvent::PreviousPage),
+                KeyCode::Char('l') => self.events.send(AppEvent::Focus(Right)),
+                KeyCode::Char('k') => self.events.send(AppEvent::Focus(Up)),
+                KeyCode::Char('j') => self.events.send(AppEvent::Focus(Down)),
+                KeyCode::Char('h') => self.events.send(AppEvent::Focus(Left)),
                 KeyCode::Char('q') => self.events.send(AppEvent::Quit),
-                KeyCode::Char('1') => self.events.send(AppEvent::ZoomImage(Some(0))),
-                KeyCode::Char('2') => self.events.send(AppEvent::ZoomImage(Some(1))),
-                KeyCode::Char('3') => self.events.send(AppEvent::ZoomImage(Some(2))),
-                KeyCode::Char('4') => self.events.send(AppEvent::ZoomImage(Some(3))),
-                KeyCode::Char('5') => self.events.send(AppEvent::ZoomImage(Some(4))),
-                KeyCode::Char('6') => self.events.send(AppEvent::ZoomImage(Some(5))),
-                KeyCode::Char('7') => self.events.send(AppEvent::ZoomImage(Some(6))),
-                KeyCode::Char('8') => self.events.send(AppEvent::ZoomImage(Some(7))),
-                KeyCode::Char('9') => self.events.send(AppEvent::ZoomImage(Some(8))),
-                KeyCode::Esc => {
+                KeyCode::Enter => {
                     if self.zoomed_image_index.is_some() {
-                        self.zoomed_image_index = None;
+                        self.events.send(AppEvent::ZoomImage(None));
+                    } else {
+                        self.events
+                            .send(AppEvent::ZoomImage(Some(self.focused_image_index)));
                     }
                 }
+                KeyCode::Char(c @ '1'..='9') => {
+                    // subtract the byte representation of '1' to get zero-based index
+                    let idx = c as u8 - b'1';
+                    self.events.send(AppEvent::ZoomImage(Some(idx)));
+                }
+                KeyCode::Esc => self.events.send(AppEvent::ZoomImage(None)),
                 _ => {}
             },
             InputMode::Editing => match key_event.code {
@@ -451,5 +476,108 @@ impl App {
     /// Set running to false to quit the application.
     pub fn quit(&mut self) {
         self.running = false;
+    }
+}
+
+pub fn calculate_new_focus_index(
+    images_len: u8,
+    current_index: u8,
+    direction: FocusDirection,
+) -> u8 {
+    let mut current_index = current_index;
+    match direction {
+        Left => {
+            if current_index == 0 {
+                current_index = images_len - 1;
+            } else {
+                current_index -= 1;
+            }
+        }
+        Right => {
+            current_index += 1;
+            current_index %= images_len;
+        }
+        Up => {
+            if current_index < 3 {
+                let remainder = current_index % 3;
+                let rows = (images_len - 1) / 3;
+                current_index = (rows * 3) + remainder;
+                if current_index >= images_len - 1 {
+                    current_index = images_len - 1;
+                }
+            } else {
+                current_index -= 3;
+            }
+        }
+        Down => {
+            if current_index + 3 >= images_len {
+                current_index %= 3
+            } else {
+                let new_index = current_index + 3;
+                if new_index >= images_len {
+                    current_index = images_len - 1;
+                } else {
+                    current_index = new_index;
+                }
+            }
+        }
+    }
+
+    current_index
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn it_calculates_correct_right_indexes() {
+        assert_eq!(calculate_new_focus_index(9, 0, Right), 1);
+        assert_eq!(calculate_new_focus_index(9, 8, Right), 0);
+    }
+    #[test]
+    fn it_calculates_correct_left_indexes() {
+        assert_eq!(calculate_new_focus_index(9, 0, Left), 8);
+        assert_eq!(calculate_new_focus_index(9, 8, Left), 7);
+    }
+    #[test]
+    fn it_calculates_correct_up_indexes() {
+        assert_eq!(calculate_new_focus_index(9, 0, Up), 6);
+        assert_eq!(calculate_new_focus_index(9, 1, Up), 7);
+        assert_eq!(calculate_new_focus_index(9, 2, Up), 8);
+        assert_eq!(calculate_new_focus_index(9, 3, Up), 0);
+        assert_eq!(calculate_new_focus_index(9, 4, Up), 1);
+        assert_eq!(calculate_new_focus_index(9, 5, Up), 2);
+        assert_eq!(calculate_new_focus_index(9, 6, Up), 3);
+        assert_eq!(calculate_new_focus_index(9, 7, Up), 4);
+        assert_eq!(calculate_new_focus_index(9, 8, Up), 5);
+        assert_eq!(calculate_new_focus_index(6, 0, Up), 3);
+        assert_eq!(calculate_new_focus_index(6, 1, Up), 4);
+        assert_eq!(calculate_new_focus_index(6, 2, Up), 5);
+        assert_eq!(calculate_new_focus_index(8, 0, Up), 6);
+        assert_eq!(calculate_new_focus_index(8, 1, Up), 7);
+        assert_eq!(calculate_new_focus_index(8, 2, Up), 7);
+        assert_eq!(calculate_new_focus_index(7, 0, Up), 6);
+        assert_eq!(calculate_new_focus_index(7, 1, Up), 6);
+        assert_eq!(calculate_new_focus_index(7, 2, Up), 6);
+    }
+    #[test]
+    fn it_calculates_correct_down_indexes() {
+        assert_eq!(calculate_new_focus_index(9, 0, Down), 3);
+        assert_eq!(calculate_new_focus_index(9, 1, Down), 4);
+        assert_eq!(calculate_new_focus_index(9, 2, Down), 5);
+        assert_eq!(calculate_new_focus_index(9, 3, Down), 6);
+        assert_eq!(calculate_new_focus_index(9, 4, Down), 7);
+        assert_eq!(calculate_new_focus_index(9, 5, Down), 8);
+        assert_eq!(calculate_new_focus_index(9, 6, Down), 0);
+        assert_eq!(calculate_new_focus_index(9, 7, Down), 1);
+        assert_eq!(calculate_new_focus_index(9, 8, Down), 2);
+        assert_eq!(calculate_new_focus_index(6, 0, Down), 3);
+        assert_eq!(calculate_new_focus_index(6, 1, Down), 4);
+        assert_eq!(calculate_new_focus_index(6, 2, Down), 5);
+        assert_eq!(calculate_new_focus_index(6, 3, Down), 0);
+        assert_eq!(calculate_new_focus_index(6, 4, Down), 1);
+        assert_eq!(calculate_new_focus_index(6, 5, Down), 2);
+        assert_eq!(calculate_new_focus_index(8, 6, Down), 0);
+        assert_eq!(calculate_new_focus_index(8, 7, Down), 1);
     }
 }

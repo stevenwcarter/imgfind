@@ -1,14 +1,15 @@
+use anyhow::{Context, Result};
 use ratatui::{
     buffer::Buffer,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Flex, Layout, Rect},
     style::{Color, Style},
-    widgets::{Block, BorderType, Paragraph, StatefulWidget, Widget},
+    widgets::{Block, BorderType, Clear, Paragraph, StatefulWidget, Widget},
 };
 use ratatui_image::{Resize, StatefulImage};
-
-use crate::tui::app::InputMode;
+use tracing::error;
 
 use super::app::App;
+use crate::tui::app::{ImageEntry, InputMode};
 
 impl App {
     fn render_pagination(&self, area: Rect, buf: &mut Buffer) {
@@ -56,9 +57,69 @@ impl App {
             // Ratatui hides the cursor unless it's explicitly set. Position the cursor past the
             // end of the input text and one line down from the border to the input line
             let _x = self.input.visual_cursor().max(scroll) - scroll + 1;
-            // frame.set_cursor_position((area.x + x as u16, area.y + 1))
         }
     }
+
+    fn render_images(&mut self, area: Rect, buf: &mut Buffer) {
+        if let Some(image) = self.zoomed_image.as_mut() {
+            if let Err(e) = render_image(0, 9, image, area, buf) {
+                error!("Failed to render zoomed image: {}", e);
+            }
+        } else {
+            let nines = nine_block(area);
+
+            for (index, area) in nines.into_iter().enumerate() {
+                if let Some(image_entry) = self.images.get_mut(index)
+                    && let Err(e) = render_image(
+                        index as u8,
+                        self.focused_image_index,
+                        image_entry,
+                        area,
+                        buf,
+                    )
+                {
+                    error!("Failed to render image at index {}: {}", index, e);
+                }
+            }
+        }
+    }
+}
+
+fn center(area: Rect, horizontal: Constraint, vertical: Constraint) -> Rect {
+    let [area] = Layout::horizontal([horizontal])
+        .flex(Flex::Center)
+        .areas(area);
+    let [area] = Layout::vertical([vertical]).flex(Flex::Center).areas(area);
+    area
+}
+
+fn render_image(
+    index: u8,
+    focused_image_index: u8,
+    image_entry: &mut ImageEntry,
+    area: Rect,
+    buf: &mut Buffer,
+) -> Result<()> {
+    let image_area = image_entry
+        .protocol
+        .size_for(Resize::Scale(None), area)
+        .context("could not find size for image")?;
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(area);
+    if index == focused_image_index {
+        block.render(area, buf);
+    }
+    let center = center(
+        inner,
+        Constraint::Length(image_area.width),
+        Constraint::Length(image_area.height),
+    );
+    let image = StatefulImage::new().resize(Resize::Scale(None));
+    image.render(center, buf, &mut image_entry.protocol);
+
+    Ok(())
 }
 
 impl Widget for &mut App {
@@ -87,44 +148,12 @@ impl Widget for &mut App {
             .border_type(BorderType::Rounded)
             .render(area, buf);
 
-        if let Some(image) = self.zoomed_image.as_mut()
-        // && let Some(index) = self.zoomed_image_index
-        // && let Some(image_entry) = self.images.get_mut(index as usize)
-        {
-            // StatefulImage::new().resize(Resize::Scale(None)).render(
-            //     layout[0],
-            //     buf,
-            //     &mut image_entry.protocol,
-            // );
-            StatefulImage::new().resize(Resize::Scale(None)).render(
-                layout[0],
-                buf,
-                &mut image.protocol,
-            );
-        } else {
-            let nines = nine_block(layout[0]);
-
-            for (index, area) in nines.into_iter().enumerate() {
-                if let Some(image_entry) = self.images.get_mut(index) {
-                    StatefulImage::new().render(area, buf, &mut image_entry.protocol);
-                }
-            }
-        }
+        Clear.render(layout[0], buf);
+        self.render_images(layout[0], buf);
 
         self.render_pagination(layout[1], buf);
 
         self.render_input(layout[2], buf);
-
-        // let protocol = self
-        //     .picker
-        //     .new_protocol(self.image.clone(), layout[1], Resize::Fit(None))
-        //     .unwrap();
-        // let image = Image::new(&protocol);
-        // image.render(layout[1], buf);
-        // StatefulImage::new().render(layout[1], buf, state);
-
-        // .block(block)
-        // .render(layout[1], buf);
     }
 }
 

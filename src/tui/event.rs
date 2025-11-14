@@ -4,6 +4,8 @@ use ratatui::crossterm::event::Event as CrosstermEvent;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+use crate::tui::app::FocusDirection;
+
 /// The frequency at which tick events are emitted.
 const TICK_FPS: f64 = 30.0;
 
@@ -34,6 +36,7 @@ pub enum AppEvent {
     HandleSearch(String),
     NextPage,
     ZoomImage(Option<u8>),
+    Focus(FocusDirection),
     PreviousPage,
     /// Quit the application.
     Quit,
