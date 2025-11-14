@@ -1,8 +1,6 @@
 use crate::context::GraphQLContext;
 
-use juniper::{
-    EmptyMutation, EmptySubscription, FieldError, FieldResult, RootNode,
-};
+use juniper::{EmptyMutation, EmptySubscription, FieldError, FieldResult, RootNode};
 use tracing::error;
 
 pub struct Query;
@@ -21,8 +19,7 @@ impl Query {
 
 pub struct Mutation;
 
-pub type Schema =
-    RootNode<'static, Query, EmptyMutation<GraphQLContext>, EmptySubscription<GraphQLContext>>;
+pub type Schema = RootNode<Query, EmptyMutation<GraphQLContext>, EmptySubscription<GraphQLContext>>;
 
 pub fn create_schema() -> Schema {
     Schema::new(
