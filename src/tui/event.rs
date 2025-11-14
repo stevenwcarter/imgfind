@@ -33,6 +33,7 @@ pub enum Event {
 pub enum AppEvent {
     HandleSearch(String),
     NextPage,
+    ZoomImage(Option<u8>),
     PreviousPage,
     /// Quit the application.
     Quit,

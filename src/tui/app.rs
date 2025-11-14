@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::database::Database;
 use crate::search::{SearchEngine, normalize_vector};
 use crate::tui::event::Event;
@@ -6,7 +8,7 @@ use super::event::{AppEvent, EventHandler};
 use anyhow::{Context, Result};
 use clipper::ClipEmbedder;
 use futures::FutureExt;
-use image::{DynamicImage, load_from_memory};
+use image::{DynamicImage, ImageReader, load_from_memory};
 use ratatui::crossterm::event::Event as CrosstermEvent;
 use ratatui::{
     DefaultTerminal,
@@ -48,6 +50,8 @@ pub struct App {
     pub images: Vec<ImageEntry>,
     /// Is the application running?
     pub running: bool,
+    pub zoomed_image_index: Option<u8>,
+    pub zoomed_image: Option<ImageEntry>,
     pub input: Input,
     pub page: usize,
     pub input_mode: InputMode,
@@ -59,6 +63,8 @@ pub struct App {
     /// Channel to receive search results
     pub search_rx: UnboundedReceiver<SearchResult>,
     pub search_tx: UnboundedSender<SearchResult>,
+    pub zoom_rx: UnboundedReceiver<ImageEntry>,
+    pub zoom_tx: UnboundedSender<ImageEntry>,
     /// Current search task (if any)
     pub current_search_task: Option<JoinHandle<()>>,
     /// Loading state
@@ -77,6 +83,7 @@ impl App {
     pub fn new(db: Database) -> Result<Self> {
         let picker = Picker::from_query_stdio().unwrap();
         let (search_tx, search_rx) = unbounded_channel();
+        let (zoom_tx, zoom_rx) = unbounded_channel();
 
         Ok(Self {
             db,
@@ -87,11 +94,15 @@ impl App {
             running: true,
             page: 0,
             result_count: 0,
+            zoomed_image_index: None,
+            zoomed_image: None,
             search_result: None,
             events: EventHandler::default(),
             last_search: None,
             search_rx,
             search_tx,
+            zoom_tx,
+            zoom_rx,
             current_search_task: None,
             is_searching: false,
         })
@@ -107,6 +118,9 @@ impl App {
 
             select! {
                 Ok(event) = self.events.next().fuse() => self.handle_event(event).await,
+                Some(image_entry) = self.zoom_rx.recv().fuse() => {
+                    self.zoomed_image = Some(image_entry);
+                },
                 Some(search_result) = self.search_rx.recv().fuse() => {
                     self.handle_search_result(search_result)?;
                 }
@@ -117,6 +131,13 @@ impl App {
 
     /// Handle resize requests for all loaded images
     fn handle_image_resize_requests(&mut self) {
+        if let Some(image_entry) = self.zoomed_image.as_mut()
+            && let Ok(request) = image_entry.rx.try_recv()
+            && let Ok(resized) = request.resize_encode()
+        {
+            info!("Resizing image");
+            image_entry.protocol.update_resized_protocol(resized);
+        }
         for image_entry in &mut self.images {
             if let Ok(request) = image_entry.rx.try_recv()
                 && let Ok(resized) = request.resize_encode()
@@ -131,6 +152,8 @@ impl App {
         self.is_searching = false;
         self.current_search_task = None;
         self.images.clear();
+        self.zoomed_image = None;
+        self.zoomed_image_index = None;
         self.result_count = search_result.result_count;
         self.search_result = Some(search_result);
 
@@ -221,6 +244,49 @@ impl App {
                         eprintln!("Error updating page: {:?}", err);
                     }
                 }
+                AppEvent::ZoomImage(zoom) => {
+                    if self.zoomed_image_index == zoom {
+                        self.zoomed_image_index = None;
+                        self.zoomed_image = None;
+                    } else {
+                        self.zoomed_image_index = zoom;
+                        if let Some(zoom_index) = zoom {
+                            let image_entry = self
+                                .images
+                                .get(zoom_index as usize)
+                                .expect("image not found");
+                            let image_path = image_entry.path.clone();
+                            let image_score = image_entry.score;
+
+                            let zoom_tx = self.zoom_tx.clone();
+                            let picker: Arc<Picker> = Arc::new(self.picker.clone());
+
+                            tokio::spawn(async move {
+                                info!("Image path is: {}", image_path);
+                                let image = ImageReader::open(image_path.clone())
+                                    .expect("could not open")
+                                    .decode()
+                                    .expect("could not decoded");
+                                let image =
+                                    image.resize(800, 800, ratatui_image::FilterType::Triangle);
+                                info!("Image decoded successfully");
+
+                                let (image_tx, image_rx) = unbounded_channel();
+                                let protocol = picker.new_resize_protocol(image);
+                                let image_entry = ImageEntry {
+                                    path: image_path.clone(),
+                                    score: image_score,
+                                    rx: image_rx,
+                                    protocol: ThreadProtocol::new(image_tx, Some(protocol)),
+                                };
+
+                                zoom_tx
+                                    .send(image_entry)
+                                    .expect("Could not send image entry");
+                            });
+                        }
+                    }
+                }
                 AppEvent::Quit => self.quit(),
             },
         }
@@ -239,6 +305,20 @@ impl App {
                 KeyCode::Char('L') => self.events.send(AppEvent::NextPage),
                 KeyCode::Char('H') => self.events.send(AppEvent::PreviousPage),
                 KeyCode::Char('q') => self.events.send(AppEvent::Quit),
+                KeyCode::Char('1') => self.events.send(AppEvent::ZoomImage(Some(0))),
+                KeyCode::Char('2') => self.events.send(AppEvent::ZoomImage(Some(1))),
+                KeyCode::Char('3') => self.events.send(AppEvent::ZoomImage(Some(2))),
+                KeyCode::Char('4') => self.events.send(AppEvent::ZoomImage(Some(3))),
+                KeyCode::Char('5') => self.events.send(AppEvent::ZoomImage(Some(4))),
+                KeyCode::Char('6') => self.events.send(AppEvent::ZoomImage(Some(5))),
+                KeyCode::Char('7') => self.events.send(AppEvent::ZoomImage(Some(6))),
+                KeyCode::Char('8') => self.events.send(AppEvent::ZoomImage(Some(7))),
+                KeyCode::Char('9') => self.events.send(AppEvent::ZoomImage(Some(8))),
+                KeyCode::Esc => {
+                    if self.zoomed_image_index.is_some() {
+                        self.zoomed_image_index = None;
+                    }
+                }
                 _ => {}
             },
             InputMode::Editing => match key_event.code {

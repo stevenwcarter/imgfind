@@ -4,7 +4,7 @@ use ratatui::{
     style::{Color, Style},
     widgets::{Block, BorderType, Paragraph, StatefulWidget, Widget},
 };
-use ratatui_image::StatefulImage;
+use ratatui_image::{Resize, StatefulImage};
 
 use crate::tui::app::InputMode;
 
@@ -87,12 +87,27 @@ impl Widget for &mut App {
             .border_type(BorderType::Rounded)
             .render(area, buf);
 
-        // StatefulImage::new().render(layout[1], buf, &mut self.protocol);
-        let nines = nine_block(layout[0]);
+        if let Some(image) = self.zoomed_image.as_mut()
+        // && let Some(index) = self.zoomed_image_index
+        // && let Some(image_entry) = self.images.get_mut(index as usize)
+        {
+            // StatefulImage::new().resize(Resize::Scale(None)).render(
+            //     layout[0],
+            //     buf,
+            //     &mut image_entry.protocol,
+            // );
+            StatefulImage::new().resize(Resize::Scale(None)).render(
+                layout[0],
+                buf,
+                &mut image.protocol,
+            );
+        } else {
+            let nines = nine_block(layout[0]);
 
-        for (index, area) in nines.into_iter().enumerate() {
-            if let Some(image_entry) = self.images.get_mut(index) {
-                StatefulImage::new().render(area, buf, &mut image_entry.protocol);
+            for (index, area) in nines.into_iter().enumerate() {
+                if let Some(image_entry) = self.images.get_mut(index) {
+                    StatefulImage::new().render(area, buf, &mut image_entry.protocol);
+                }
             }
         }
 
