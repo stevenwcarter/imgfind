@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use crate::tui::app::FocusDirection;
 
 /// The frequency at which tick events are emitted.
-const TICK_FPS: f64 = 30.0;
+const TICK_FPS: f64 = 15.0;
 
 /// Representation of all possible events.
 #[derive(Clone, Debug)]
@@ -29,14 +29,18 @@ pub enum Event {
 }
 
 /// Application events.
-///
-/// You can extend this enum with your own custom events.
 #[derive(Clone, Debug)]
 pub enum AppEvent {
+    /// Handle a response from the tokio spawned search
     HandleSearch(String),
+    /// Navigate to the next page of results
     NextPage,
+    /// Zoom into the image at the specified index
     ZoomImage(Option<u8>),
+    /// Switch focus in a particular direction. This wraps to the best option on the next line in
+    /// some cases.
     Focus(FocusDirection),
+    /// Navigate to the previous page of results
     PreviousPage,
     /// Quit the application.
     Quit,

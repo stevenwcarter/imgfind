@@ -1,8 +1,8 @@
+use super::event::{AppEvent, EventHandler};
 use crate::database::Database;
 use crate::search::{SearchEngine, normalize_vector};
 use crate::tui::event::Event;
 
-use super::event::{AppEvent, EventHandler};
 use anyhow::{Context, Result};
 use clipper::ClipEmbedder;
 use futures::FutureExt;
@@ -27,9 +27,13 @@ use tui_input::backend::crossterm::EventHandler as _;
 
 /// Represents an image with its associated data and protocol
 pub struct ImageEntry {
+    /// Filesystem path to the image
     pub path: String,
+    /// Search score for the result
     pub score: f32,
+    /// Protocol used to handle resize events
     pub protocol: ThreadProtocol,
+    /// Listener for resize requests
     pub rx: UnboundedReceiver<ResizeRequest>,
 }
 
@@ -40,38 +44,57 @@ pub enum FocusDirection {
     Up,
     Down,
 }
-use FocusDirection::{Down, Left, Right, Up};
+// Use so it's easier to read the enums later on
+use FocusDirection::*;
 
 /// Search result from background task
 #[derive(Clone)]
 pub struct SearchResult {
+    /// Vec of images returned from the search
     pub images: Vec<(String, f32, DynamicImage)>,
+    /// Number of results found
     pub result_count: usize,
+    /// The query that resulted in these search results
     pub query: String,
 }
 
 /// Application.
 pub struct App {
+    /// Handle to the database for performing queries
     pub db: Database,
+    /// Picker which identifies the capabilities of the current terminal
     pub picker: Picker,
+    /// Images found from a search result
     pub images: Vec<ImageEntry>,
     /// Is the application running?
     pub running: bool,
+    /// Which index is currently zoomed
     pub zoomed_image_index: Option<u8>,
+    /// Larger version of the image which should be displayed as zoomed if present
     pub zoomed_image: Option<ImageEntry>,
+    /// Which image index is currently focused
     pub focused_image_index: u8,
+    /// Holds the input component/state
     pub input: Input,
+    /// Which page of search results is currently being displayed
     pub page: usize,
+    /// Determines whether we're editing the search box or not
     pub input_mode: InputMode,
+    /// How many total results were found
     pub result_count: usize,
+    /// What the last search string was
     pub last_search: Option<String>,
+    /// The results for the latest search
     pub search_result: Option<SearchResult>,
     /// Event handler.
     pub events: EventHandler,
     /// Channel to receive search results
     pub search_rx: UnboundedReceiver<SearchResult>,
+    /// Channel to send search results with
     pub search_tx: UnboundedSender<SearchResult>,
+    /// Channel to receive zoom results from image decoding
     pub zoom_rx: UnboundedReceiver<ImageEntry>,
+    /// Channel to send zoom results to
     pub zoom_tx: UnboundedSender<ImageEntry>,
     /// Current search task (if any)
     pub current_search_task: Option<JoinHandle<()>>,
