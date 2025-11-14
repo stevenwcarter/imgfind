@@ -23,7 +23,7 @@ use tokio::{
     sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
     task::JoinHandle,
 };
-use tracing::{error, info};
+use tracing::{debug, error};
 use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler as _;
 
@@ -119,6 +119,7 @@ impl App {
             select! {
                 Ok(event) = self.events.next().fuse() => self.handle_event(event).await,
                 Some(image_entry) = self.zoom_rx.recv().fuse() => {
+                    debug!("Received zoomed image: {}", image_entry.path);
                     self.zoomed_image = Some(image_entry);
                 },
                 Some(search_result) = self.search_rx.recv().fuse() => {
@@ -135,7 +136,7 @@ impl App {
             && let Ok(request) = image_entry.rx.try_recv()
             && let Ok(resized) = request.resize_encode()
         {
-            info!("Resizing image");
+            debug!("Resizing image");
             image_entry.protocol.update_resized_protocol(resized);
         }
         for image_entry in &mut self.images {
@@ -165,7 +166,7 @@ impl App {
             .search_result
             .as_ref()
             .map_or(0, |res| res.result_count);
-        info!(
+        debug!(
             "Updating to page {}, with {} results",
             self.page, result_count
         );
@@ -245,50 +246,53 @@ impl App {
                     }
                 }
                 AppEvent::ZoomImage(zoom) => {
-                    if self.zoomed_image_index == zoom {
-                        self.zoomed_image_index = None;
-                        self.zoomed_image = None;
-                    } else {
-                        self.zoomed_image_index = zoom;
-                        if let Some(zoom_index) = zoom {
-                            let image_entry = self
-                                .images
-                                .get(zoom_index as usize)
-                                .expect("image not found");
-                            let image_path = image_entry.path.clone();
-                            let image_score = image_entry.score;
-
-                            let zoom_tx = self.zoom_tx.clone();
-                            let picker: Arc<Picker> = Arc::new(self.picker.clone());
-
-                            tokio::spawn(async move {
-                                info!("Image path is: {}", image_path);
-                                let image = ImageReader::open(image_path.clone())
-                                    .expect("could not open")
-                                    .decode()
-                                    .expect("could not decoded");
-                                let image =
-                                    image.resize(800, 800, ratatui_image::FilterType::Triangle);
-                                info!("Image decoded successfully");
-
-                                let (image_tx, image_rx) = unbounded_channel();
-                                let protocol = picker.new_resize_protocol(image);
-                                let image_entry = ImageEntry {
-                                    path: image_path.clone(),
-                                    score: image_score,
-                                    rx: image_rx,
-                                    protocol: ThreadProtocol::new(image_tx, Some(protocol)),
-                                };
-
-                                zoom_tx
-                                    .send(image_entry)
-                                    .expect("Could not send image entry");
-                            });
-                        }
-                    }
+                    self.handle_zoom_image(zoom);
                 }
                 AppEvent::Quit => self.quit(),
             },
+        }
+    }
+
+    pub fn handle_zoom_image(&mut self, zoom: Option<u8>) {
+        if self.zoomed_image_index == zoom {
+            self.zoomed_image_index = None;
+            self.zoomed_image = None;
+        } else {
+            self.zoomed_image_index = zoom;
+            if let Some(zoom_index) = zoom {
+                let image_entry = self
+                    .images
+                    .get(zoom_index as usize)
+                    .expect("image not found");
+                let image_path = image_entry.path.clone();
+                let image_score = image_entry.score;
+
+                let zoom_tx = self.zoom_tx.clone();
+                let picker = self.picker.clone();
+
+                tokio::spawn(async move {
+                    debug!("Image path is: {}", image_path);
+                    let image = ImageReader::open(image_path.clone())
+                        .expect("could not open")
+                        .decode()
+                        .expect("could not decoded");
+                    let image = image.resize(800, 800, ratatui_image::FilterType::Triangle);
+                    debug!("Image decoded successfully");
+
+                    let (image_tx, image_rx) = unbounded_channel();
+                    let protocol = picker.new_resize_protocol(image);
+                    let image_entry = ImageEntry {
+                        path: image_path.clone(),
+                        score: image_score,
+                        rx: image_rx,
+                        protocol: ThreadProtocol::new(image_tx, Some(protocol)),
+                    };
+
+                    zoom_tx
+                        .send(image_entry)
+                        .expect("Could not send image entry");
+                });
+            }
         }
     }
 
