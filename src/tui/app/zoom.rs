@@ -16,67 +16,73 @@ const SCROLL_DEBOUNCE_MS: u64 = 50;
 /// Zoom into an image with optional mouse position for centering
 /// If mouse_pos is None, zooms into center. If Some((x, y)), zooms toward that position.
 /// Area is used to calculate aspect ratio accounting for terminal cell dimensions (2:1 ratio)
+/// current_view_area tracks the current crop area in original image coordinates
 pub fn zoom_with_mouse_position(
     img: &DynamicImage,
     zoom: f32,
-    pan_x: f32,
-    pan_y: f32,
+    _pan_x: f32,
+    _pan_y: f32,
     mouse_pos: Option<(u16, u16)>,
     area: Option<Rect>,
-) -> (DynamicImage, f32, f32) {
+    current_view_area: Option<(u32, u32, u32, u32)>,
+) -> (DynamicImage, f32, f32, (u32, u32, u32, u32)) {
     let zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
     let (img_w, img_h) = img.dimensions();
     
     // At zoom level 1.0, return the full image without any cropping
     if (zoom - 1.0).abs() < 0.01 {
-        return (img.clone(), 0.0, 0.0);
+        return (img.clone(), 0.0, 0.0, (0, 0, img_w, img_h));
     }
     
-    // Calculate crop dimensions based on terminal aspect ratio and zoom level
-    let (crop_w, crop_h) = calculate_terminal_aware_crop_size(img_w, img_h, zoom, area);
+    // Get the current view area or default to full image
+    let (view_x, view_y, view_w, view_h) = current_view_area.unwrap_or((0, 0, img_w, img_h));
     
-    // Calculate new pan offsets if mouse position is provided
-    let (new_pan_x, new_pan_y) = if let Some((mouse_x, mouse_y)) = mouse_pos {
+    // Calculate crop dimensions based on terminal aspect ratio and zoom level
+    // This determines how much of the current view area we want to see
+    let (crop_w, crop_h) = calculate_terminal_aware_crop_size(view_w, view_h, zoom, area);
+    
+    // Calculate mouse position relative to current view area if provided
+    let (target_x, target_y) = if let Some((mouse_x, mouse_y)) = mouse_pos {
         if let Some(area) = area {
-            // Convert mouse position to normalized coordinates (-1.0 to 1.0)
-            let norm_x = (mouse_x as f32 / area.width as f32) * 2.0 - 1.0;
-            let norm_y = (mouse_y as f32 / area.height as f32) * 2.0 - 1.0;
+            // Convert mouse position to coordinates within the current view area
+            let rel_x = mouse_x as f32 / area.width as f32;
+            let rel_y = mouse_y as f32 / area.height as f32;
             
-            // Blend current pan with mouse-targeted pan based on zoom level
-            let blend_factor = 0.3; // How much to move toward mouse position
-            (
-                pan_x + (norm_x - pan_x) * blend_factor,
-                pan_y + (norm_y - pan_y) * blend_factor,
-            )
+            // Map to actual coordinates within current view area
+            let target_x = view_x as f32 + rel_x * view_w as f32;
+            let target_y = view_y as f32 + rel_y * view_h as f32;
+            
+            (target_x, target_y)
         } else {
-            (pan_x, pan_y)
+            // Default to center of current view area
+            (view_x as f32 + view_w as f32 / 2.0, view_y as f32 + view_h as f32 / 2.0)
         }
     } else {
-        (pan_x, pan_y)
+        // Default to center of current view area
+        (view_x as f32 + view_w as f32 / 2.0, view_y as f32 + view_h as f32 / 2.0)
     };
     
-    // Smoothly clamp pan offsets to prevent showing empty space
-    let (clamped_pan_x, clamped_pan_y) = smooth_clamp_pan_offsets(
-        new_pan_x, new_pan_y, crop_w, crop_h, img_w, img_h
-    );
+    // Calculate new crop area centered on target position
+    let new_crop_x = (target_x - crop_w as f32 / 2.0).clamp(view_x as f32, (view_x + view_w - crop_w) as f32) as u32;
+    let new_crop_y = (target_y - crop_h as f32 / 2.0).clamp(view_y as f32, (view_y + view_h - crop_h) as f32) as u32;
     
-    // Calculate crop position based on clamped pan offsets
-    let center_x = img_w as f32 / 2.0;
-    let center_y = img_h as f32 / 2.0;
+    // Ensure crop doesn't exceed original image bounds
+    let final_crop_x = new_crop_x.clamp(0, img_w.saturating_sub(crop_w));
+    let final_crop_y = new_crop_y.clamp(0, img_h.saturating_sub(crop_h));
+    let final_crop_w = crop_w.min(img_w - final_crop_x);
+    let final_crop_h = crop_h.min(img_h - final_crop_y);
     
-    let max_offset_x = (img_w as f32 - crop_w as f32) / 2.0;
-    let max_offset_y = (img_h as f32 - crop_h as f32) / 2.0;
+    let cropped = img.crop_imm(final_crop_x, final_crop_y, final_crop_w, final_crop_h);
     
-    let crop_x = (center_x - crop_w as f32 / 2.0 + clamped_pan_x * max_offset_x)
-        .clamp(0.0, (img_w - crop_w) as f32) as u32;
-    let crop_y = (center_y - crop_h as f32 / 2.0 + clamped_pan_y * max_offset_y)
-        .clamp(0.0, (img_h - crop_h) as f32) as u32;
+    // Calculate new pan offsets based on where we actually cropped
+    let center_offset_x = (target_x - (final_crop_x as f32 + final_crop_w as f32 / 2.0)) / (view_w as f32 / 2.0);
+    let center_offset_y = (target_y - (final_crop_y as f32 + final_crop_h as f32 / 2.0)) / (view_h as f32 / 2.0);
     
-    let cropped = img.crop_imm(crop_x, crop_y, crop_w, crop_h);
+    let new_pan_x = center_offset_x.clamp(-1.0, 1.0);
+    let new_pan_y = center_offset_y.clamp(-1.0, 1.0);
     
-    // Don't resize back to original dimensions - let ratatui-image handle scaling
-    // This prevents stretching and maintains aspect ratio
-    (cropped, clamped_pan_x, clamped_pan_y)
+    // Return cropped image, pan offsets, and new view area in original image coordinates
+    (cropped, new_pan_x, new_pan_y, (final_crop_x, final_crop_y, final_crop_w, final_crop_h))
 }
 
 /// Calculate crop dimensions that match terminal aspect ratio
@@ -125,29 +131,6 @@ fn calculate_terminal_aware_crop_size(
     }
 }
 
-/// Smoothly clamp pan offsets to prevent empty space around edges
-fn smooth_clamp_pan_offsets(
-    pan_x: f32,
-    pan_y: f32,
-    crop_w: u32,
-    crop_h: u32,
-    img_w: u32,
-    img_h: u32,
-) -> (f32, f32) {
-    // If crop is larger than or equal to image, no panning needed
-    if crop_w >= img_w || crop_h >= img_h {
-        return (0.0, 0.0);
-    }
-    
-    // Calculate maximum allowed pan based on crop and image dimensions
-    let max_pan_x = (img_w - crop_w) as f32 / (2.0 * ((img_w - crop_w) as f32 / 2.0).max(1.0));
-    let max_pan_y = (img_h - crop_h) as f32 / (2.0 * ((img_h - crop_h) as f32 / 2.0).max(1.0));
-    
-    let clamped_x = pan_x.clamp(-max_pan_x, max_pan_x);
-    let clamped_y = pan_y.clamp(-max_pan_y, max_pan_y);
-    
-    (clamped_x, clamped_y)
-}
 
 /// Calculate next zoom level using exponential scaling
 pub fn calculate_next_zoom_level(current: f32, zoom_in: bool) -> f32 {
@@ -206,13 +189,21 @@ pub fn handle_zoom_image_with_mouse(app: &mut App, zoom: Option<u8>, mouse_pos: 
                     None
                 };
                 
-                let (image, new_pan_x, new_pan_y) = zoom_with_mouse_position(
+                // Get current view area from existing zoomed image if available
+                let current_view_area = if let Some(zoomed) = &app.zoomed_image {
+                    zoomed.current_view_area
+                } else {
+                    None
+                };
+                
+                let (image, new_pan_x, new_pan_y, new_view_area) = zoom_with_mouse_position(
                     &base_image, 
                     zoom_level, 
                     pan_x, 
                     pan_y, 
                     mouse_pos,
-                    area
+                    area,
+                    current_view_area
                 );
                 
                 debug!("Image zoomed successfully to level {}", zoom_level);
@@ -227,6 +218,7 @@ pub fn handle_zoom_image_with_mouse(app: &mut App, zoom: Option<u8>, mouse_pos: 
                     pan_x: new_pan_x,
                     pan_y: new_pan_y,
                     last_scroll_time: None,
+                    current_view_area: Some(new_view_area),
                     image: Some(base_image),
                     protocol: ThreadProtocol::new(image_tx, Some(protocol)),
                 };

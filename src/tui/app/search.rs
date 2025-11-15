@@ -41,6 +41,8 @@ pub struct ImageEntry {
     pub pan_y: f32,
     /// Last scroll event time for debouncing
     pub last_scroll_time: Option<Instant>,
+    /// Current view area in original image coordinates (x, y, width, height)
+    pub current_view_area: Option<(u32, u32, u32, u32)>,
 }
 
 impl App {
@@ -120,6 +122,7 @@ impl App {
                 pan_x: 0.0,
                 pan_y: 0.0,
                 last_scroll_time: None,
+                current_view_area: None,
             };
 
             self.images.push(image_entry);
