@@ -1,6 +1,7 @@
 use super::event::{AppEvent, EventHandler};
 use crate::database::Database;
 use crate::tui::event::Event;
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 pub use input::InputMode;
 pub use search::ImageEntry;
 
@@ -17,6 +18,7 @@ use tokio::{
     sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
     task::JoinHandle,
 };
+use tracing::info;
 use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler as _;
 
@@ -42,6 +44,7 @@ pub struct App {
     pub zoomed_image_index: Option<u8>,
     /// Larger version of the image which should be displayed as zoomed if present
     pub zoomed_image: Option<ImageEntry>,
+    pub zoom_level: u8,
     /// Which image index is currently focused
     pub focused_image_index: u8,
     /// Holds the input component/state
@@ -68,6 +71,7 @@ pub struct App {
     pub current_search_task: Option<JoinHandle<()>>,
     /// Loading state
     pub is_searching: bool,
+    pub mouse_click: Option<MouseEvent>,
 }
 
 impl App {
@@ -86,6 +90,7 @@ impl App {
             picker,
             running: true,
             page: 0,
+            zoom_level: 1,
             zoomed_image_index: None,
             zoomed_image: None,
             search_result: None,
@@ -97,6 +102,7 @@ impl App {
             zoom_rx,
             current_search_task: None,
             is_searching: false,
+            mouse_click: None,
         })
     }
 
@@ -125,6 +131,7 @@ impl App {
         match event {
             Event::Tick => self.tick(),
             Event::Crossterm(event) => match event {
+                crossterm::event::Event::Mouse(mouse_event) => self.handle_mouse_event(mouse_event),
                 crossterm::event::Event::Key(key_event)
                     if key_event.kind == crossterm::event::KeyEventKind::Press =>
                 {
@@ -133,6 +140,30 @@ impl App {
                 _ => {}
             },
             Event::App(app_event) => match app_event {
+                AppEvent::ZoomIn(mouse_event) => {
+                    if self.zoomed_image.is_some() {
+                        self.zoom_level = self.zoom_level.saturating_add(1).clamp(1, 8);
+                        self.handle_zoom_image(self.zoomed_image_index);
+                    }
+                }
+                AppEvent::ZoomOut(mouse_event) => {
+                    if self.zoomed_image.is_some() {
+                        self.zoom_level = self.zoom_level.saturating_sub(1).clamp(1, 8);
+                        self.handle_zoom_image(self.zoomed_image_index);
+                    }
+                }
+                AppEvent::ZoomReset => {
+                    self.zoom_level = 1;
+                    self.handle_zoom_image(self.zoomed_image_index);
+                }
+                AppEvent::ClickLeft(mouse_event) => {
+                    if self.zoomed_image.is_some() {
+                        self.mouse_click = None;
+                        self.events.send(AppEvent::ZoomImage(None))
+                    } else {
+                        self.mouse_click = Some(mouse_event);
+                    }
+                }
                 AppEvent::HandleSearch(query) => {
                     self.page = 0;
                     if let Err(err) = self.handle_search(&query) {
@@ -165,6 +196,33 @@ impl App {
                 AppEvent::Focus(direction) => self.handle_focus(direction),
                 AppEvent::Quit => self.quit(),
             },
+        }
+    }
+
+    pub fn handle_mouse_event(&mut self, mouse_event: MouseEvent) {
+        info!("Received mouse event: {:?}", mouse_event);
+        match mouse_event.kind {
+            MouseEventKind::ScrollUp => {
+                if self.zoomed_image.is_some() {
+                    self.events.send(AppEvent::ZoomIn(mouse_event))
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                if self.zoomed_image.is_some() {
+                    self.events.send(AppEvent::ZoomOut(mouse_event))
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.events.send(AppEvent::ClickLeft(mouse_event))
+            }
+            MouseEventKind::Up(MouseButton::Right) => {
+                if self.zoomed_image.is_some() {
+                    self.events.send(AppEvent::ZoomReset);
+                }
+            }
+            e => {
+                info!("Other mouse event: {:?}", e);
+            }
         }
     }
 

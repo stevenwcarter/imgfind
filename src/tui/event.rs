@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use crossterm::event::MouseEvent;
 use futures::{FutureExt, StreamExt};
 use ratatui::crossterm::event::Event as CrosstermEvent;
 use std::time::Duration;
@@ -31,6 +32,10 @@ pub enum Event {
 /// Application events.
 #[derive(Clone, Debug)]
 pub enum AppEvent {
+    ZoomIn(MouseEvent),
+    ZoomOut(MouseEvent),
+    ZoomReset,
+    ClickLeft(MouseEvent),
     /// Handle a response from the tokio spawned search
     HandleSearch(String),
     /// Navigate to the next page of results

@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use ratatui::{
     buffer::Buffer,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Position, Rect},
     style::{Color, Style},
     widgets::{Block, BorderType, Clear, Paragraph, Widget},
 };
@@ -11,6 +11,7 @@ use tracing::error;
 use super::app::App;
 use crate::tui::{
     app::InputMode,
+    event::AppEvent,
     widget::{nine_block, render_image},
 };
 
@@ -65,6 +66,7 @@ impl App {
 
     fn render_images(&mut self, area: Rect, buf: &mut Buffer) {
         if let Some(image) = self.zoomed_image.as_mut() {
+            Clear.render(area, buf);
             if let Err(e) = render_image(0, 9, image, area, buf) {
                 error!("Failed to render zoomed image: {}", e);
             }
@@ -72,6 +74,15 @@ impl App {
             let nines = nine_block(area);
 
             for (index, area) in nines.into_iter().enumerate() {
+                if let Some(mouse_event) = self.mouse_click
+                    && area.contains(Position {
+                        x: mouse_event.column,
+                        y: mouse_event.row,
+                    })
+                {
+                    self.mouse_click = None;
+                    self.events.send(AppEvent::ZoomImage(Some(index as u8)));
+                }
                 if let Some(image_entry) = self.images.get_mut(index)
                     && let Err(e) = render_image(
                         index as u8,
@@ -112,7 +123,6 @@ impl Widget for &mut App {
             .border_type(BorderType::Rounded)
             .render(area, buf);
 
-        Clear.render(layout[0], buf);
         self.render_images(layout[0], buf);
 
         self.render_pagination(layout[1], buf);

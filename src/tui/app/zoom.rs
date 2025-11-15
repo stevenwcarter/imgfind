@@ -1,13 +1,27 @@
-use image::ImageReader;
-use ratatui_image::thread::ThreadProtocol;
+use image::{DynamicImage, GenericImageView, ImageReader};
+use ratatui_image::{FilterType, thread::ThreadProtocol};
 use tokio::sync::mpsc::unbounded_channel;
 use tracing::debug;
 
 use crate::tui::{app::App, app::ImageEntry};
 
+pub fn zoom_center(img: &DynamicImage, zoom: f32) -> DynamicImage {
+    let (w, h) = img.dimensions();
+
+    let new_w = (w as f32 / zoom) as u32;
+    let new_h = (h as f32 / zoom) as u32;
+
+    let x = (w - new_w) / 2;
+    let y = (h - new_h) / 2;
+
+    let cropped = img.crop_imm(x, y, new_w, new_h);
+
+    cropped.resize_exact(w, h, FilterType::Lanczos3)
+}
+
 impl App {
     pub fn handle_zoom_image(&mut self, zoom: Option<u8>) {
-        if self.zoomed_image_index == zoom || zoom.is_none() {
+        if (self.zoomed_image_index == zoom && self.zoom_level == 1) || zoom.is_none() {
             self.zoomed_image_index = None;
             self.zoomed_image = None;
         } else {
@@ -19,6 +33,7 @@ impl App {
                     .expect("image not found");
                 let image_path = image_entry.path.clone();
                 let image_score = image_entry.score;
+                let zoom_level = self.zoom_level;
 
                 let zoom_tx = self.zoom_tx.clone();
                 let picker = self.picker.clone();
@@ -29,6 +44,7 @@ impl App {
                         .expect("could not open")
                         .decode()
                         .expect("could not decoded");
+                    let image = zoom_center(&image, zoom_level as f32);
                     // let image = image.resize(800, 800, ratatui_image::FilterType::Triangle);
                     debug!("Image decoded successfully");
 
