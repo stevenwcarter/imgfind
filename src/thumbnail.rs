@@ -61,7 +61,7 @@ pub fn generate_missing_thumbnails_batch(
     let writer_count = Arc::clone(&generated_count);
 
     // Open a single database connection in the writer thread to avoid write deadlocks.
-    let db_path = get_db_path().context("Failed to resolve database path")?;
+    let db_path = get_db_path(None).context("Failed to resolve database path")?;
     let writer_db = match Database::new(&db_path) {
         Ok(db) => db,
         Err(e) => {

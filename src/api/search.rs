@@ -61,10 +61,11 @@ async fn search(
 }
 
 async fn file(
-    Extension(_context): Extension<GraphQLContext>,
+    Extension(context): Extension<GraphQLContext>,
     Path(filename): Path<String>,
 ) -> anyhow::Result<impl IntoResponse, AppError> {
+    let full_path = std::path::Path::new(&context.basepath).join(&filename);
     info!("Filename: {}", filename);
 
-    Ok(std::fs::read(&filename).unwrap())
+    Ok(std::fs::read(&full_path).unwrap())
 }

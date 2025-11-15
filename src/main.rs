@@ -43,7 +43,10 @@ enum Commands {
         #[arg(long)]
         root: bool,
     },
-    Tui {},
+    Tui {
+        #[arg(short, long)]
+        dir: Option<String>,
+    },
     /// Search for images using natural language
     Search {
         /// Search query
@@ -84,7 +87,10 @@ enum Commands {
         #[arg(short, long, default_value_t = 50)]
         count: usize,
     },
-    Serve,
+    Serve {
+        #[arg(short, long)]
+        dir: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -112,8 +118,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Tui {} => {
-            let db_path = get_db_path()?;
+        Commands::Tui { dir } => {
+            let db_path = get_db_path(dir.as_deref())?;
             let db = Database::new(&db_path)?;
             imgfind::tui::tui(db).await?;
         }
@@ -126,7 +132,7 @@ async fn main() -> Result<()> {
             let db_path = if root {
                 get_local_db_path()?
             } else {
-                get_db_path()?
+                get_db_path(None)?
             };
             let mut db = Database::new(&db_path)?;
             index_directory(&mut db, &dir, recursive, quiet)?;
@@ -139,17 +145,17 @@ async fn main() -> Result<()> {
             all,
             display,
         } => {
-            let db_path = get_db_path()?;
+            let db_path = get_db_path(None)?;
             let db = Database::new(&db_path)?;
             search_images(&db, &prompt, limit, short, recursive, all, display)?;
         }
         Commands::Clean => {
-            let db_path = get_db_path()?;
+            let db_path = get_db_path(None)?;
             let mut db = Database::new(&db_path)?;
             clean_database(&mut db)?;
         }
         Commands::Status => {
-            let db_path = get_db_path()?;
+            let db_path = get_db_path(None)?;
             let db = Database::new(&db_path)?;
             show_status(&db, &db_path)?;
         }
@@ -157,25 +163,25 @@ async fn main() -> Result<()> {
             handle_config_command(config_command)?;
         }
         Commands::Thumbnails { size, count } => {
-            let db_path = get_db_path()?;
+            let db_path = get_db_path(None)?;
             let mut db = Database::new(&db_path)?;
             generate_thumbnails_batch(&mut db, size, count)?;
         }
-        Commands::Serve => {
-            let db_path = get_db_path()?;
+        Commands::Serve { dir } => {
+            let db_path = get_db_path(dir.as_deref())?;
             let db = Database::new(&db_path)?;
-            serve(db).await?;
+            serve(db, dir.unwrap_or(".".to_owned())).await?;
         }
     }
 
     Ok(())
 }
 
-async fn serve(db: Database) -> Result<()> {
+async fn serve(db: Database, directory: String) -> Result<()> {
     // Placeholder for future server implementation
     println!("Server functionality is not yet implemented.");
     let port = 6060;
-    let context = GraphQLContext::new(db);
+    let context = GraphQLContext::new(db, directory);
     let app = app(context.clone());
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
         .await

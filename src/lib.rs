@@ -16,9 +16,18 @@ pub mod search;
 pub mod thumbnail;
 pub mod tui;
 
-pub fn get_db_path() -> Result<PathBuf> {
+pub fn get_db_path(dir: Option<&str>) -> Result<PathBuf> {
     // First, try to find existing database by walking up directory tree
-    let mut current_dir = std::env::current_dir()?;
+    if let Some(dir) = dir {
+        let potential_db = Path::new(&dir).join(".imgfind").join("imgfind.db");
+        if potential_db.exists() {
+            return Ok(potential_db);
+        } else {
+            panic!("No database found in this directory")
+        }
+    }
+
+    let mut current_dir = std::env::current_dir().unwrap();
 
     loop {
         let potential_db = current_dir.join(".imgfind").join("imgfind.db");
