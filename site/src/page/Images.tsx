@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faTimesCircle } from '@fortawesome/free-solid-svg-icons';
+import { useKeyPress, useBodyScrollLock } from '../hooks';
 import LightboxViewer from 'components/LightboxViewer';
 import Lightbox from 'yet-another-react-lightbox';
 import Download from 'yet-another-react-lightbox/plugins/download';
@@ -32,27 +33,9 @@ export const Images = () => {
     setSelectedImage(null);
   };
 
-  // Handle escape key to close modal
-  useEffect(() => {
-    const handleEscapeKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && selectedImage) {
-        closeModal();
-      }
-    };
-
-    if (selectedImage) {
-      document.addEventListener('keydown', handleEscapeKey);
-      // Prevent body scroll when modal is open
-      document.body.style.overflow = 'hidden';
-    } else {
-      document.body.style.overflow = 'unset';
-    }
-
-    return () => {
-      document.removeEventListener('keydown', handleEscapeKey);
-      document.body.style.overflow = 'unset';
-    };
-  }, [selectedImage]);
+  // Handle escape key to close modal and manage body scroll
+  useKeyPress('Escape', closeModal, !!selectedImage);
+  useBodyScrollLock(!!selectedImage);
 
   const getImages = async (q: string) => {
     try {
