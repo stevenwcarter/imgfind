@@ -1,15 +1,18 @@
-use anyhow::{Context, Result};
+use std::rc::Rc;
+
 use ratatui::{
     buffer::Buffer,
-    layout::{Alignment, Constraint, Direction, Flex, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Style},
-    widgets::{Block, BorderType, Clear, Paragraph, StatefulWidget, Widget},
+    widgets::{Block, BorderType, Clear, Paragraph, Widget},
 };
-use ratatui_image::{Resize, StatefulImage};
 use tracing::error;
 
 use super::app::App;
-use crate::tui::app::{ImageEntry, InputMode};
+use crate::tui::{
+    app::InputMode,
+    widget::{nine_block, render_image},
+};
 
 impl App {
     fn render_pagination(&self, area: Rect, buf: &mut Buffer) {
@@ -85,63 +88,24 @@ impl App {
     }
 }
 
-fn center(area: Rect, horizontal: Constraint, vertical: Constraint) -> Rect {
-    let [area] = Layout::horizontal([horizontal])
-        .flex(Flex::Center)
-        .areas(area);
-    let [area] = Layout::vertical([vertical]).flex(Flex::Center).areas(area);
-    area
-}
-
-fn render_image(
-    index: u8,
-    focused_image_index: u8,
-    image_entry: &mut ImageEntry,
-    area: Rect,
-    buf: &mut Buffer,
-) -> Result<()> {
-    let image_area = image_entry
-        .protocol
-        .size_for(Resize::Scale(None), area)
-        .context("could not find size for image")?;
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Yellow));
-    let inner = block.inner(area);
-    if index == focused_image_index {
-        block.render(area, buf);
-    }
-    let center = center(
-        inner,
-        Constraint::Length(image_area.width),
-        Constraint::Length(image_area.height),
-    );
-    let image = StatefulImage::new().resize(Resize::Scale(None));
-    image.render(center, buf, &mut image_entry.protocol);
-
-    Ok(())
+fn build_layout(area: Rect) -> Rc<[Rect]> {
+    Layout::default()
+        .direction(Direction::Vertical)
+        .margin(2)
+        .constraints(
+            [
+                Constraint::Fill(1),
+                Constraint::Length(1),
+                Constraint::Length(3),
+            ]
+            .as_ref(),
+        )
+        .split(area)
 }
 
 impl Widget for &mut App {
-    /// Renders the user interface widgets.
-    ///
-    // This is where you add new widgets.
-    // See the following resources:
-    // - https://docs.rs/ratatui/latest/ratatui/widgets/index.html
-    // - https://github.com/ratatui/ratatui/tree/master/examples
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let layout = Layout::default()
-            .direction(Direction::Vertical)
-            .margin(2)
-            .constraints(
-                [
-                    Constraint::Fill(1),
-                    Constraint::Length(1),
-                    Constraint::Length(3),
-                ]
-                .as_ref(),
-            )
-            .split(area);
+        let layout = build_layout(area);
         Block::bordered()
             .title("imgfind-cli")
             .title_alignment(Alignment::Center)
@@ -155,40 +119,4 @@ impl Widget for &mut App {
 
         self.render_input(layout[2], buf);
     }
-}
-
-pub fn nine_block(area: Rect) -> Vec<Rect> {
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(
-            [
-                Constraint::Percentage(33),
-                Constraint::Percentage(34),
-                Constraint::Percentage(33),
-            ]
-            .as_ref(),
-        )
-        .split(area);
-
-    let mut areas = Vec::new();
-
-    for area in layout.iter() {
-        let horizontal = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints(
-                [
-                    Constraint::Percentage(33),
-                    Constraint::Percentage(34),
-                    Constraint::Percentage(33),
-                ]
-                .as_ref(),
-            )
-            .split(*area);
-
-        for h_area in horizontal.iter() {
-            areas.push(*h_area);
-        }
-    }
-
-    areas
 }
