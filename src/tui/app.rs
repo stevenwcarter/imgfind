@@ -4,6 +4,7 @@ use crate::tui::event::Event;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 pub use input::InputMode;
 pub use search::ImageEntry;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use futures::FutureExt;
@@ -11,6 +12,7 @@ use ratatui::crossterm::event::Event as CrosstermEvent;
 use ratatui::{
     DefaultTerminal,
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
+    layout::Rect,
 };
 use ratatui_image::picker::Picker;
 use tokio::{
@@ -25,7 +27,7 @@ use tui_input::backend::crossterm::EventHandler as _;
 mod focus;
 mod input;
 mod search;
-mod zoom;
+pub mod zoom;
 
 pub use focus::FocusDirection;
 pub use search::SearchResult;
@@ -44,7 +46,7 @@ pub struct App {
     pub zoomed_image_index: Option<u8>,
     /// Larger version of the image which should be displayed as zoomed if present
     pub zoomed_image: Option<ImageEntry>,
-    pub zoom_level: u8,
+    pub zoom_level: f32,
     /// Which image index is currently focused
     pub focused_image_index: u8,
     /// Holds the input component/state
@@ -72,6 +74,8 @@ pub struct App {
     /// Loading state
     pub is_searching: bool,
     pub mouse_click: Option<MouseEvent>,
+    /// Current render area for zoom calculations
+    pub current_render_area: Option<Rect>,
 }
 
 impl App {
@@ -90,7 +94,7 @@ impl App {
             picker,
             running: true,
             page: 0,
-            zoom_level: 1,
+            zoom_level: 1.0,
             zoomed_image_index: None,
             zoomed_image: None,
             search_result: None,
@@ -103,6 +107,7 @@ impl App {
             current_search_task: None,
             is_searching: false,
             mouse_click: None,
+            current_render_area: None,
         })
     }
 
@@ -142,19 +147,31 @@ impl App {
             Event::App(app_event) => match app_event {
                 AppEvent::ZoomIn(mouse_event) => {
                     if self.zoomed_image.is_some() {
-                        self.zoom_level = self.zoom_level.saturating_add(1).clamp(1, 4);
-                        self.handle_zoom_image(self.zoomed_image_index);
+                        self.zoom_level = zoom::calculate_next_zoom_level(self.zoom_level, true);
+                        let mouse_pos = Some((mouse_event.column, mouse_event.row));
+                        zoom::handle_zoom_image_with_mouse(self, self.zoomed_image_index, mouse_pos);
+                        
+                        // Update last scroll time for debouncing
+                        if let Some(zoomed_image) = &mut self.zoomed_image {
+                            zoomed_image.last_scroll_time = Some(Instant::now());
+                        }
                     }
                 }
                 AppEvent::ZoomOut(mouse_event) => {
                     if self.zoomed_image.is_some() {
-                        self.zoom_level = self.zoom_level.saturating_sub(1).clamp(1, 4);
-                        self.handle_zoom_image(self.zoomed_image_index);
+                        self.zoom_level = zoom::calculate_next_zoom_level(self.zoom_level, false);
+                        let mouse_pos = Some((mouse_event.column, mouse_event.row));
+                        zoom::handle_zoom_image_with_mouse(self, self.zoomed_image_index, mouse_pos);
+                        
+                        // Update last scroll time for debouncing
+                        if let Some(zoomed_image) = &mut self.zoomed_image {
+                            zoomed_image.last_scroll_time = Some(Instant::now());
+                        }
                     }
                 }
                 AppEvent::ZoomReset => {
-                    self.zoom_level = 1;
-                    self.handle_zoom_image(self.zoomed_image_index);
+                    self.zoom_level = 1.0;
+                    zoom::handle_zoom_image(self, self.zoomed_image_index);
                 }
                 AppEvent::ClickLeft(mouse_event) => {
                     if self.zoomed_image.is_some() {
@@ -191,7 +208,7 @@ impl App {
                     }
                 }
                 AppEvent::ZoomImage(zoom) => {
-                    self.handle_zoom_image(zoom);
+                    zoom::handle_zoom_image(self, zoom);
                 }
                 AppEvent::Focus(direction) => self.handle_focus(direction),
                 AppEvent::Quit => self.quit(),
@@ -204,12 +221,30 @@ impl App {
         match mouse_event.kind {
             MouseEventKind::ScrollUp => {
                 if self.zoomed_image.is_some() {
-                    self.events.send(AppEvent::ZoomIn(mouse_event))
+                    // Check scroll debouncing
+                    let should_process = if let Some(zoomed_image) = &self.zoomed_image {
+                        crate::tui::app::zoom::should_process_scroll(zoomed_image.last_scroll_time)
+                    } else {
+                        true
+                    };
+                    
+                    if should_process {
+                        self.events.send(AppEvent::ZoomIn(mouse_event))
+                    }
                 }
             }
             MouseEventKind::ScrollDown => {
                 if self.zoomed_image.is_some() {
-                    self.events.send(AppEvent::ZoomOut(mouse_event))
+                    // Check scroll debouncing
+                    let should_process = if let Some(zoomed_image) = &self.zoomed_image {
+                        crate::tui::app::zoom::should_process_scroll(zoomed_image.last_scroll_time)
+                    } else {
+                        true
+                    };
+                    
+                    if should_process {
+                        self.events.send(AppEvent::ZoomOut(mouse_event))
+                    }
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {

@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use clipper::ClipEmbedder;
 use image::DynamicImage;
 use ratatui_image::thread::{ResizeRequest, ThreadProtocol};
+use std::time::Instant;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tracing::{debug, error};
 
@@ -33,7 +34,13 @@ pub struct ImageEntry {
     pub image: Option<DynamicImage>,
     /// Listener for resize requests
     pub rx: UnboundedReceiver<ResizeRequest>,
-    pub current_zoom: u8,
+    pub current_zoom: f32,
+    /// Pan offset in X direction (normalized -1.0 to 1.0)
+    pub pan_x: f32,
+    /// Pan offset in Y direction (normalized -1.0 to 1.0)
+    pub pan_y: f32,
+    /// Last scroll event time for debouncing
+    pub last_scroll_time: Option<Instant>,
 }
 
 impl App {
@@ -109,7 +116,10 @@ impl App {
                 protocol: ThreadProtocol::new(image_tx, Some(protocol)),
                 image: Some(image.clone()),
                 rx: image_rx,
-                current_zoom: 1,
+                current_zoom: 1.0,
+                pan_x: 0.0,
+                pan_y: 0.0,
+                last_scroll_time: None,
             };
 
             self.images.push(image_entry);

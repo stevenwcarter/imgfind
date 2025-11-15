@@ -65,6 +65,9 @@ impl App {
     }
 
     fn render_images(&mut self, area: Rect, buf: &mut Buffer) {
+        // Store current render area for zoom calculations
+        self.current_render_area = Some(area);
+        
         if let Some(image) = self.zoomed_image.as_mut() {
             Clear.render(area, buf);
             if let Err(e) = render_image(0, 9, image, area, buf) {
