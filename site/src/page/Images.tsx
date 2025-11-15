@@ -78,11 +78,22 @@ export const Images = () => {
     }
   };
 
+  const handleClear = () => {
+    setSearch({ query: '' });
+    setQuery('');
+  };
+
+  const handleClose = () => {
+    setIsOpen(false);
+  };
+
   useEffect(() => {
     const s = search.get('query');
 
     if (s !== null && s !== '') {
       getImages(s);
+    } else {
+      setImages([]);
     }
   }, [search]);
 
@@ -102,7 +113,7 @@ export const Images = () => {
           <FontAwesomeIcon
             icon={faTimesCircle}
             className="absolute right-2 top-3 cursor-pointer hover:scale-125"
-            onClick={() => setQuery('')}
+            onClick={handleClear}
           />
         )}
       </div>
@@ -125,8 +136,7 @@ export const Images = () => {
             src: `/api/v1/search/file/${img[0]}`,
             thumbnail: `/api/v1/search/thumb:300/${img[0]}`,
           }))}
-          // mainSrcThumbnail={props.mainSrcThumbnail}
-          close={() => setIsOpen(false)}
+          close={handleClose}
           index={activeIndex}
         />
       )}

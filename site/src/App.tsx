@@ -1,5 +1,6 @@
 import React, { Suspense } from 'react';
-import { ApolloClient, ApolloProvider, InMemoryCache } from '@apollo/client';
+import { ApolloClient, HttpLink, InMemoryCache } from '@apollo/client';
+import { ApolloProvider } from '@apollo/client/react';
 import { ToastContainer } from 'react-toastify';
 import { RouterProvider, createBrowserRouter } from 'react-router-dom';
 import 'react-toastify/dist/ReactToastify.css';
@@ -8,8 +9,8 @@ const PageTemplate = React.lazy(() => import('page/PageTemplate'));
 const Images = React.lazy(() => import('page/Images'));
 
 const apolloClient = new ApolloClient({
-  cache: new InMemoryCache({ addTypename: false }),
-  uri: '/graphql',
+  cache: new InMemoryCache({}),
+  link: new HttpLink({ uri: '/graphql' }),
 });
 
 const router = createBrowserRouter([

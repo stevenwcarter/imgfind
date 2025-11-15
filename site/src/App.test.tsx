@@ -2,7 +2,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import App from './App';
 import '@testing-library/jest-dom';
 
-describe('AxumReactStarter', () => {
+describe('imgfind', () => {
   it('renders without errors', async () => {
     render(<App />);
 
