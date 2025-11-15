@@ -1,5 +1,6 @@
-use crate::database::{Database, ImageSearchResult};
+use crate::database::{Database, FullSizeImageSearchResult, ImageSearchResult};
 use anyhow::Result;
+use image::ImageReader;
 
 pub struct SearchEngine<'a> {
     db: &'a Database,
@@ -35,6 +36,26 @@ impl<'a> SearchEngine<'a> {
         let query_embedding = normalize_vector(query_embedding);
         self.db
             .search_similar_images_with_raw_blob(&query_embedding, limit, offset)
+    }
+    pub fn search_with_full_size_images(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+        offset: usize,
+    ) -> FullSizeImageSearchResult {
+        // Use sqlite-vec for efficient similarity search
+        let query_embedding = normalize_vector(query_embedding);
+        let results =
+            self.db
+                .search_similar_images_with_raw_blob(&query_embedding, limit, offset)?;
+
+        let mut full_size_results = Vec::new();
+        for (path, score, _) in results {
+            let image = ImageReader::open(&path)?.decode()?;
+            full_size_results.push((path, score, image));
+        }
+
+        Ok(full_size_results)
     }
 }
 

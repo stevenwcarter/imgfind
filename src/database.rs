@@ -1,6 +1,7 @@
 use crate::{abs_to_relative_path, get_db_parent_dir, relative_to_abs_path};
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose};
+use image::DynamicImage;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{ffi::sqlite3_auto_extension, params};
@@ -15,6 +16,7 @@ pub struct Database {
 }
 
 pub type ImageSearchResult = Result<Vec<(String, f32, Option<Vec<u8>>)>>;
+pub type FullSizeImageSearchResult = Result<Vec<(String, f32, DynamicImage)>>;
 
 // https://chatgpt.com/c/6854c675-e160-800d-a033-fe236a615de4
 // TODO: Add extension load for diesel

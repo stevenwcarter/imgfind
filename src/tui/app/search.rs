@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clipper::ClipEmbedder;
-use image::{DynamicImage, load_from_memory};
+use image::DynamicImage;
 use ratatui_image::thread::{ResizeRequest, ThreadProtocol};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tracing::{debug, error};
@@ -135,13 +135,11 @@ impl App {
 
         let task = tokio::spawn(async move {
             let search_result: Result<SearchResult> = async {
-                let mut images: Vec<(String, f32, DynamicImage)> = Vec::new();
-
                 // Check if database has any images
                 let total_images = db.get_image_count()?;
                 if total_images == 0 {
                     return Ok(SearchResult {
-                        images,
+                        images: Vec::new(),
                         result_count: 0,
                         query: query.clone(),
                     });
@@ -161,34 +159,17 @@ impl App {
                 // Search database
                 let search_engine = SearchEngine::new(&db);
                 let all_results =
-                    search_engine.search_with_thumbnails_raw(&normalized_query, 99, 0)?;
+                    search_engine.search_with_full_size_images(&normalized_query, 99, 0)?;
 
                 let result_count = all_results.len();
 
                 // Filter results
-                let filtered_results: Vec<_> = all_results
+                let images: Vec<_> = all_results
                     .into_iter()
                     .filter(|(_path, _score, _image)| true) // Add filtering logic as needed
                     // .skip(page * 9)
                     // .take(9)
                     .collect();
-
-                if filtered_results.is_empty() {
-                    return Ok(SearchResult {
-                        images,
-                        result_count,
-                        query: query.clone(),
-                    });
-                }
-
-                for (path, score, image) in filtered_results.iter() {
-                    if let Some(image) = image {
-                        let image = load_from_memory(image).with_context(|| {
-                            format!("Failed to decode image blob for path: {}", path)
-                        })?;
-                        images.push((path.clone(), *score, image));
-                    }
-                }
 
                 Ok(SearchResult {
                     images,
