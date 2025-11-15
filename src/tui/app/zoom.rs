@@ -10,13 +10,45 @@ use crate::tui::{app::App, app::ImageEntry};
 // Zoom configuration constants
 const MAX_ZOOM: f32 = 4.0;
 const MIN_ZOOM: f32 = 1.0;
-const ZOOM_BASE: f32 = 1.2;
+const ZOOM_BASE: f32 = 1.1;
 const SCROLL_DEBOUNCE_MS: u64 = 50;
 
+/// Calculate where an image is displayed within a terminal area
+/// Returns (display_x, display_y, display_w, display_h) in terminal coordinates
+fn calculate_image_display_area(
+    img_w: u32,
+    img_h: u32,
+    terminal_area: Rect,
+) -> (u16, u16, u16, u16) {
+    // Calculate terminal aspect ratio accounting for 2:1 cell ratio
+    let terminal_aspect = (terminal_area.width as f32) / (terminal_area.height as f32 * 2.0);
+    debug!("Terminal aspect ratio is {}", terminal_aspect);
+    let image_aspect = img_w as f32 / img_h as f32;
+    debug!("Image aspect ratio is {}", image_aspect);
+
+    let (display_w, display_h) = if image_aspect > terminal_aspect {
+        // Image is wider than terminal - constrain by width
+        (
+            terminal_area.width,
+            (terminal_area.width as f32 / image_aspect) as u16,
+        )
+    } else {
+        // Image is taller than terminal - constrain by height
+        (
+            (terminal_area.height as f32 * 2.0 * image_aspect) as u16,
+            terminal_area.height,
+        )
+    };
+
+    // Center the display area within the terminal area
+    let display_x = terminal_area.x + (terminal_area.width - display_w) / 2;
+    let display_y = terminal_area.y + (terminal_area.height - display_h) / 2;
+
+    (display_x, display_y, display_w, display_h)
+}
+
 /// Zoom into an image with optional mouse position for centering
-/// If mouse_pos is None, zooms into center. If Some((x, y)), zooms toward that position.
-/// Area is used to calculate aspect ratio accounting for terminal cell dimensions (2:1 ratio)
-/// current_view_area tracks the current crop area in original image coordinates
+/// Properly maps mouse coordinates to image coordinates accounting for display area
 pub fn zoom_with_mouse_position(
     img: &DynamicImage,
     zoom: f32,
@@ -28,109 +60,137 @@ pub fn zoom_with_mouse_position(
 ) -> (DynamicImage, f32, f32, (u32, u32, u32, u32)) {
     let zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
     let (img_w, img_h) = img.dimensions();
-    
+
     // At zoom level 1.0, return the full image without any cropping
     if (zoom - 1.0).abs() < 0.01 {
+        debug!("Zoom level 1.0 - returning full image");
         return (img.clone(), 0.0, 0.0, (0, 0, img_w, img_h));
     }
-    
+
     // Get the current view area or default to full image
     let (view_x, view_y, view_w, view_h) = current_view_area.unwrap_or((0, 0, img_w, img_h));
-    
-    // Calculate crop dimensions based on terminal aspect ratio and zoom level
-    // This determines how much of the current view area we want to see
-    let (crop_w, crop_h) = calculate_terminal_aware_crop_size(view_w, view_h, zoom, area);
-    
-    // Calculate mouse position relative to current view area if provided
+
+    // Calculate target coordinates for zoom center
     let (target_x, target_y) = if let Some((mouse_x, mouse_y)) = mouse_pos {
-        if let Some(area) = area {
-            // Convert mouse position to coordinates within the current view area
-            let rel_x = mouse_x as f32 / area.width as f32;
-            let rel_y = mouse_y as f32 / area.height as f32;
-            
-            // Map to actual coordinates within current view area
-            let target_x = view_x as f32 + rel_x * view_w as f32;
-            let target_y = view_y as f32 + rel_y * view_h as f32;
-            
-            (target_x, target_y)
+        if let Some(terminal_area) = area {
+            if current_view_area.is_none() {
+                // First zoom: need to map from terminal display area to image coordinates
+                debug!("First zoom - mapping from display area to image coordinates");
+                let (display_x, display_y, display_w, display_h) =
+                    calculate_image_display_area(img_w, img_h, terminal_area);
+
+                // Check if mouse is within the image display area
+                if mouse_x >= display_x
+                    && mouse_x < display_x + display_w
+                    && mouse_y >= display_y
+                    && mouse_y < display_y + display_h
+                {
+                    // Map mouse position to image coordinates
+                    let rel_x = (mouse_x - display_x) as f32 / display_w as f32;
+                    let rel_y = (mouse_y - display_y) as f32 / display_h as f32;
+
+                    let target_x = rel_x * img_w as f32;
+                    let target_y = rel_y * img_h as f32;
+
+                    (target_x, target_y)
+                } else {
+                    // Mouse outside image, default to center
+                    (img_w as f32 / 2.0, img_h as f32 / 2.0)
+                }
+            } else {
+                // Subsequent zooms: mouse maps directly to current view area
+                // Since the cropped image fills the terminal area
+                debug!(
+                    "Subsequent zoom - mapping directly to current view area: {:?}",
+                    current_view_area
+                );
+                let rel_x = mouse_x as f32 / terminal_area.width as f32;
+                let rel_y = mouse_y as f32 / terminal_area.height as f32;
+
+                let target_x = view_x as f32 + rel_x * view_w as f32;
+                let target_y = view_y as f32 + rel_y * view_h as f32;
+
+                (target_x, target_y)
+            }
         } else {
-            // Default to center of current view area
-            (view_x as f32 + view_w as f32 / 2.0, view_y as f32 + view_h as f32 / 2.0)
+            // No terminal area provided, default to center
+            (
+                view_x as f32 + view_w as f32 / 2.0,
+                view_y as f32 + view_h as f32 / 2.0,
+            )
         }
     } else {
-        // Default to center of current view area
-        (view_x as f32 + view_w as f32 / 2.0, view_y as f32 + view_h as f32 / 2.0)
+        // No mouse position, default to center of current view area
+        (
+            view_x as f32 + view_w as f32 / 2.0,
+            view_y as f32 + view_h as f32 / 2.0,
+        )
     };
-    
+
+    // Calculate crop dimensions that will fill the terminal area
+    let (crop_w, crop_h) = if let Some(terminal_area) = area {
+        // Calculate crop size that matches terminal aspect ratio
+        let terminal_aspect = (terminal_area.width as f32) / (terminal_area.height as f32 * 2.0);
+
+        // Base crop area from zoom level
+        let base_area = (view_w * view_h) as f32 / (zoom * zoom);
+
+        // Calculate dimensions matching terminal aspect ratio
+        let crop_h = (base_area / terminal_aspect).sqrt();
+        let crop_w = crop_h * terminal_aspect;
+
+        (crop_w as u32, crop_h as u32)
+    } else {
+        // Fallback: simple center crop
+        ((view_w as f32 / zoom) as u32, (view_h as f32 / zoom) as u32)
+    };
+
     // Calculate new crop area centered on target position
-    let new_crop_x = (target_x - crop_w as f32 / 2.0).clamp(view_x as f32, (view_x + view_w - crop_w) as f32) as u32;
-    let new_crop_y = (target_y - crop_h as f32 / 2.0).clamp(view_y as f32, (view_y + view_h - crop_h) as f32) as u32;
-    
+    let half_crop_w = crop_w as f32 / 2.0;
+    let half_crop_h = crop_h as f32 / 2.0;
+
+    let new_crop_x = (target_x - half_crop_w)
+        .max(view_x as f32)
+        .min((view_x + view_w) as f32 - crop_w as f32);
+    let new_crop_y = (target_y - half_crop_h)
+        .max(view_y as f32)
+        .min((view_y + view_h) as f32 - crop_h as f32);
+
     // Ensure crop doesn't exceed original image bounds
-    let final_crop_x = new_crop_x.clamp(0, img_w.saturating_sub(crop_w));
-    let final_crop_y = new_crop_y.clamp(0, img_h.saturating_sub(crop_h));
+    let final_crop_x = (new_crop_x as u32).clamp(0, img_w.saturating_sub(crop_w));
+    let final_crop_y = (new_crop_y as u32).clamp(0, img_h.saturating_sub(crop_h));
     let final_crop_w = crop_w.min(img_w - final_crop_x);
     let final_crop_h = crop_h.min(img_h - final_crop_y);
-    
+
     let cropped = img.crop_imm(final_crop_x, final_crop_y, final_crop_w, final_crop_h);
-    
-    // Calculate new pan offsets based on where we actually cropped
-    let center_offset_x = (target_x - (final_crop_x as f32 + final_crop_w as f32 / 2.0)) / (view_w as f32 / 2.0);
-    let center_offset_y = (target_y - (final_crop_y as f32 + final_crop_h as f32 / 2.0)) / (view_h as f32 / 2.0);
-    
-    let new_pan_x = center_offset_x.clamp(-1.0, 1.0);
-    let new_pan_y = center_offset_y.clamp(-1.0, 1.0);
-    
-    // Return cropped image, pan offsets, and new view area in original image coordinates
-    (cropped, new_pan_x, new_pan_y, (final_crop_x, final_crop_y, final_crop_w, final_crop_h))
-}
 
-/// Calculate crop dimensions that match terminal aspect ratio
-/// Takes into account that terminal cells are 2:1 height/width ratio
-fn calculate_terminal_aware_crop_size(
-    img_w: u32,
-    img_h: u32,
-    zoom: f32,
-    area: Option<Rect>,
-) -> (u32, u32) {
-    // If no area provided, fall back to simple center crop
-    let Some(area) = area else {
-        let crop_w = (img_w as f32 / zoom) as u32;
-        let crop_h = (img_h as f32 / zoom) as u32;
-        return (crop_w, crop_h);
-    };
-    
-    // Calculate terminal aspect ratio accounting for 2:1 cell ratio
-    // Terminal cells are typically 2x taller than wide, so we adjust
-    let terminal_aspect = (area.width as f32) / (area.height as f32 * 2.0);
-    
-    // Start with the available area in the image at this zoom level
-    // We want to maximize the use of terminal space while zooming
-    let base_crop_area = (img_w * img_h) as f32 / (zoom * zoom);
-    
-    // Calculate crop dimensions that match terminal aspect ratio
-    // while maintaining the desired zoom area
-    let crop_h = (base_crop_area / terminal_aspect).sqrt();
-    let crop_w = crop_h * terminal_aspect;
-    
-    // Ensure crop doesn't exceed image bounds
-    let final_crop_w = (crop_w as u32).min(img_w);
-    let final_crop_h = (crop_h as u32).min(img_h);
-    
-    // If the calculated crop is too big, scale it down proportionally
-    if final_crop_w < crop_w as u32 {
-        let scale = final_crop_w as f32 / crop_w;
-        let scaled_crop_h = (crop_h * scale) as u32;
-        (final_crop_w, scaled_crop_h.min(img_h))
-    } else if final_crop_h < crop_h as u32 {
-        let scale = final_crop_h as f32 / crop_h;
-        let scaled_crop_w = (crop_w * scale) as u32;
-        (scaled_crop_w.min(img_w), final_crop_h)
+    // Calculate pan offsets (for display purposes, though we're not using them much now)
+    let actual_center_x = final_crop_x as f32 + final_crop_w as f32 / 2.0;
+    let actual_center_y = final_crop_y as f32 + final_crop_h as f32 / 2.0;
+
+    let pan_x = if view_w > final_crop_w {
+        2.0 * (actual_center_x - (view_x as f32 + view_w as f32 / 2.0))
+            / (view_w - final_crop_w) as f32
     } else {
-        (final_crop_w, final_crop_h)
+        0.0
     }
-}
+    .clamp(-1.0, 1.0);
 
+    let pan_y = if view_h > final_crop_h {
+        2.0 * (actual_center_y - (view_y as f32 + view_h as f32 / 2.0))
+            / (view_h - final_crop_h) as f32
+    } else {
+        0.0
+    }
+    .clamp(-1.0, 1.0);
+
+    (
+        cropped,
+        pan_x,
+        pan_y,
+        (final_crop_x, final_crop_y, final_crop_w, final_crop_h),
+    )
+}
 
 /// Calculate next zoom level using exponential scaling
 pub fn calculate_next_zoom_level(current: f32, zoom_in: bool) -> f32 {
@@ -155,77 +215,83 @@ pub fn handle_zoom_image(app: &mut App, zoom: Option<u8>) {
 }
 
 /// Handle zoom image with mouse position from App
-pub fn handle_zoom_image_with_mouse(app: &mut App, zoom: Option<u8>, mouse_pos: Option<(u16, u16)>) {
-        if zoom.is_none() {
-            app.zoomed_image_index = None;
-            app.zoomed_image = None;
-        } else {
-            app.zoomed_image_index = zoom;
-            if let Some(zoom_index) = zoom {
-                let image_entry = app
-                    .images
-                    .get(zoom_index as usize)
-                    .expect("image not found");
-                let image_score = image_entry.score;
-                let zoom_level = app.zoom_level;
-                let pan_x = if let Some(zoomed) = &app.zoomed_image {
-                    zoomed.pan_x
-                } else {
-                    0.0
-                };
-                let pan_y = if let Some(zoomed) = &app.zoomed_image {
-                    zoomed.pan_y
-                } else {
-                    0.0
-                };
+pub fn handle_zoom_image_with_mouse(
+    app: &mut App,
+    zoom: Option<u8>,
+    mouse_pos: Option<(u16, u16)>,
+) {
+    if zoom.is_none() {
+        app.zoomed_image_index = None;
+        app.zoomed_image = None;
+    } else {
+        app.zoomed_image_index = zoom;
+        if let Some(zoom_index) = zoom {
+            let image_entry = app
+                .images
+                .get(zoom_index as usize)
+                .expect("image not found");
+            let image_score = image_entry.score;
+            let zoom_level = app.zoom_level;
+            let pan_x = if let Some(zoomed) = &app.zoomed_image {
+                zoomed.pan_x
+            } else {
+                0.0
+            };
+            let pan_y = if let Some(zoomed) = &app.zoomed_image {
+                zoomed.pan_y
+            } else {
+                0.0
+            };
 
-                let base_image = image_entry.image.clone().unwrap();
-                
-                // Get current area for aspect ratio calculations from the main layout
-                // We'll approximate the main image area as the full area minus margins
-                let area = if let Some(main_area) = get_main_image_area(app) {
-                    Some(main_area)
-                } else {
+            let base_image = image_entry.image.clone().unwrap();
+
+            // Get current area for aspect ratio calculations from the main layout
+            // We'll approximate the main image area as the full area minus margins
+            let area = get_main_image_area(app);
+
+            // Get current view area from existing zoomed image if available
+            let current_view_area = if let Some(zoomed) = &app.zoomed_image {
+                zoomed.current_view_area
+            } else {
+                None
+            };
+
+            let (image, new_pan_x, new_pan_y, new_view_area) = zoom_with_mouse_position(
+                &base_image,
+                zoom_level,
+                pan_x,
+                pan_y,
+                mouse_pos,
+                area,
+                current_view_area,
+            );
+
+            debug!("Image zoomed successfully to level {}", zoom_level);
+
+            let (image_tx, image_rx) = unbounded_channel();
+            let protocol = app.picker.new_resize_protocol(image.clone());
+            let image_entry = ImageEntry {
+                path: image_entry.path.clone(),
+                score: image_score,
+                rx: image_rx,
+                current_zoom: zoom_level,
+                pan_x: new_pan_x,
+                pan_y: new_pan_y,
+                last_scroll_time: None,
+                // Only set current_view_area if this is not the first zoom (zoom > 1.0)
+                // This ensures the first zoom uses display area mapping
+                current_view_area: if (zoom_level - 1.0).abs() < 0.01 {
                     None
-                };
-                
-                // Get current view area from existing zoomed image if available
-                let current_view_area = if let Some(zoomed) = &app.zoomed_image {
-                    zoomed.current_view_area
                 } else {
-                    None
-                };
-                
-                let (image, new_pan_x, new_pan_y, new_view_area) = zoom_with_mouse_position(
-                    &base_image, 
-                    zoom_level, 
-                    pan_x, 
-                    pan_y, 
-                    mouse_pos,
-                    area,
-                    current_view_area
-                );
-                
-                debug!("Image zoomed successfully to level {}", zoom_level);
+                    Some(new_view_area)
+                },
+                image: Some(base_image),
+                protocol: ThreadProtocol::new(image_tx, Some(protocol)),
+            };
 
-                let (image_tx, image_rx) = unbounded_channel();
-                let protocol = app.picker.new_resize_protocol(image.clone());
-                let image_entry = ImageEntry {
-                    path: image_entry.path.clone(),
-                    score: image_score,
-                    rx: image_rx,
-                    current_zoom: zoom_level,
-                    pan_x: new_pan_x,
-                    pan_y: new_pan_y,
-                    last_scroll_time: None,
-                    current_view_area: Some(new_view_area),
-                    image: Some(base_image),
-                    protocol: ThreadProtocol::new(image_tx, Some(protocol)),
-                };
-
-                app.zoomed_image = Some(image_entry);
-            }
+            app.zoomed_image = Some(image_entry);
         }
+    }
 }
 
 /// Get the main image area from the app's stored render area

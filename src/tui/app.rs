@@ -149,8 +149,12 @@ impl App {
                     if self.zoomed_image.is_some() {
                         self.zoom_level = zoom::calculate_next_zoom_level(self.zoom_level, true);
                         let mouse_pos = Some((mouse_event.column, mouse_event.row));
-                        zoom::handle_zoom_image_with_mouse(self, self.zoomed_image_index, mouse_pos);
-                        
+                        zoom::handle_zoom_image_with_mouse(
+                            self,
+                            self.zoomed_image_index,
+                            mouse_pos,
+                        );
+
                         // Update last scroll time for debouncing
                         if let Some(zoomed_image) = &mut self.zoomed_image {
                             zoomed_image.last_scroll_time = Some(Instant::now());
@@ -161,8 +165,12 @@ impl App {
                     if self.zoomed_image.is_some() {
                         self.zoom_level = zoom::calculate_next_zoom_level(self.zoom_level, false);
                         let mouse_pos = Some((mouse_event.column, mouse_event.row));
-                        zoom::handle_zoom_image_with_mouse(self, self.zoomed_image_index, mouse_pos);
-                        
+                        zoom::handle_zoom_image_with_mouse(
+                            self,
+                            self.zoomed_image_index,
+                            mouse_pos,
+                        );
+
                         // Update last scroll time for debouncing
                         if let Some(zoomed_image) = &mut self.zoomed_image {
                             zoomed_image.last_scroll_time = Some(Instant::now());
@@ -217,7 +225,6 @@ impl App {
     }
 
     pub fn handle_mouse_event(&mut self, mouse_event: MouseEvent) {
-        info!("Received mouse event: {:?}", mouse_event);
         match mouse_event.kind {
             MouseEventKind::ScrollUp => {
                 if self.zoomed_image.is_some() {
@@ -227,7 +234,7 @@ impl App {
                     } else {
                         true
                     };
-                    
+
                     if should_process {
                         self.events.send(AppEvent::ZoomIn(mouse_event))
                     }
@@ -241,7 +248,7 @@ impl App {
                     } else {
                         true
                     };
-                    
+
                     if should_process {
                         self.events.send(AppEvent::ZoomOut(mouse_event))
                     }
@@ -255,8 +262,8 @@ impl App {
                     self.events.send(AppEvent::ZoomReset);
                 }
             }
-            e => {
-                info!("Other mouse event: {:?}", e);
+            _ => {
+                // TODO: show other messages
             }
         }
     }

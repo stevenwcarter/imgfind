@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [profile.release]
-codegen-units = 1
+# codegen-units = 1
 opt-level = 3
-lto = true
+# lto = true
 
 [profile.dev.package.image]
 opt-level = 3
