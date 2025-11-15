@@ -35,15 +35,21 @@ impl App {
                 let image_path = image_entry.path.clone();
                 let image_score = image_entry.score;
                 let zoom_level = self.zoom_level;
+
+                // find the currently zoomed path
                 let zoomed_path = self
                     .zoomed_image
                     .as_ref()
                     .map(|zoomed_image| zoomed_image.path.clone());
+
+                // find the previous zoom level
                 let previous_zoom = self
                     .zoomed_image
                     .as_ref()
                     .map(|zoomed_image| zoomed_image.current_zoom)
                     .unwrap_or(1);
+
+                // find the DynamicImage for the fullsize image if we already have it
                 let zoomed_image = match self.zoomed_image.as_ref() {
                     Some(zoomed_image) => zoomed_image.image.clone(),
                     None => None,
