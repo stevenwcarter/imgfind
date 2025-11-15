@@ -142,13 +142,13 @@ impl App {
             Event::App(app_event) => match app_event {
                 AppEvent::ZoomIn(mouse_event) => {
                     if self.zoomed_image.is_some() {
-                        self.zoom_level = self.zoom_level.saturating_add(1).clamp(1, 8);
+                        self.zoom_level = self.zoom_level.saturating_add(1).clamp(1, 4);
                         self.handle_zoom_image(self.zoomed_image_index);
                     }
                 }
                 AppEvent::ZoomOut(mouse_event) => {
                     if self.zoomed_image.is_some() {
-                        self.zoom_level = self.zoom_level.saturating_sub(1).clamp(1, 8);
+                        self.zoom_level = self.zoom_level.saturating_sub(1).clamp(1, 4);
                         self.handle_zoom_image(self.zoomed_image_index);
                     }
                 }

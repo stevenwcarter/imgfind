@@ -5,7 +5,7 @@ use ratatui::{
     style::{Color, Style},
     widgets::{Block, BorderType, StatefulWidget, Widget},
 };
-use ratatui_image::{Resize, StatefulImage};
+use ratatui_image::{FilterType, Resize, StatefulImage};
 
 use crate::tui::{app::ImageEntry, widget::center};
 
@@ -32,7 +32,7 @@ pub fn render_image(
         Constraint::Length(image_area.width),
         Constraint::Length(image_area.height),
     );
-    let image = StatefulImage::new().resize(Resize::Scale(None));
+    let image = StatefulImage::new().resize(Resize::Scale(Some(FilterType::CatmullRom)));
     image.render(center, buf, &mut image_entry.protocol);
 
     Ok(())

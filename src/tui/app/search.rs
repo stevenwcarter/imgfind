@@ -29,8 +29,11 @@ pub struct ImageEntry {
     pub score: f32,
     /// Protocol used to handle resize events
     pub protocol: ThreadProtocol,
+    /// Base image, useful for quickly computing zoom changes
+    pub image: Option<DynamicImage>,
     /// Listener for resize requests
     pub rx: UnboundedReceiver<ResizeRequest>,
+    pub current_zoom: u8,
 }
 
 impl App {
@@ -104,7 +107,9 @@ impl App {
                 path: path.clone(),
                 score: *score,
                 protocol: ThreadProtocol::new(image_tx, Some(protocol)),
+                image: Some(image.clone()),
                 rx: image_rx,
+                current_zoom: 1,
             };
 
             self.images.push(image_entry);
