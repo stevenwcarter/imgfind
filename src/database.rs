@@ -7,6 +7,8 @@ use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{ffi::sqlite3_auto_extension, params};
 use sqlite_vec::sqlite3_vec_init;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use tracing::info;
 use zerocopy::IntoBytes;
@@ -16,6 +18,8 @@ pub struct Database {
     pub pool: Pool<SqliteConnectionManager>,
     pub parent_dir: PathBuf,
 }
+
+const MAX_JITTER: f64 = 0.0015;
 
 pub type ImageSearchResult = Result<Vec<(String, f32, Option<Vec<u8>>)>>;
 
@@ -635,11 +639,15 @@ impl Database {
 
         let original_count = images.len();
 
-        let clustered = if original_count < 100 || biggest_difference < 0.01 {
+        let mut clustered = if original_count < 100 || biggest_difference < 0.01 {
             images
         } else {
             downsample_by_grid(images, grid_size, 10, 2)
         };
+
+        if clustered.len() < 100 {
+            apply_stable_jitter(&mut clustered);
+        }
 
         Ok((clustered, original_count))
     }
@@ -824,4 +832,39 @@ fn downsample_by_grid(
     }
 
     result
+}
+
+pub fn apply_stable_jitter(images: &mut [ImageWithMetadata]) {
+    for img in images.iter_mut() {
+        if let (Some(lat), Some(lon)) = (img.latitude, img.longitude) {
+            let (jitter_lat, jitter_lon) = generate_jitter(img);
+
+            img.latitude = Some(lat + jitter_lat);
+            img.longitude = Some(lon + jitter_lon);
+        }
+    }
+}
+
+/// Generate stable jitter based on the content of the struct
+fn generate_jitter(img: &ImageWithMetadata) -> (f64, f64) {
+    // Combine identifying fields
+    let mut s = DefaultHasher::new();
+    img.absolute_path.hash(&mut s);
+    img.hash.hash(&mut s);
+
+    let hash_val = s.finish();
+
+    // Split the 64-bit hash into two 32-bit halves for separate jitters
+    let lat_bits = (hash_val & 0xFFFF_FFFF) as u32;
+    let lon_bits = ((hash_val >> 32) & 0xFFFF_FFFF) as u32;
+
+    // Convert to deterministic floats between -1.0 and +1.0
+    let lat_unit = (lat_bits as f64 / u32::MAX as f64) * 2.0 - 1.0;
+    let lon_unit = (lon_bits as f64 / u32::MAX as f64) * 2.0 - 1.0;
+
+    // Scale to jitter range
+    let jitter_lat = lat_unit * MAX_JITTER;
+    let jitter_lon = lon_unit * MAX_JITTER;
+
+    (jitter_lat, jitter_lon)
 }
