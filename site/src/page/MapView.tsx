@@ -15,13 +15,16 @@ import 'yet-another-react-lightbox/plugins/thumbnails.css';
 const imagesByBounds = gql`
   query ImagesByBounds($north: Float!, $south: Float!, $east: Float!, $west: Float!) {
     imagesByBounds(north: $north, south: $south, east: $west, west: $east) {
-      path
-      latitude
-      longitude
-      thumbnailBase64
-      width
-      height
-      datetimeTaken
+      images {
+        path
+        latitude
+        longitude
+        thumbnailBase64
+        width
+        height
+        datetimeTaken
+      }
+      originalCount
     }
   }
 `;
@@ -78,6 +81,7 @@ const createImageIcon = (map: LeafletMap | null, thumbnailBase64?: string | null
 
 export const MapView: React.FC = () => {
   const [images, setImages] = useState<ImageLocation[]>([]);
+  const [originalCount, setOriginalCount] = useState(0);
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -124,7 +128,8 @@ export const MapView: React.FC = () => {
         throw new Error(data.errors[0].message);
       }
 
-      setImages(data.data?.imagesByBounds || []);
+      setImages(data.data?.imagesByBounds?.images || []);
+      setOriginalCount(data.data?.imagesByBounds?.originalCount || 0);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error occurred');
       console.error('Error fetching geotagged images:', err);
@@ -189,7 +194,12 @@ export const MapView: React.FC = () => {
           </p>
         )}
         {images.length > 0 && (
-          <p className="text-green-400">Found {images.length} geotagged images in current view</p>
+          <>
+            <p className="text-green-400">
+              Showing {images.length} geotagged images in current view
+            </p>
+            <p className="text-green-400">Found {originalCount} geotagged images in current view</p>
+          </>
         )}
         {mapRef.current && <p className="text-blue-400">Zoom: {mapRef.current?.getZoom()}</p>}
       </div>

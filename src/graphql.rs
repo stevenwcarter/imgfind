@@ -5,6 +5,12 @@ use tracing::{error, info};
 use crate::context::GraphQLContext;
 
 #[derive(GraphQLObject)]
+pub struct ImageBoundsResult {
+    images: Vec<ImageLocation>,
+    original_count: i32,
+}
+
+#[derive(GraphQLObject)]
 pub struct ImageLocation {
     pub path: String,
     pub latitude: f64,
@@ -35,14 +41,15 @@ impl Query {
         south: f64,
         east: f64,
         west: f64,
-    ) -> FieldResult<Vec<ImageLocation>> {
+    ) -> FieldResult<ImageBoundsResult> {
         let db = context.get_db().await;
         let db = db.lock().unwrap();
 
-        let images = db.get_images_by_bounds(north, south, east, west)?;
+        let (images, original_count) = db.get_images_by_bounds(north, south, east, west)?;
         info!("Found {} images", images.len());
         let mut result = Vec::new();
 
+        let original_count = original_count as i32;
         for image in images {
             // Skip images without GPS coordinates
             if let (Some(lat), Some(lon)) = (image.latitude, image.longitude) {
@@ -68,7 +75,10 @@ impl Query {
             }
         }
 
-        Ok(result)
+        Ok(ImageBoundsResult {
+            images: result,
+            original_count,
+        })
     }
 }
 

@@ -31,6 +31,7 @@ export default defineConfig(() => {
     },
     plugins: [react(), eslint(), viteTsconfigPaths(), svgrPlugin(), tailwindcss()],
     server: {
+      allowedHosts: ['scadrial'],
       watch: {
         ignored: ['coverage', 'build'],
       },
