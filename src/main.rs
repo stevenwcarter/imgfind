@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use walkdir::WalkDir;
 
-use imgfind::database::Database;
+use imgfind::database::{Database, extract_image_metadata};
 use imgfind::routes::app;
 use imgfind::search::{SearchEngine, normalize_vector};
 use imgfind::thumbnail::generate_missing_thumbnails_batch;
@@ -371,6 +371,29 @@ fn index_directory(db: &mut Database, dir: &str, recursive: bool, quiet: bool) -
             continue;
         }
 
+        // Extract and store metadata
+        match extract_image_metadata(&path_str) {
+            Ok(metadata) => {
+                // Get the image ID to store metadata
+                match db.get_image_id(&path_str) {
+                    Ok(image_id) => {
+                        if let Err(e) = db.insert_or_update_metadata(image_id, &metadata) {
+                            warn!("Failed to store metadata for {}: {}", path_str, e);
+                        } else {
+                            debug!("Stored metadata for: {}", path_str);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to get image ID for metadata storage {}: {}", path_str, e);
+                    }
+                }
+            }
+            Err(e) => {
+                debug!("Failed to extract metadata for {}: {}", path_str, e);
+                // This is not critical, so we don't increment error_count
+            }
+        }
+
         indexed_count += 1;
         progress_bar.inc(1);
     }
@@ -386,6 +409,68 @@ fn index_directory(db: &mut Database, dir: &str, recursive: bool, quiet: bool) -
             println!("  ❌ Errors: {}", error_count);
         }
         println!();
+    }
+
+    // Backfill metadata for existing images that don't have it
+    if !quiet {
+        println!("Checking for images missing metadata...");
+    }
+    info!("Starting metadata backfill for existing images");
+
+    let images_without_metadata = db.get_images_without_metadata(100)?;
+    if !images_without_metadata.is_empty() {
+        if !quiet {
+            println!("Found {} images missing metadata, extracting...", images_without_metadata.len());
+        }
+        info!("Found {} images missing metadata", images_without_metadata.len());
+
+        let metadata_progress = if quiet {
+            ProgressBar::hidden()
+        } else {
+            let pb = ProgressBar::new(images_without_metadata.len() as u64);
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta}) Extracting metadata: {msg}")
+                    .unwrap()
+                    .progress_chars("#>-"),
+            );
+            pb
+        };
+
+        let mut metadata_extracted = 0;
+        for (image_id, image_path, _hash) in images_without_metadata {
+            if !quiet {
+                metadata_progress.set_message(format!(
+                    "{}",
+                    std::path::Path::new(&image_path)
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                ));
+            }
+
+            match extract_image_metadata(&image_path) {
+                Ok(metadata) => {
+                    if let Err(e) = db.insert_or_update_metadata(image_id, &metadata) {
+                        warn!("Failed to store backfilled metadata for {}: {}", image_path, e);
+                    } else {
+                        metadata_extracted += 1;
+                        debug!("Backfilled metadata for: {}", image_path);
+                    }
+                }
+                Err(e) => {
+                    debug!("Failed to extract backfill metadata for {}: {}", image_path, e);
+                }
+            }
+            metadata_progress.inc(1);
+        }
+
+        metadata_progress.finish_with_message("Metadata extraction complete!");
+        
+        if !quiet {
+            println!("  📊 Metadata extracted: {}", metadata_extracted);
+        }
+        info!("Metadata backfill complete: {} extracted", metadata_extracted);
     }
 
     info!("Indexing complete!");

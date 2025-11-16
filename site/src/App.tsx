@@ -7,6 +7,7 @@ import 'react-toastify/dist/ReactToastify.css';
 
 const PageTemplate = React.lazy(() => import('page/PageTemplate'));
 const Images = React.lazy(() => import('page/Images'));
+const MapView = React.lazy(() => import('page/MapView'));
 
 const apolloClient = new ApolloClient({
   cache: new InMemoryCache({}),
@@ -21,6 +22,10 @@ const router = createBrowserRouter([
       {
         index: true,
         element: <Images />,
+      },
+      {
+        path: 'map',
+        element: <MapView />,
       },
     ],
   },

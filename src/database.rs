@@ -1,6 +1,7 @@
 use crate::{abs_to_relative_path, get_db_parent_dir, relative_to_abs_path};
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose};
+use image::GenericImageView;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{ffi::sqlite3_auto_extension, params};
@@ -99,6 +100,38 @@ impl Database {
         // Create index on hash and size for faster thumbnail lookups
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_thumbnails_hash_size ON thumbnails(image_hash, size)",
+            [],
+        )?;
+
+        // Create image_metadata table for storing EXIF data
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS image_metadata (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                image_id INTEGER NOT NULL,
+                file_size INTEGER,
+                width INTEGER,
+                height INTEGER,
+                latitude REAL,
+                longitude REAL,
+                camera_make TEXT,
+                camera_model TEXT,
+                datetime_taken DATETIME,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(image_id) REFERENCES images(id) ON DELETE CASCADE,
+                UNIQUE(image_id)
+            )",
+            [],
+        )?;
+
+        // Create index on image_id for faster metadata lookups
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_metadata_image_id ON image_metadata(image_id)",
+            [],
+        )?;
+
+        // Create index on GPS coordinates for location-based queries
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_metadata_gps ON image_metadata(latitude, longitude)",
             [],
         )?;
 
@@ -464,5 +497,277 @@ impl Database {
         stmt.query_row(params![size as i64], |row| row.get(0))
             .context("Failed to count images without thumbnails")
             .map(|count: i64| count as usize)
+    }
+
+    /// Insert or update metadata for an image
+    pub fn insert_or_update_metadata(
+        &mut self,
+        image_id: i64,
+        metadata: &ImageMetadata,
+    ) -> Result<()> {
+        let conn = self
+            .pool
+            .get()
+            .context("Failed to get DB connection to insert metadata")?;
+
+        conn.execute(
+            "INSERT OR REPLACE INTO image_metadata 
+             (image_id, file_size, width, height, latitude, longitude, 
+              camera_make, camera_model, datetime_taken) 
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                image_id,
+                metadata.file_size.map(|s| s as i64),
+                metadata.width.map(|w| w as i64),
+                metadata.height.map(|h| h as i64),
+                metadata.latitude,
+                metadata.longitude,
+                metadata.camera_make,
+                metadata.camera_model,
+                metadata.datetime_taken
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    /// Get images without metadata
+    pub fn get_images_without_metadata(&self, limit: usize) -> Result<Vec<(i64, String, String)>> {
+        let query = "
+            SELECT i.id, i.path, i.hash 
+            FROM images i 
+            LEFT JOIN image_metadata m ON i.id = m.image_id
+            WHERE m.id IS NULL
+            LIMIT ?1
+        ";
+
+        let conn = self
+            .pool
+            .get()
+            .context("Failed to get DB connection for images without metadata")?;
+        let mut stmt = conn.prepare(query)?;
+        let results = stmt.query_map(params![limit], |row| {
+            let id: i64 = row.get(0)?;
+            let rel_path: String = row.get(1)?;
+            let hash: String = row.get(2)?;
+
+            // Convert relative path back to absolute path
+            let abs_path = relative_to_abs_path(Path::new(&rel_path), &self.parent_dir);
+            let abs_path_str = abs_path.to_string_lossy().to_string();
+
+            Ok((id, abs_path_str, hash))
+        })?;
+
+        let mut images = Vec::new();
+        for result in results {
+            images.push(result?);
+        }
+
+        Ok(images)
+    }
+
+    /// Get images within geographic bounds
+    pub fn get_images_by_bounds(
+        &self,
+        north: f64,
+        south: f64,
+        east: f64,
+        west: f64,
+    ) -> Result<Vec<ImageWithMetadata>> {
+        let query = "
+            SELECT i.path, i.hash, m.latitude, m.longitude, m.width, m.height, m.datetime_taken
+            FROM images i
+            JOIN image_metadata m ON i.id = m.image_id
+            WHERE m.latitude IS NOT NULL 
+              AND m.longitude IS NOT NULL
+              AND m.latitude BETWEEN ?1 AND ?2
+              AND m.longitude BETWEEN ?3 AND ?4
+            ORDER BY m.datetime_taken DESC
+        ";
+
+        let conn = self
+            .pool
+            .get()
+            .context("Failed to get DB connection for images by bounds")?;
+        let mut stmt = conn.prepare(query)?;
+        let results = stmt.query_map(params![south, north, west, east], |row| {
+            let rel_path: String = row.get(0)?;
+            let hash: String = row.get(1)?;
+            let latitude: Option<f64> = row.get(2)?;
+            let longitude: Option<f64> = row.get(3)?;
+            let width: Option<i64> = row.get(4)?;
+            let height: Option<i64> = row.get(5)?;
+            let datetime_taken: Option<String> = row.get(6)?;
+
+            // Convert relative path back to absolute path for thumbnail generation
+            let abs_path = relative_to_abs_path(Path::new(&rel_path), &self.parent_dir);
+            let abs_path_str = abs_path.to_string_lossy().to_string();
+
+            Ok(ImageWithMetadata {
+                path: rel_path, // Use relative path for frontend
+                absolute_path: abs_path_str,
+                hash,
+                latitude,
+                longitude,
+                width: width.map(|w| w as u32),
+                height: height.map(|h| h as u32),
+                datetime_taken,
+            })
+        })?;
+
+        let mut images = Vec::new();
+        for result in results {
+            images.push(result?);
+        }
+
+        Ok(images)
+    }
+
+    /// Get the image ID by path
+    pub fn get_image_id(&self, path: &str) -> Result<i64> {
+        // Convert absolute path to relative path for database lookup
+        let abs_path = Path::new(path);
+        let rel_path = abs_to_relative_path(abs_path, &self.parent_dir)
+            .with_context(|| format!("Failed to convert path {} to relative path", path))?;
+        let rel_path_str = rel_path.to_string_lossy();
+
+        let conn = self
+            .pool
+            .get()
+            .context("Failed to get DB connection to get image ID")?;
+        let mut stmt = conn.prepare("SELECT id FROM images WHERE path = ?1")?;
+        let id: i64 = stmt.query_row(params![rel_path_str.as_ref()], |row| row.get(0))?;
+        Ok(id)
+    }
+}
+
+/// Metadata extracted from image EXIF data
+#[derive(Debug, Clone)]
+pub struct ImageMetadata {
+    pub file_size: Option<u64>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub camera_make: Option<String>,
+    pub camera_model: Option<String>,
+    pub datetime_taken: Option<String>,
+}
+
+/// Image with metadata for GraphQL responses
+#[derive(Debug, Clone)]
+pub struct ImageWithMetadata {
+    pub path: String,
+    pub absolute_path: String,
+    pub hash: String,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub datetime_taken: Option<String>,
+}
+
+/// Extract metadata from image file
+pub fn extract_image_metadata(file_path: &str) -> Result<ImageMetadata> {
+    use exif::{In, Reader, Tag};
+    use image::ImageReader as ImgReader;
+    use std::fs;
+    use std::io::BufReader;
+
+    let mut metadata = ImageMetadata {
+        file_size: None,
+        width: None,
+        height: None,
+        latitude: None,
+        longitude: None,
+        camera_make: None,
+        camera_model: None,
+        datetime_taken: None,
+    };
+
+    // Get file size
+    if let Ok(file_metadata) = fs::metadata(file_path) {
+        metadata.file_size = Some(file_metadata.len());
+    }
+
+    // Get image dimensions
+    if let Ok(img_reader) = ImgReader::open(file_path)
+        && let Ok(img) = img_reader.decode()
+    {
+        let (width, height) = img.dimensions();
+        metadata.width = Some(width);
+        metadata.height = Some(height);
+    }
+
+    // Extract EXIF data
+    if let Ok(file) = std::fs::File::open(file_path) {
+        let mut bufreader = BufReader::new(&file);
+        if let Ok(exifreader) = Reader::new().read_from_container(&mut bufreader) {
+            // Camera make
+            if let Some(make_field) = exifreader.get_field(Tag::Make, In::PRIMARY) {
+                metadata.camera_make = Some(make_field.display_value().to_string());
+            }
+
+            // Camera model
+            if let Some(model_field) = exifreader.get_field(Tag::Model, In::PRIMARY) {
+                metadata.camera_model = Some(model_field.display_value().to_string());
+            }
+
+            // DateTime taken
+            if let Some(datetime_field) = exifreader.get_field(Tag::DateTime, In::PRIMARY) {
+                metadata.datetime_taken = Some(datetime_field.display_value().to_string());
+            }
+
+            // GPS coordinates
+            let lat_ref = exifreader.get_field(Tag::GPSLatitudeRef, In::PRIMARY);
+            let lat = exifreader.get_field(Tag::GPSLatitude, In::PRIMARY);
+            let lon_ref = exifreader.get_field(Tag::GPSLongitudeRef, In::PRIMARY);
+            let lon = exifreader.get_field(Tag::GPSLongitude, In::PRIMARY);
+
+            if let (Some(lat_ref), Some(lat), Some(lon_ref), Some(lon)) =
+                (lat_ref, lat, lon_ref, lon)
+                && let (Ok(latitude), Ok(longitude)) = (
+                    parse_gps_coordinate(
+                        &lat.display_value().to_string(),
+                        &lat_ref.display_value().to_string(),
+                    ),
+                    parse_gps_coordinate(
+                        &lon.display_value().to_string(),
+                        &lon_ref.display_value().to_string(),
+                    ),
+                )
+            {
+                metadata.latitude = Some(latitude);
+                metadata.longitude = Some(longitude);
+            }
+        }
+    }
+
+    Ok(metadata)
+}
+
+/// Parse GPS coordinate from EXIF format
+fn parse_gps_coordinate(coordinate_str: &str, reference: &str) -> Result<f64> {
+    // EXIF GPS format is typically "deg min sec" like "40 deg 42 min 51.45 sec"
+    let parts: Vec<&str> = coordinate_str.split_whitespace().collect();
+
+    if parts.len() >= 6 {
+        let degrees: f64 = parts[0].parse().context("Failed to parse degrees")?;
+        let minutes: f64 = parts[2].parse().context("Failed to parse minutes")?;
+        let seconds: f64 = parts[4].parse().context("Failed to parse seconds")?;
+
+        let mut decimal = degrees + (minutes / 60.0) + (seconds / 3600.0);
+
+        // Apply reference direction
+        if reference == "S" || reference == "W" {
+            decimal = -decimal;
+        }
+
+        Ok(decimal)
+    } else {
+        Err(anyhow::anyhow!(
+            "Invalid GPS coordinate format: {}",
+            coordinate_str
+        ))
     }
 }
