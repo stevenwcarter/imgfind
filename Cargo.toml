@@ -70,3 +70,4 @@ tui-input = { version = "0.14.0", optional = true }
 dotenvy = "0.15.7"
 tracing-appender = "0.2.3"
 kamadak-exif = "0.6.1"
+hashbrown = "0.16.0"

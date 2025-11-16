@@ -1,6 +1,6 @@
 use base64::{Engine, engine::general_purpose};
 use juniper::{EmptyMutation, EmptySubscription, FieldError, FieldResult, GraphQLObject, RootNode};
-use tracing::error;
+use tracing::{error, info};
 
 use crate::context::GraphQLContext;
 
@@ -28,7 +28,7 @@ impl Query {
         ])
     }
 
-    #[graphql(name = "images_by_bounds")]
+    #[graphql(name = "imagesByBounds")]
     pub async fn images_by_bounds(
         context: &GraphQLContext,
         north: f64,
@@ -40,6 +40,7 @@ impl Query {
         let db = db.lock().unwrap();
 
         let images = db.get_images_by_bounds(north, south, east, west)?;
+        info!("Found {} images", images.len());
         let mut result = Vec::new();
 
         for image in images {

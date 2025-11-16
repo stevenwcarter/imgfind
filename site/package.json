@@ -24,8 +24,10 @@
     "@uidotdev/usehooks": "^2.4.1",
     "clsx": "^2.1.1",
     "graphql": "^16.12.0",
+    "leaflet": "^1.9.4",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
+    "react-leaflet": "^5.0.0",
     "react-router": "^7.9.6",
     "react-router-dom": "^7.9.6",
     "react-toastify": "^11.0.5",
@@ -35,9 +37,7 @@
     "uuid": "^13.0.0",
     "vite-tsconfig-paths": "^5.1.4",
     "webfontloader": "^1.6.28",
-    "yet-another-react-lightbox": "^3.25.0",
-    "leaflet": "^1.9.4",
-    "react-leaflet": "^4.2.1"
+    "yet-another-react-lightbox": "^3.25.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
@@ -45,10 +45,10 @@
     "@testing-library/react": "^16.3.0",
     "@testing-library/user-event": "^14.6.1",
     "@types/jest": "^30.0.0",
+    "@types/leaflet": "^1.9.21",
     "@types/node": "^24.10.1",
     "@types/react": "^19.2.5",
     "@types/react-dom": "^19.2.3",
-    "@types/leaflet": "^1.9.12",
     "@typescript-eslint/eslint-plugin": "^8.46.4",
     "@typescript-eslint/parser": "^8.46.4",
     "@vitejs/plugin-react": "^5.1.1",

@@ -1,6 +1,7 @@
 use crate::{abs_to_relative_path, get_db_parent_dir, relative_to_abs_path};
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose};
+use hashbrown::HashMap;
 use image::GenericImageView;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
@@ -585,12 +586,17 @@ impl Database {
             ORDER BY m.datetime_taken DESC
         ";
 
+        let lat_low = north.min(south);
+        let lat_high = north.max(south);
+        let long_low = east.min(west);
+        let long_high = east.max(west);
+
         let conn = self
             .pool
             .get()
             .context("Failed to get DB connection for images by bounds")?;
         let mut stmt = conn.prepare(query)?;
-        let results = stmt.query_map(params![south, north, west, east], |row| {
+        let results = stmt.query_map(params![lat_low, lat_high, long_low, long_high], |row| {
             let rel_path: String = row.get(0)?;
             let hash: String = row.get(1)?;
             let latitude: Option<f64> = row.get(2)?;
@@ -620,7 +626,9 @@ impl Database {
             images.push(result?);
         }
 
-        Ok(images)
+        let clustered = downsample_by_grid(images, 0.05, 100, 100);
+
+        Ok(clustered)
     }
 
     /// Get the image ID by path
@@ -770,4 +778,37 @@ fn parse_gps_coordinate(coordinate_str: &str, reference: &str) -> Result<f64> {
             coordinate_str
         ))
     }
+}
+
+fn downsample_by_grid(
+    images: Vec<ImageWithMetadata>,
+    grid_size: f64,
+    max_per_cluster: usize,
+    sample_per_cluster: usize,
+) -> Vec<ImageWithMetadata> {
+    let mut buckets: HashMap<(i64, i64), Vec<ImageWithMetadata>> = HashMap::new();
+
+    for img in images {
+        if let (Some(lat), Some(lon)) = (img.latitude, img.longitude) {
+            let key = (
+                (lat / grid_size).floor() as i64,
+                (lon / grid_size).floor() as i64,
+            );
+            buckets.entry(key).or_default().push(img);
+        }
+    }
+
+    let mut result = vec![];
+
+    for mut bucket in buckets.into_values() {
+        bucket.sort_by(|a, b| b.datetime_taken.cmp(&a.datetime_taken)); // newest first
+
+        if bucket.len() > max_per_cluster {
+            result.extend(bucket.into_iter().take(sample_per_cluster));
+        } else {
+            result.extend(bucket);
+        }
+    }
+
+    result
 }

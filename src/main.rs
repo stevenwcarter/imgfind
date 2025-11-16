@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 use clipper::ClipEmbedder;
 use imgfind::context::GraphQLContext;
 use imgfind::logging::init_tracing;
+use imgfind::metadata::extract_missing_metadata;
 use imgfind::{config, get_db_path, get_local_db_path};
 use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, info, warn};
@@ -42,6 +43,14 @@ enum Commands {
         /// Create database in current directory instead of using existing or global database
         #[arg(long)]
         root: bool,
+    },
+    Metadata {
+        #[arg(short, long)]
+        dir: Option<String>,
+        #[arg(short, long)]
+        quiet: bool,
+        #[arg(short, long, default_value = "100")]
+        count: usize,
     },
     Tui {
         #[arg(short, long)]
@@ -123,6 +132,11 @@ async fn main() -> Result<()> {
             let db = Database::new(&db_path)?;
             imgfind::tui::tui(db).await?;
         }
+        Commands::Metadata { dir, quiet, count } => {
+            let db_path = get_db_path(dir.as_deref())?;
+            let mut db = Database::new(&db_path)?;
+            metadata(&mut db, quiet, count)?;
+        }
         Commands::Index {
             dir,
             recursive,
@@ -195,6 +209,10 @@ async fn serve(db: Database, directory: String) -> Result<()> {
     server.await.expect("Server failed to start");
 
     Ok(())
+}
+
+fn metadata(db: &mut Database, quiet: bool, count: usize) -> Result<()> {
+    extract_missing_metadata(db, quiet, count)
 }
 
 fn index_directory(db: &mut Database, dir: &str, recursive: bool, quiet: bool) -> Result<()> {
@@ -384,7 +402,10 @@ fn index_directory(db: &mut Database, dir: &str, recursive: bool, quiet: bool) -
                         }
                     }
                     Err(e) => {
-                        warn!("Failed to get image ID for metadata storage {}: {}", path_str, e);
+                        warn!(
+                            "Failed to get image ID for metadata storage {}: {}",
+                            path_str, e
+                        );
                     }
                 }
             }
@@ -417,61 +438,7 @@ fn index_directory(db: &mut Database, dir: &str, recursive: bool, quiet: bool) -
     }
     info!("Starting metadata backfill for existing images");
 
-    let images_without_metadata = db.get_images_without_metadata(100)?;
-    if !images_without_metadata.is_empty() {
-        if !quiet {
-            println!("Found {} images missing metadata, extracting...", images_without_metadata.len());
-        }
-        info!("Found {} images missing metadata", images_without_metadata.len());
-
-        let metadata_progress = if quiet {
-            ProgressBar::hidden()
-        } else {
-            let pb = ProgressBar::new(images_without_metadata.len() as u64);
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta}) Extracting metadata: {msg}")
-                    .unwrap()
-                    .progress_chars("#>-"),
-            );
-            pb
-        };
-
-        let mut metadata_extracted = 0;
-        for (image_id, image_path, _hash) in images_without_metadata {
-            if !quiet {
-                metadata_progress.set_message(format!(
-                    "{}",
-                    std::path::Path::new(&image_path)
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                ));
-            }
-
-            match extract_image_metadata(&image_path) {
-                Ok(metadata) => {
-                    if let Err(e) = db.insert_or_update_metadata(image_id, &metadata) {
-                        warn!("Failed to store backfilled metadata for {}: {}", image_path, e);
-                    } else {
-                        metadata_extracted += 1;
-                        debug!("Backfilled metadata for: {}", image_path);
-                    }
-                }
-                Err(e) => {
-                    debug!("Failed to extract backfill metadata for {}: {}", image_path, e);
-                }
-            }
-            metadata_progress.inc(1);
-        }
-
-        metadata_progress.finish_with_message("Metadata extraction complete!");
-        
-        if !quiet {
-            println!("  📊 Metadata extracted: {}", metadata_extracted);
-        }
-        info!("Metadata backfill complete: {} extracted", metadata_extracted);
-    }
+    extract_missing_metadata(db, quiet, 100).context("extracting missing metadata")?;
 
     info!("Indexing complete!");
     info!("  Total files: {}", image_files.len());
