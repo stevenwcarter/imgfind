@@ -8,6 +8,7 @@ use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{ffi::sqlite3_auto_extension, params};
 use sqlite_vec::sqlite3_vec_init;
 use std::path::{Path, PathBuf};
+use tracing::info;
 use zerocopy::IntoBytes;
 
 #[derive(Debug, Clone)]
@@ -574,7 +575,7 @@ impl Database {
         south: f64,
         east: f64,
         west: f64,
-    ) -> Result<Vec<ImageWithMetadata>> {
+    ) -> Result<(Vec<ImageWithMetadata>, usize)> {
         let query = "
             SELECT i.path, i.hash, m.latitude, m.longitude, m.width, m.height, m.datetime_taken
             FROM images i
@@ -626,9 +627,21 @@ impl Database {
             images.push(result?);
         }
 
-        let clustered = downsample_by_grid(images, 0.05, 100, 100);
+        let biggest_difference = (lat_high - lat_low).max(long_high - long_low);
 
-        Ok(clustered)
+        info!("Biggest difference was: {biggest_difference}");
+
+        let grid_size = biggest_difference / 200.;
+
+        let original_count = images.len();
+
+        let clustered = if original_count < 100 || biggest_difference < 0.01 {
+            images
+        } else {
+            downsample_by_grid(images, grid_size, 10, 2)
+        };
+
+        Ok((clustered, original_count))
     }
 
     /// Get the image ID by path
