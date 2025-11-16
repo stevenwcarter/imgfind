@@ -99,6 +99,8 @@ enum Commands {
     Serve {
         #[arg(short, long)]
         dir: Option<String>,
+        #[arg(short, long, default_value_t = 6060)]
+        port: usize,
     },
 }
 
@@ -181,20 +183,18 @@ async fn main() -> Result<()> {
             let mut db = Database::new(&db_path)?;
             generate_thumbnails_batch(&mut db, size, count)?;
         }
-        Commands::Serve { dir } => {
+        Commands::Serve { dir, port } => {
             let db_path = get_db_path(dir.as_deref())?;
             let db = Database::new(&db_path)?;
-            serve(db, dir.unwrap_or(".".to_owned())).await?;
+            serve(db, dir.unwrap_or(".".to_owned()), port).await?;
         }
     }
 
     Ok(())
 }
 
-async fn serve(db: Database, directory: String) -> Result<()> {
+async fn serve(db: Database, directory: String, port: usize) -> Result<()> {
     // Placeholder for future server implementation
-    println!("Server functionality is not yet implemented.");
-    let port = 6060;
     let context = GraphQLContext::new(db, directory);
     let app = app(context.clone());
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
