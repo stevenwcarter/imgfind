@@ -208,7 +208,7 @@ export const MapView: React.FC = () => {
         <MapContainer
           center={defaultCenter}
           zoom={defaultZoom}
-          maxZoom={26}
+          maxZoom={28}
           style={{ height: '100%', width: '100%' }}
           ref={mapRef}
           whenReady={() => {

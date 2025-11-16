@@ -19,7 +19,7 @@ pub struct Database {
     pub parent_dir: PathBuf,
 }
 
-const MAX_JITTER: f64 = 0.0015;
+const MAX_JITTER: f64 = 0.000001;
 
 pub type ImageSearchResult = Result<Vec<(String, f32, Option<Vec<u8>>)>>;
 
@@ -626,10 +626,7 @@ impl Database {
             })
         })?;
 
-        let mut images = Vec::new();
-        for result in results {
-            images.push(result?);
-        }
+        let images: Vec<ImageWithMetadata> = results.filter_map(|r| r.ok()).collect();
 
         let biggest_difference = (lat_high - lat_low).max(long_high - long_low);
 
@@ -864,7 +861,7 @@ fn generate_jitter(img: &ImageWithMetadata) -> (f64, f64) {
 
     // Scale to jitter range
     let jitter_lat = lat_unit * MAX_JITTER;
-    let jitter_lon = lon_unit * MAX_JITTER;
+    let jitter_lon = lon_unit * (MAX_JITTER * 2.5);
 
     (jitter_lat, jitter_lon)
 }
