@@ -424,15 +424,15 @@ impl Database {
     /// Get the hash for an image by its path
     pub fn get_image_hash(&self, path: &str) -> Result<String> {
         // Convert absolute path to relative path for database lookup
-        let path = if path.starts_with("/") {
-            let abs_path = Path::new(path);
-            let rel_path = abs_to_relative_path(abs_path, &self.parent_dir)
-                .with_context(|| format!("Failed to convert path {} to relative path", path))?;
-            let rel_path_str = rel_path.to_string_lossy();
-            rel_path_str.to_string()
-        } else {
-            path.to_string()
-        };
+        // let path = if path.starts_with("/") {
+        //     let abs_path = Path::new(path);
+        //     let rel_path = abs_to_relative_path(abs_path, &self.parent_dir)
+        //         .with_context(|| format!("Failed to convert path {} to relative path", path))?;
+        //     let rel_path_str = rel_path.to_string_lossy();
+        //     rel_path_str.to_string()
+        // } else {
+        //     path.to_string()
+        // };
 
         let conn = self
             .pool

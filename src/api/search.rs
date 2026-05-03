@@ -1,7 +1,8 @@
-use anyhow::Context;
+use anyhow::{Context, Result};
 use axum::{Extension, Json, Router, extract::Path, response::IntoResponse, routing::get};
 use clipper::ClipEmbedder;
 use log::info;
+use tracing::{debug, error};
 
 use super::{AppError, middleware};
 use crate::{
@@ -22,7 +23,7 @@ pub fn routes(context: GraphQLContext) -> Router {
 async fn thumb(
     Extension(context): Extension<GraphQLContext>,
     Path((size, filename)): Path<(String, String)>,
-) -> anyhow::Result<impl IntoResponse, AppError> {
+) -> Result<impl IntoResponse, AppError> {
     info!("Size: {}, Filename: {}", size, filename);
 
     let size = size.parse::<u32>().unwrap_or(300);
@@ -42,7 +43,7 @@ async fn thumb(
 async fn search(
     Extension(context): Extension<GraphQLContext>,
     Path(search): Path<String>,
-) -> anyhow::Result<impl IntoResponse, AppError> {
+) -> Result<impl IntoResponse, AppError> {
     let model = ClipEmbedder::new(None, None, false).context("Failed to create ClipEmbedder")?;
 
     // Generate embedding for query
@@ -63,9 +64,16 @@ async fn search(
 async fn file(
     Extension(context): Extension<GraphQLContext>,
     Path(filename): Path<String>,
-) -> anyhow::Result<impl IntoResponse, AppError> {
+) -> Result<impl IntoResponse, AppError> {
     let full_path = std::path::Path::new(&context.basepath).join(&filename);
-    info!("Filename: {}", filename);
+    debug!("Filename: {}", filename);
+    debug!("Full path: {:?}", full_path);
 
-    Ok(std::fs::read(&full_path).unwrap())
+    match std::fs::read(&full_path) {
+        Ok(data) => Ok(data),
+        Err(e) => {
+            error!("Error reading file {}: {}", filename, e);
+            Err(e)?
+        }
+    }
 }
