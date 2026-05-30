@@ -18,9 +18,6 @@ Audit date: 2026-05-29. Scope: full repo (Rust CLI/TUI/Axum server + React SPA).
 ### P1 — CLIP model reloaded on every web search request `[HIGH]`
 `src/api/search.rs:47` — `ClipEmbedder::new(None, None, false)` runs inside the `/search/{query}` handler, reloading the model from disk on every request. **Fix:** load once at startup, store in `GraphQLContext` (e.g. `Arc<ClipEmbedder>`), reuse. (CLI `main.rs:246,477` and the TUI search task `tui/app/search.rs:151` load per-invocation too, which is acceptable for one-shot/spawned use.)
 
-### P2 — `Arc<Mutex<Database>>` serializes all DB access in the server `[MED]`
-`src/context.rs:6` wraps `Database` in a `Mutex`, but `Database` already holds an r2d2 connection pool and is `Clone` + `Send`/`Sync`. The mutex serializes every request through one lock, defeating the pool's concurrency. **Fix:** drop the `Mutex` and clone the pooled `Database` per handler (or share `Arc<Database>` without the lock). Also removes the `.lock().unwrap()` poison-panic risk in `graphql.rs:46` and `api/search.rs:30,55`.
-
 ### P3 — TUI clones decoded images per page update `[MED]`
 `src/tui/app/search.rs:104,110` — `image.clone()` on heavy `ImageEntry` values during paging. Consider `Rc`/`Arc` or index-based access.
 

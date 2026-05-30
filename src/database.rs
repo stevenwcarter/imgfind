@@ -390,7 +390,7 @@ impl Database {
 
     /// Insert a thumbnail into the database cache
     pub fn insert_thumbnail(
-        &mut self,
+        &self,
         image_hash: &str,
         size: u32,
         thumbnail_data: &[u8],

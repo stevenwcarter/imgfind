@@ -65,7 +65,7 @@ async fn thumb(
     info!("Size: {}, Filename: {}", size, filename);
 
     let size = size.parse::<u32>().unwrap_or(300);
-    let mut db = context.db.lock().unwrap();
+    let db = &context.db;
 
     // Get the image hash from the database
     let hash = db
@@ -73,7 +73,7 @@ async fn thumb(
         .with_context(|| format!("Failed to get hash for image: {}", filename))?;
 
     // Generate or retrieve thumbnail
-    let thumbnail_bytes = get_or_generate_thumbnail(&mut db, &filename, &hash, size)?;
+    let thumbnail_bytes = get_or_generate_thumbnail(db, &filename, &hash, size)?;
 
     Ok(thumbnail_bytes)
 }
@@ -90,8 +90,7 @@ async fn search(
         .context("Failed to generate text embedding")?;
     let normalized_query = normalize_vector(&query_embedding);
 
-    let db = context.db.lock().unwrap();
-    let search = SearchEngine::new(&db);
+    let search = SearchEngine::new(&context.db);
     let result = search
         .search_with_thumbnails(&normalized_query, 80)
         .context("Failed to perform search")?;
