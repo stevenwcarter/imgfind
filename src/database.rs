@@ -23,9 +23,6 @@ const MAX_JITTER: f64 = 0.000001;
 
 pub type ImageSearchResult = Result<Vec<(String, f32, Option<Vec<u8>>)>>;
 
-// https://chatgpt.com/c/6854c675-e160-800d-a033-fe236a615de4
-// TODO: Add extension load for diesel
-
 impl Database {
     pub fn new(db_path: &Path) -> Result<Self> {
         // Initialize sqlite-vec extension
@@ -43,7 +40,12 @@ impl Database {
         let parent_path = db_path.parent().context("DB path has no parent")?;
         std::fs::create_dir_all(parent_path).context("Failed to create DB parent directory")?;
 
-        let manager = SqliteConnectionManager::file(db_path);
+        // Enable foreign keys on every connection the pool hands out. PRAGMAs are
+        // per-connection, so setting this once on a single connection would leave
+        // FK enforcement (and the ON DELETE CASCADE on image_metadata) off for the
+        // rest of the pool.
+        let manager = SqliteConnectionManager::file(db_path)
+            .with_init(|conn| conn.execute_batch("PRAGMA foreign_keys = ON;"));
         let pool = r2d2::Pool::new(manager)
             .with_context(|| format!("Failed to open database at {:?}", db_path))?;
 
@@ -54,10 +56,7 @@ impl Database {
     }
 
     fn initialize_schema(&mut self) -> Result<()> {
-        // Enable foreign keys
-
         let conn = self.pool.get().context("Failed to get DB connection")?;
-        conn.execute("PRAGMA foreign_keys = ON;", [])?;
 
         // Create images table
         conn.execute(
@@ -235,10 +234,6 @@ impl Database {
             let rel_path: String = row.get(0)?;
             let distance: f32 = row.get(1)?;
 
-            // Convert relative path back to absolute path
-            // let abs_path = relative_to_abs_path(Path::new(&rel_path), &self.parent_dir);
-            // let abs_path_str = abs_path.to_string_lossy().to_string();
-
             Ok((rel_path, distance))
         })?;
 
@@ -247,8 +242,6 @@ impl Database {
             search_results.push(result?);
         }
 
-        // Limit results to the requested amount
-        search_results.truncate(limit);
         Ok(search_results)
     }
 
@@ -290,8 +283,6 @@ impl Database {
             search_results.push(result?);
         }
 
-        // Limit results to the requested amount
-        search_results.truncate(limit);
         Ok(search_results)
     }
     pub fn search_similar_images_with_blob(
@@ -334,19 +325,20 @@ impl Database {
             }
         }
 
-        // Delete missing files from both tables
-        let mut removed_count = 0;
-        let conn = self
+        // Delete missing files from both tables in a single transaction
+        let mut conn = self
             .pool
             .get()
             .context("Failed to get DB connection to delete missing files")?;
+        let tx = conn.transaction()?;
+        let removed_count = to_delete.len();
         for id in to_delete {
             // Delete from vector table first
-            conn.execute("DELETE FROM image_vectors WHERE rowid = ?1", params![id])?;
+            tx.execute("DELETE FROM image_vectors WHERE rowid = ?1", params![id])?;
             // Then delete from images table
-            conn.execute("DELETE FROM images WHERE id = ?1", params![id])?;
-            removed_count += 1;
+            tx.execute("DELETE FROM images WHERE id = ?1", params![id])?;
         }
+        tx.commit()?;
 
         Ok(removed_count)
     }
@@ -383,11 +375,6 @@ impl Database {
         Ok(results)
     }
 
-    // #[allow(dead_code)]
-    // pub fn get_connection(&self) -> &Connection {
-    //     &self.conn.
-    // }
-
     /// Insert a thumbnail into the database cache
     pub fn insert_thumbnail(
         &self,
@@ -423,17 +410,6 @@ impl Database {
 
     /// Get the hash for an image by its path
     pub fn get_image_hash(&self, path: &str) -> Result<String> {
-        // Convert absolute path to relative path for database lookup
-        // let path = if path.starts_with("/") {
-        //     let abs_path = Path::new(path);
-        //     let rel_path = abs_to_relative_path(abs_path, &self.parent_dir)
-        //         .with_context(|| format!("Failed to convert path {} to relative path", path))?;
-        //     let rel_path_str = rel_path.to_string_lossy();
-        //     rel_path_str.to_string()
-        // } else {
-        //     path.to_string()
-        // };
-
         let conn = self
             .pool
             .get()
@@ -626,7 +602,9 @@ impl Database {
             })
         })?;
 
-        let images: Vec<ImageWithMetadata> = results.filter_map(|r| r.ok()).collect();
+        let images: Vec<ImageWithMetadata> = results
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("Failed to read image rows for bounds query")?;
 
         let biggest_difference = (lat_high - lat_low).max(long_high - long_low);
 
@@ -864,4 +842,81 @@ fn generate_jitter(img: &ImageWithMetadata) -> (f64, f64) {
     let jitter_lon = lon_unit * (MAX_JITTER * 2.5);
 
     (jitter_lat, jitter_lon)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Unique temp directory for an isolated test database.
+    fn temp_db_path() -> PathBuf {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "imgfind_test_{}_{n}",
+            std::process::id()
+        ));
+        // Database::new -> get_db_parent_dir requires a `.imgfind/imgfind.db` layout.
+        dir.join(".imgfind").join("imgfind.db")
+    }
+
+    /// Foreign keys must be enabled on *every* connection the pool hands out,
+    /// not just the one used during schema init. PRAGMAs are per-connection.
+    #[test]
+    fn foreign_keys_enabled_on_fresh_pool_connection() {
+        let db_path = temp_db_path();
+        let db = Database::new(&db_path).expect("create db");
+
+        // Hold one connection, then force the pool to build a *second*, fresh one.
+        // The old one-off PRAGMA only set foreign_keys on the connection used during
+        // schema init; any later connection would have FK enforcement off.
+        let _held = db.pool.get().expect("get first conn");
+        let conn = db.pool.get().expect("get second conn");
+        let fk_on: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .expect("read pragma");
+        assert_eq!(fk_on, 1, "foreign_keys should be ON for pooled connections");
+
+        // Remove the unique temp dir (grandparent of the .imgfind/imgfind.db path).
+        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+    }
+
+    /// Deleting an image must cascade to its metadata row (ON DELETE CASCADE),
+    /// which only fires when foreign key enforcement is actually active.
+    #[test]
+    fn delete_image_cascades_to_metadata() {
+        let db_path = temp_db_path();
+        let db = Database::new(&db_path).expect("create db");
+
+        // Force a fresh second connection so the cascade is exercised on a
+        // connection other than the one used during schema init.
+        let _held = db.pool.get().expect("get first conn");
+        let conn = db.pool.get().expect("get second conn");
+        conn.execute(
+            "INSERT INTO images (id, path, hash) VALUES (1, 'a.jpg', 'h')",
+            [],
+        )
+        .expect("insert image");
+        conn.execute(
+            "INSERT INTO image_metadata (image_id, width) VALUES (1, 100)",
+            [],
+        )
+        .expect("insert metadata");
+
+        conn.execute("DELETE FROM images WHERE id = 1", [])
+            .expect("delete image");
+
+        let meta_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM image_metadata WHERE image_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count metadata");
+        assert_eq!(meta_count, 0, "metadata should cascade-delete with its image");
+
+        // Remove the unique temp dir (grandparent of the .imgfind/imgfind.db path).
+        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+    }
 }
