@@ -33,6 +33,7 @@ pub fn extract_missing_metadata(db: &mut Database, quiet: bool, count: usize) ->
         };
 
         let mut metadata_extracted = 0;
+        let mut failed = 0;
         for (image_id, image_path, _hash) in images_without_metadata {
             if !quiet {
                 metadata_progress.set_message(format!(
@@ -51,6 +52,7 @@ pub fn extract_missing_metadata(db: &mut Database, quiet: bool, count: usize) ->
                             "Failed to store backfilled metadata for {}: {}",
                             image_path, e
                         );
+                        failed += 1;
                     } else {
                         metadata_extracted += 1;
                         debug!("Backfilled metadata for: {}", image_path);
@@ -61,6 +63,7 @@ pub fn extract_missing_metadata(db: &mut Database, quiet: bool, count: usize) ->
                         "Failed to extract backfill metadata for {}: {}",
                         image_path, e
                     );
+                    failed += 1;
                 }
             }
             metadata_progress.inc(1);
@@ -70,10 +73,16 @@ pub fn extract_missing_metadata(db: &mut Database, quiet: bool, count: usize) ->
 
         if !quiet {
             println!("  📊 Metadata extracted: {}", metadata_extracted);
+            if failed > 0 {
+                println!("  ⚠️  Failed: {}", failed);
+            }
+        }
+        if failed > 0 {
+            warn!("{} images failed metadata extraction or storage", failed);
         }
         info!(
-            "Metadata backfill complete: {} extracted",
-            metadata_extracted
+            "Metadata backfill complete: {} extracted, {} failed",
+            metadata_extracted, failed
         );
     }
 

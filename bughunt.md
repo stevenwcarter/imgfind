@@ -41,9 +41,6 @@ Audit date: 2026-05-29. Scope: full repo (Rust CLI/TUI/Axum server + React SPA).
 ### O2 — `println!` mixed with tracing in metadata backfill `[LOW]`
 `src/metadata.rs:12,72` — inconsistent with the rest of the module's `info!`. (Acceptable as user-facing CLI progress, but worth a consistent choice.)
 
-### O3 — Metadata backfill swallows failures `[LOW]`
-`src/metadata.rs:49` (insert failure → `warn!` then data discarded) and `:59` (extraction failure logged at `debug!`). Silent under quiet mode; consider an aggregated error count.
-
 ---
 
 ## RESOURCE / MISC
