@@ -11,6 +11,7 @@ use ratatui::crossterm::event::Event as CrosstermEvent;
 use ratatui::{
     DefaultTerminal,
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
+    layout::Rect,
 };
 use ratatui_image::picker::Picker;
 use tokio::{
@@ -45,6 +46,10 @@ pub struct App {
     /// Larger version of the image which should be displayed as zoomed if present
     pub zoomed_image: Option<ImageEntry>,
     pub zoom_level: u8,
+    /// Crop-window center for the zoomed image, in original-image normalized [0,1] coords.
+    pub zoom_focal: (f32, f32),
+    /// On-screen rect of the displayed zoomed image, captured during render.
+    pub zoomed_image_rect: Option<Rect>,
     /// Which image index is currently focused
     pub focused_image_index: u8,
     /// Holds the input component/state
@@ -91,6 +96,8 @@ impl App {
             running: true,
             page: 0,
             zoom_level: 1,
+            zoom_focal: (0.5, 0.5),
+            zoomed_image_rect: None,
             zoomed_image_index: None,
             zoomed_image: None,
             search_result: None,

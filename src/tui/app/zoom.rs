@@ -54,15 +54,26 @@ pub fn focal_for_zoom_at_cursor(
     (fx_new, fy_new)
 }
 
-pub fn zoom_center(img: &DynamicImage, zoom: u8) -> DynamicImage {
+pub fn zoom_center(img: &DynamicImage, zoom: u8, focal: (f32, f32)) -> DynamicImage {
     let zoom = zoom.clamp(1, 4);
     let (w, h) = img.dimensions();
+
+    if zoom == 1 {
+        return img.clone();
+    }
 
     let new_w = (w as f32 / zoom as f32) as u32;
     let new_h = (h as f32 / zoom as f32) as u32;
 
-    let x = (w - new_w) / 2;
-    let y = (h - new_h) / 2;
+    // Crop top-left so the window is centered on the focal point, clamped in bounds.
+    let cx = focal.0 * w as f32;
+    let cy = focal.1 * h as f32;
+    let x = (cx - new_w as f32 / 2.0)
+        .round()
+        .clamp(0.0, (w - new_w) as f32) as u32;
+    let y = (cy - new_h as f32 / 2.0)
+        .round()
+        .clamp(0.0, (h - new_h) as f32) as u32;
 
     let cropped = img.crop_imm(x, y, new_w, new_h);
 
@@ -110,6 +121,7 @@ impl App {
 
                 let zoom_tx = self.zoom_tx.clone();
                 let picker = self.picker.clone();
+                let focal = self.zoom_focal;
 
                 tokio::spawn(async move {
                     debug!("Image path is: {}", image_path);
@@ -132,7 +144,7 @@ impl App {
                             }
                         }
                     };
-                    let image = zoom_center(&base_image, zoom_level);
+                    let image = zoom_center(&base_image, zoom_level, focal);
                     // let image = image.resize(800, 800, ratatui_image::FilterType::Triangle);
                     debug!("Image decoded successfully");
 
@@ -209,5 +221,19 @@ mod tests {
         let r = Rect { x: 0, y: 0, width: 0, height: 50 };
         let (fx, _fy) = focal_for_zoom_at_cursor(r, 5, 25, 1, (0.5, 0.5), 2);
         approx(fx, 0.5);
+    }
+
+    #[test]
+    fn zoom_one_returns_same_dimensions() {
+        let img = DynamicImage::new_rgb8(64, 48);
+        let out = zoom_center(&img, 1, (0.5, 0.5));
+        assert_eq!(out.dimensions(), (64, 48));
+    }
+
+    #[test]
+    fn off_center_focal_stays_in_bounds() {
+        let img = DynamicImage::new_rgb8(64, 48);
+        let out = zoom_center(&img, 3, (0.95, 0.05));
+        assert_eq!(out.dimensions(), (64, 48));
     }
 }
