@@ -200,16 +200,18 @@ async fn serve(db: Database, directory: String, port: usize) -> Result<()> {
         Arc::new(ClipEmbedder::new(None, None, false).context("Failed to create ClipEmbedder")?);
     let context = GraphQLContext::new(db, directory, embedder);
     let app = app(context.clone());
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
+    let addr = format!("0.0.0.0:{port}");
+    let listener = tokio::net::TcpListener::bind(&addr)
         .await
-        .unwrap();
+        .with_context(|| format!("Failed to bind to {addr}"))?;
+    info!("Listening on http://{addr}");
     let server = axum::serve(listener, app).with_graceful_shutdown(async {
         tokio::signal::ctrl_c()
             .await
             .expect("Failed to install Ctrl+C handler");
     });
 
-    server.await.expect("Server failed to start");
+    server.await.context("Server error")?;
 
     Ok(())
 }

@@ -25,9 +25,6 @@ Audit date: 2026-05-29. Scope: full repo (Rust CLI/TUI/Axum server + React SPA).
 
 ## CORRECTNESS
 
-### C3 — `serve()` panics on bind/serve + stale comment `[LOW]`
-`src/main.rs:200-209` — `.unwrap()`/`.expect()` instead of `?`; line 197 comment says "Placeholder for future server implementation" though it's fully implemented. Propagate errors and delete the comment.
-
 ### C6 — Frontend `imagesByBounds` binds east/west swapped `[LOW — smell]`
 `site/src/page/MapView.tsx:17` — `east: $west, west: $east`. **Behaviorally harmless today** because the resolver normalizes with `min()/max()` (`src/database.rs:596-597`), but it's misleading and becomes a real bug if the resolver stops normalizing. Fix the binding to match the names.
 
