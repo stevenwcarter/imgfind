@@ -1,7 +1,7 @@
 use image::{DynamicImage, GenericImageView, ImageReader};
 use ratatui_image::{FilterType, thread::ThreadProtocol};
 use tokio::sync::mpsc::unbounded_channel;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::tui::{app::App, app::ImageEntry};
 
@@ -28,10 +28,10 @@ impl App {
         } else {
             self.zoomed_image_index = zoom;
             if let Some(zoom_index) = zoom {
-                let image_entry = self
-                    .images
-                    .get(zoom_index as usize)
-                    .expect("image not found");
+                let Some(image_entry) = self.images.get(zoom_index as usize) else {
+                    warn!("zoom requested for missing image index {zoom_index}");
+                    return;
+                };
                 let image_path = image_entry.path.clone();
                 let image_score = image_entry.score;
                 let zoom_level = self.zoom_level;
@@ -69,10 +69,19 @@ impl App {
                     {
                         zoomed_image
                     } else {
-                        ImageReader::open(image_path.clone())
-                            .expect("could not open")
-                            .decode()
-                            .expect("could not decoded")
+                        match ImageReader::open(&image_path) {
+                            Ok(reader) => match reader.decode() {
+                                Ok(img) => img,
+                                Err(e) => {
+                                    warn!("failed to decode image {image_path}: {e}");
+                                    return;
+                                }
+                            },
+                            Err(e) => {
+                                warn!("failed to open image {image_path}: {e}");
+                                return;
+                            }
+                        }
                     };
                     let image = zoom_center(&base_image, zoom_level);
                     // let image = image.resize(800, 800, ratatui_image::FilterType::Triangle);
@@ -89,9 +98,9 @@ impl App {
                         protocol: ThreadProtocol::new(image_tx, Some(protocol)),
                     };
 
-                    zoom_tx
-                        .send(image_entry)
-                        .expect("Could not send image entry");
+                    if let Err(e) = zoom_tx.send(image_entry) {
+                        debug!("zoom receiver dropped, discarding image entry: {e}");
+                    }
                 });
             }
         }
