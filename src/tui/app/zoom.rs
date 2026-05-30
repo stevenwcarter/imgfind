@@ -62,8 +62,10 @@ pub fn zoom_center(img: &DynamicImage, zoom: u8, focal: (f32, f32)) -> DynamicIm
         return img.clone();
     }
 
-    let new_w = (w as f32 / zoom as f32) as u32;
-    let new_h = (h as f32 / zoom as f32) as u32;
+    // `.max(1)` guards pathologically tiny images (dimension < zoom) from a
+    // zero-size crop, which would panic the resampler below.
+    let new_w = ((w as f32 / zoom as f32) as u32).max(1);
+    let new_h = ((h as f32 / zoom as f32) as u32).max(1);
 
     // Crop top-left so the window is centered on the focal point, clamped in bounds.
     let cx = focal.0 * w as f32;
