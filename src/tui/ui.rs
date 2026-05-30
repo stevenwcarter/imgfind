@@ -67,10 +67,12 @@ impl App {
     fn render_images(&mut self, area: Rect, buf: &mut Buffer) {
         if let Some(image) = self.zoomed_image.as_mut() {
             Clear.render(area, buf);
-            if let Err(e) = render_image(0, 9, image, area, buf) {
-                error!("Failed to render zoomed image: {}", e);
+            match render_image(0, 9, image, area, buf) {
+                Ok(rect) => self.zoomed_image_rect = Some(rect),
+                Err(e) => error!("Failed to render zoomed image: {}", e),
             }
         } else {
+            self.zoomed_image_rect = None;
             let nines = nine_block(area);
 
             for (index, area) in nines.into_iter().enumerate() {

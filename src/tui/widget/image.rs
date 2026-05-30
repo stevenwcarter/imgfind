@@ -15,7 +15,7 @@ pub fn render_image(
     image_entry: &mut ImageEntry,
     area: Rect,
     buf: &mut Buffer,
-) -> Result<()> {
+) -> Result<Rect> {
     let image_area = image_entry
         .protocol
         .size_for(Resize::Scale(None), area)
@@ -35,5 +35,5 @@ pub fn render_image(
     let image = StatefulImage::new().resize(Resize::Scale(Some(FilterType::CatmullRom)));
     image.render(center, buf, &mut image_entry.protocol);
 
-    Ok(())
+    Ok(center)
 }

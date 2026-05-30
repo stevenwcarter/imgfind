@@ -11,6 +11,7 @@ use ratatui::crossterm::event::Event as CrosstermEvent;
 use ratatui::{
     DefaultTerminal,
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
+    layout::Rect,
 };
 use ratatui_image::picker::Picker;
 use tokio::{
@@ -29,6 +30,7 @@ mod zoom;
 
 pub use focus::FocusDirection;
 pub use search::SearchResult;
+use zoom::focal_for_zoom_at_cursor;
 
 /// Application.
 pub struct App {
@@ -45,6 +47,10 @@ pub struct App {
     /// Larger version of the image which should be displayed as zoomed if present
     pub zoomed_image: Option<ImageEntry>,
     pub zoom_level: u8,
+    /// Crop-window center for the zoomed image, in original-image normalized [0,1] coords.
+    pub zoom_focal: (f32, f32),
+    /// On-screen rect of the displayed zoomed image, captured during render.
+    pub zoomed_image_rect: Option<Rect>,
     /// Which image index is currently focused
     pub focused_image_index: u8,
     /// Holds the input component/state
@@ -91,6 +97,8 @@ impl App {
             running: true,
             page: 0,
             zoom_level: 1,
+            zoom_focal: (0.5, 0.5),
+            zoomed_image_rect: None,
             zoomed_image_index: None,
             zoomed_image: None,
             search_result: None,
@@ -142,18 +150,41 @@ impl App {
             Event::App(app_event) => match app_event {
                 AppEvent::ZoomIn(mouse_event) => {
                     if self.zoomed_image.is_some() {
-                        self.zoom_level = self.zoom_level.saturating_add(1).clamp(1, 4);
+                        let new_zoom = self.zoom_level.saturating_add(1).clamp(1, 4);
+                        if let Some(rect) = self.zoomed_image_rect {
+                            self.zoom_focal = focal_for_zoom_at_cursor(
+                                rect,
+                                mouse_event.column,
+                                mouse_event.row,
+                                self.zoom_level,
+                                self.zoom_focal,
+                                new_zoom,
+                            );
+                        }
+                        self.zoom_level = new_zoom;
                         self.handle_zoom_image(self.zoomed_image_index);
                     }
                 }
                 AppEvent::ZoomOut(mouse_event) => {
                     if self.zoomed_image.is_some() {
-                        self.zoom_level = self.zoom_level.saturating_sub(1).clamp(1, 4);
+                        let new_zoom = self.zoom_level.saturating_sub(1).clamp(1, 4);
+                        if let Some(rect) = self.zoomed_image_rect {
+                            self.zoom_focal = focal_for_zoom_at_cursor(
+                                rect,
+                                mouse_event.column,
+                                mouse_event.row,
+                                self.zoom_level,
+                                self.zoom_focal,
+                                new_zoom,
+                            );
+                        }
+                        self.zoom_level = new_zoom;
                         self.handle_zoom_image(self.zoomed_image_index);
                     }
                 }
                 AppEvent::ZoomReset => {
                     self.zoom_level = 1;
+                    self.zoom_focal = (0.5, 0.5);
                     self.handle_zoom_image(self.zoomed_image_index);
                 }
                 AppEvent::ClickLeft(mouse_event) => {
@@ -191,6 +222,7 @@ impl App {
                     }
                 }
                 AppEvent::ZoomImage(zoom) => {
+                    self.zoom_focal = (0.5, 0.5);
                     self.handle_zoom_image(zoom);
                 }
                 AppEvent::Focus(direction) => self.handle_focus(direction),

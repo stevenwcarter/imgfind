@@ -18,9 +18,6 @@ Audit date: 2026-05-29. Scope: full repo (Rust CLI/TUI/Axum server + React SPA).
 
 ## CORRECTNESS
 
-### C6 — Frontend `imagesByBounds` binds east/west swapped `[LOW — smell]`
-`site/src/page/MapView.tsx:17` — `east: $west, west: $east`. **Behaviorally harmless today** because the resolver normalizes with `min()/max()` (`src/database.rs:596-597`), but it's misleading and becomes a real bug if the resolver stops normalizing. Fix the binding to match the names.
-
 ### C7 — Frontend double-fetch on mount `[LOW]`
 `site/src/page/MapView.tsx` (~93-167) — direct `fetchGeotaggedImages()` call plus an effect that also fires it. Causes a redundant initial query.
 
@@ -47,7 +44,7 @@ Audit date: 2026-05-29. Scope: full repo (Rust CLI/TUI/Axum server + React SPA).
 `src/database.rs:386` (`get_connection`), `database.rs:427-435` (path conversion in `get_image_hash`), `database.rs:239-240` (rel→abs in `search_similar_images`), `src/routes.rs:62` (subscriptions route), `tui/app/search.rs:171-173` (`.skip/.take` + no-op `.filter(|_| true)`), `tui/app/zoom.rs:78` (resize), `site/src/page/MapView.tsx:238-264` (Popup block). Remove.
 
 ### D7 — Unused vars/params `[LOW]`
-`src/tui/app.rs:143,149` — `mouse_event` unused in `ZoomIn`/`ZoomOut`. `src/tui/ui.rs:63` — `_x` cursor calc computed but never applied (cursor position not set).
+`src/tui/ui.rs:63` — `_x` cursor calc computed but never applied (cursor position not set). (The `ZoomIn`/`ZoomOut` `mouse_event` params are now used — cursor-relative zoom, 2026-05-29.)
 
 ### D8 — Frontend lint debt `[LOW]`
 `site/src/page/Images.tsx:47` — `console.log('Images fetched', data)`. `Images.tsx:54` — `e: any` (use `React.MouseEvent`). `Images.tsx:23-24` — `zoomRef`/`thumbnailsRef` possibly unused.
