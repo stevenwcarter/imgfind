@@ -19,7 +19,7 @@ use tokio::{
     sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
     task::JoinHandle,
 };
-use tracing::info;
+use tracing::{error, info};
 use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler as _;
 
@@ -198,9 +198,7 @@ impl App {
                 AppEvent::HandleSearch(query) => {
                     self.page = 0;
                     if let Err(err) = self.handle_search(&query) {
-                        // Handle the error, e.g., log it or display a message to the user.
-                        // For now, we'll just print it to the console.
-                        eprintln!("Error handling search: {:?}", err);
+                        error!("Error handling search: {:?}", err);
                     }
                 }
                 AppEvent::NextPage => {
@@ -212,13 +210,13 @@ impl App {
                     }
                     self.page += 1;
                     if let Err(err) = self.update_page() {
-                        eprintln!("Error updating page: {:?}", err);
+                        error!("Error updating page: {:?}", err);
                     }
                 }
                 AppEvent::PreviousPage => {
                     self.page = self.page.saturating_sub(1);
                     if let Err(err) = self.update_page() {
-                        eprintln!("Error updating page: {:?}", err);
+                        error!("Error updating page: {:?}", err);
                     }
                 }
                 AppEvent::ZoomImage(zoom) => {

@@ -199,7 +199,7 @@ impl App {
                     let _ = search_tx.send(result);
                 }
                 Err(err) => {
-                    eprintln!("Search error: {:?}", err);
+                    error!("Search error: {:?}", err);
                     // Send empty result on error
                     let _ = search_tx.send(SearchResult {
                         images: Vec::new(),

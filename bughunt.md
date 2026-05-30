@@ -38,9 +38,6 @@ Audit date: 2026-05-29. Scope: full repo (Rust CLI/TUI/Axum server + React SPA).
 
 ## OBSERVABILITY
 
-### O1 — `eprintln!` in TUI error paths `[MED]`
-`src/tui/app.rs:172,184,190` and `tui/app/search.rs:207` — `eprintln!` is invisible/garbled in alternate-screen mode. Use `tracing::error!`.
-
 ### O2 — `println!` mixed with tracing in metadata backfill `[LOW]`
 `src/metadata.rs:12,72` — inconsistent with the rest of the module's `info!`. (Acceptable as user-facing CLI progress, but worth a consistent choice.)
 
