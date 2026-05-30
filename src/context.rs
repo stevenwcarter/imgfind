@@ -1,22 +1,21 @@
 use crate::database::Database;
-use std::sync::{Arc, Mutex};
+use clipper::ClipEmbedder;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct GraphQLContext {
-    pub db: Arc<Mutex<Database>>,
+    pub db: Database,
     pub basepath: String,
+    pub embedder: Arc<ClipEmbedder>,
 }
 
 impl GraphQLContext {
-    pub fn new(db: Database, basepath: String) -> Self {
+    pub fn new(db: Database, basepath: String, embedder: Arc<ClipEmbedder>) -> Self {
         GraphQLContext {
-            db: Arc::new(Mutex::new(db)),
+            db,
             basepath,
+            embedder,
         }
-    }
-
-    pub async fn get_db(&self) -> Arc<Mutex<Database>> {
-        self.db.clone()
     }
 }
 

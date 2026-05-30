@@ -24,11 +24,11 @@ pub fn get_db_path(dir: Option<&str>) -> Result<PathBuf> {
         if potential_db.exists() {
             return Ok(potential_db);
         } else {
-            panic!("No database found in this directory")
+            return Err(anyhow::anyhow!("No database found in directory: {dir}"));
         }
     }
 
-    let mut current_dir = std::env::current_dir().unwrap();
+    let mut current_dir = std::env::current_dir().context("Failed to get current directory")?;
 
     loop {
         let potential_db = current_dir.join(".imgfind").join("imgfind.db");

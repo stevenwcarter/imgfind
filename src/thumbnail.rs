@@ -203,7 +203,7 @@ fn generate_and_store_thumbnail(
 /// # Returns
 /// * `Result<Vec<u8>>` - JPEG encoded thumbnail bytes
 pub fn get_or_generate_thumbnail(
-    db: &mut Database,
+    db: &Database,
     filepath: &str,
     hash: &str,
     size: u32,

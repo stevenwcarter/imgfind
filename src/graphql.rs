@@ -42,8 +42,7 @@ impl Query {
         east: f64,
         west: f64,
     ) -> FieldResult<ImageBoundsResult> {
-        let db = context.get_db().await;
-        let db = db.lock().unwrap();
+        let db = &context.db;
 
         let (images, original_count) = db.get_images_by_bounds(north, south, east, west)?;
         info!("Found {} images", images.len());
