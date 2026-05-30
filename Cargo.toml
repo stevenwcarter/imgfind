@@ -58,7 +58,7 @@ rust-embed = "8.7.2"
 mime_guess = "2.0.5"
 rayon = "1.10.0"
 iterm2img = "0.1.0"
-r2d2_sqlite = { version = "0.31.0", features = ["bundled"] }
+r2d2_sqlite = "0.31.0"
 r2d2 = "0.8.10"
 base64 = "0.22.1"
 
