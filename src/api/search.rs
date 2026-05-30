@@ -1,8 +1,14 @@
 use anyhow::{Context, Result};
-use axum::{Extension, Json, Router, extract::Path, response::IntoResponse, routing::get};
+use axum::{
+    Extension, Json, Router,
+    extract::Path,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::get,
+};
 use clipper::ClipEmbedder;
 use log::info;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 use super::{AppError, middleware};
 use crate::{
@@ -10,6 +16,38 @@ use crate::{
     search::{SearchEngine, normalize_vector},
     thumbnail::get_or_generate_thumbnail,
 };
+
+/// Join `filename` onto `base`, returning the path only if it stays within `base`.
+/// Rejects absolute paths and any `..` that would climb above `base`.
+fn safe_join(base: &std::path::Path, filename: &str) -> Option<std::path::PathBuf> {
+    use std::path::Component;
+
+    let rel = std::path::Path::new(filename);
+    if rel.is_absolute() {
+        return None;
+    }
+
+    let mut result = base.to_path_buf();
+    for comp in rel.components() {
+        match comp {
+            Component::Normal(c) => result.push(c),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !result.pop() || !result.starts_with(base) {
+                    return None;
+                }
+            }
+            // RootDir / Prefix => absolute or platform prefix: reject.
+            _ => return None,
+        }
+    }
+
+    if result.starts_with(base) {
+        Some(result)
+    } else {
+        None
+    }
+}
 
 pub fn routes(context: GraphQLContext) -> Router {
     Router::new()
@@ -64,16 +102,64 @@ async fn search(
 async fn file(
     Extension(context): Extension<GraphQLContext>,
     Path(filename): Path<String>,
-) -> Result<impl IntoResponse, AppError> {
-    let full_path = std::path::Path::new(&context.basepath).join(&filename);
-    debug!("Filename: {}", filename);
-    debug!("Full path: {:?}", full_path);
+) -> Response {
+    // Canonicalize the base so containment checks compare real paths.
+    let base = std::fs::canonicalize(&context.basepath)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&context.basepath));
+
+    let Some(full_path) = safe_join(&base, &filename) else {
+        warn!("rejected path traversal attempt: {filename}");
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    debug!("Serving file: {:?}", full_path);
 
     match std::fs::read(&full_path) {
-        Ok(data) => Ok(data),
+        Ok(data) => data.into_response(),
         Err(e) => {
             error!("Error reading file {}: {}", filename, e);
-            Err(e)?
+            StatusCode::NOT_FOUND.into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_join;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn allows_simple_relative() {
+        let base = Path::new("/srv/images");
+        assert_eq!(
+            safe_join(base, "a/b.jpg"),
+            Some(PathBuf::from("/srv/images/a/b.jpg"))
+        );
+    }
+
+    #[test]
+    fn allows_internal_dotdot() {
+        let base = Path::new("/srv/images");
+        assert_eq!(
+            safe_join(base, "a/../b.jpg"),
+            Some(PathBuf::from("/srv/images/b.jpg"))
+        );
+    }
+
+    #[test]
+    fn rejects_parent_traversal() {
+        let base = Path::new("/srv/images");
+        assert_eq!(safe_join(base, "../../etc/passwd"), None);
+    }
+
+    #[test]
+    fn rejects_absolute_path() {
+        let base = Path::new("/srv/images");
+        assert_eq!(safe_join(base, "/etc/passwd"), None);
+    }
+
+    #[test]
+    fn rejects_climb_then_descend_escape() {
+        let base = Path::new("/srv/images");
+        assert_eq!(safe_join(base, "a/../../b"), None);
     }
 }

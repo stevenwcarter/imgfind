@@ -8,14 +8,6 @@ Audit date: 2026-05-29. Scope: full repo (Rust CLI/TUI/Axum server + React SPA).
 
 ## SECURITY
 
-### S1 — Path traversal in file-serving endpoint `[HIGH]`
-`src/api/search.rs:68` — the `/api/v1/search/file/{*filename}` handler does:
-```rust
-let full_path = std::path::Path::new(&context.basepath).join(&filename);
-std::fs::read(&full_path)
-```
-`filename` is the unsanitized wildcard segment. A request like `/api/v1/search/file/../../../../etc/passwd` escapes `basepath` and reads arbitrary files. Combined with S2 (binds `0.0.0.0`) this is network-reachable with no auth. **Fix:** canonicalize the joined path and verify it still starts with the canonicalized `basepath`; reject otherwise.
-
 ### S2 — Server binds `0.0.0.0` with no auth `[MED]`
 `src/main.rs:200` — `TcpListener::bind(format!("0.0.0.0:{port}"))`. Exposes the SPA, GraphQL, and the (vulnerable) file endpoint on all interfaces. Consider binding `127.0.0.1` by default with an opt-in flag for `0.0.0.0`.
 
