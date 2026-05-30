@@ -11,9 +11,6 @@ Audit date: 2026-05-29. Scope: full repo (Rust CLI/TUI/Axum server + React SPA).
 ### P3 — TUI clones decoded images per page update `[MED]`
 `src/tui/app/search.rs:104,110` — `image.clone()` on heavy `ImageEntry` values during paging. Consider `Rc`/`Arc` or index-based access.
 
-### P4 — Query vector normalized twice (CLI) `[LOW]`
-`src/main.rs:485` normalizes, then `SearchEngine::search` (`src/search.rs:15`) normalizes again. Harmless but redundant; normalize at one layer.
-
 ---
 
 ## CORRECTNESS

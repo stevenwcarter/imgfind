@@ -490,12 +490,10 @@ fn search_images(
         .get_text_embedding(prompt)
         .context("Failed to generate text embedding")?;
 
-    let normalized_query = normalize_vector(&query_embedding);
-
-    // Search database
+    // Search database (SearchEngine normalizes the query internally)
     info!("Searching database...");
     let search_engine = SearchEngine::new(db);
-    let all_results = search_engine.search(&normalized_query, usize::MAX)?; // Get all results first
+    let all_results = search_engine.search(&query_embedding, usize::MAX)?; // Get all results first
 
     // Filter results based on current directory and recursive flag
     let filtered_results: Vec<_> = all_results

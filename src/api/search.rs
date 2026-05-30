@@ -12,7 +12,7 @@ use tracing::{debug, error, warn};
 use super::{AppError, middleware};
 use crate::{
     context::GraphQLContext,
-    search::{SearchEngine, normalize_vector},
+    search::SearchEngine,
     thumbnail::get_or_generate_thumbnail,
 };
 
@@ -86,11 +86,10 @@ async fn search(
         .embedder
         .get_text_embedding(search.as_str())
         .context("Failed to generate text embedding")?;
-    let normalized_query = normalize_vector(&query_embedding);
 
     let search = SearchEngine::new(&context.db);
     let result = search
-        .search_with_thumbnails(&normalized_query, 80)
+        .search_with_thumbnails(&query_embedding, 80)
         .context("Failed to perform search")?;
 
     Ok(Json(result))

@@ -5,10 +5,7 @@ use ratatui_image::thread::{ResizeRequest, ThreadProtocol};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tracing::{debug, error};
 
-use crate::{
-    search::{SearchEngine, normalize_vector},
-    tui::app::App,
-};
+use crate::{search::SearchEngine, tui::app::App};
 
 /// Search result from background task
 #[derive(Clone)]
@@ -156,12 +153,10 @@ impl App {
                     .get_text_embedding(&query)
                     .context("Failed to generate text embedding")?;
 
-                let normalized_query = normalize_vector(&query_embedding);
-
-                // Search database
+                // Search database (SearchEngine normalizes the query internally)
                 let search_engine = SearchEngine::new(&db);
                 let all_results =
-                    search_engine.search_with_thumbnails_raw(&normalized_query, 99, 0)?;
+                    search_engine.search_with_thumbnails_raw(&query_embedding, 99, 0)?;
 
                 let result_count = all_results.len();
 
