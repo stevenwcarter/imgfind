@@ -28,7 +28,7 @@ pub fn get_db_path(dir: Option<&str>) -> Result<PathBuf> {
         }
     }
 
-    let mut current_dir = std::env::current_dir().unwrap();
+    let mut current_dir = std::env::current_dir().context("Failed to get current directory")?;
 
     loop {
         let potential_db = current_dir.join(".imgfind").join("imgfind.db");
