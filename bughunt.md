@@ -15,6 +15,9 @@ Audit date: 2026-05-29. Scope: full repo (Rust CLI/TUI/Axum server + React SPA).
 
 ## CORRECTNESS
 
+### C6 — Frontend `imagesByBounds` binds east/west swapped `[LOW — smell]`
+`site/src/page/MapView.tsx:17` — `east: $west, west: $east`. **Behaviorally harmless today** because the resolver normalizes with `min()/max()` (`src/database.rs:596-597`), but it's misleading and becomes a real bug if the resolver stops normalizing. Fix the binding to match the names.
+
 ### C7 — Frontend double-fetch on mount `[LOW]`
 `site/src/page/MapView.tsx` (~93-167) — direct `fetchGeotaggedImages()` call plus an effect that also fires it. Causes a redundant initial query.
 
@@ -33,10 +36,6 @@ Audit date: 2026-05-29. Scope: full repo (Rust CLI/TUI/Axum server + React SPA).
 
 ### D8 — Frontend lint debt `[LOW]`
 `site/src/page/Images.tsx:47` — `console.log('Images fetched', data)`. `Images.tsx:54` — `e: any` (use `React.MouseEvent`). `Images.tsx:23-24` — `zoomRef`/`thumbnailsRef` possibly unused.
-
----
-
-## OBSERVABILITY
 
 ---
 
