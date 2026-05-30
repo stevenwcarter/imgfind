@@ -11,6 +11,7 @@ use log::{debug, info, warn};
 use oshash::oshash;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 use walkdir::WalkDir;
 
 use imgfind::database::{Database, extract_image_metadata};
@@ -194,8 +195,10 @@ async fn main() -> Result<()> {
 }
 
 async fn serve(db: Database, directory: String, port: usize) -> Result<()> {
-    // Placeholder for future server implementation
-    let context = GraphQLContext::new(db, directory);
+    info!("Loading CLIP model...");
+    let embedder =
+        Arc::new(ClipEmbedder::new(None, None, false).context("Failed to create ClipEmbedder")?);
+    let context = GraphQLContext::new(db, directory, embedder);
     let app = app(context.clone());
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
         .await

@@ -15,9 +15,6 @@ Audit date: 2026-05-29. Scope: full repo (Rust CLI/TUI/Axum server + React SPA).
 
 ## PERFORMANCE / ARCHITECTURE
 
-### P1 — CLIP model reloaded on every web search request `[HIGH]`
-`src/api/search.rs:47` — `ClipEmbedder::new(None, None, false)` runs inside the `/search/{query}` handler, reloading the model from disk on every request. **Fix:** load once at startup, store in `GraphQLContext` (e.g. `Arc<ClipEmbedder>`), reuse. (CLI `main.rs:246,477` and the TUI search task `tui/app/search.rs:151` load per-invocation too, which is acceptable for one-shot/spawned use.)
-
 ### P3 — TUI clones decoded images per page update `[MED]`
 `src/tui/app/search.rs:104,110` — `image.clone()` on heavy `ImageEntry` values during paging. Consider `Rc`/`Arc` or index-based access.
 

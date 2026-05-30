@@ -6,7 +6,6 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
-use clipper::ClipEmbedder;
 use log::info;
 use tracing::{debug, error, warn};
 
@@ -82,10 +81,9 @@ async fn search(
     Extension(context): Extension<GraphQLContext>,
     Path(search): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let model = ClipEmbedder::new(None, None, false).context("Failed to create ClipEmbedder")?;
-
-    // Generate embedding for query
-    let query_embedding = model
+    // Generate embedding for query using the cached model.
+    let query_embedding = context
+        .embedder
         .get_text_embedding(search.as_str())
         .context("Failed to generate text embedding")?;
     let normalized_query = normalize_vector(&query_embedding);
