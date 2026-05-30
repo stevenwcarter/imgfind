@@ -38,9 +38,6 @@ Audit date: 2026-05-29. Scope: full repo (Rust CLI/TUI/Axum server + React SPA).
 
 ## OBSERVABILITY
 
-### O2 — `println!` mixed with tracing in metadata backfill `[LOW]`
-`src/metadata.rs:12,72` — inconsistent with the rest of the module's `info!`. (Acceptable as user-facing CLI progress, but worth a consistent choice.)
-
 ---
 
 ## RESOURCE / MISC
