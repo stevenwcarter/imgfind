@@ -26,6 +26,9 @@ pub fn calculate_new_focus_index(
     current_index: u8,
     direction: FocusDirection,
 ) -> u8 {
+    if images_len == 0 {
+        return 0;
+    }
     let mut current_index = current_index;
     match direction {
         Left => {
@@ -101,6 +104,13 @@ mod tests {
         assert_eq!(calculate_new_focus_index(7, 0, Up), 6);
         assert_eq!(calculate_new_focus_index(7, 1, Up), 6);
         assert_eq!(calculate_new_focus_index(7, 2, Up), 6);
+    }
+    #[test]
+    fn it_handles_empty_image_list_without_panicking() {
+        assert_eq!(calculate_new_focus_index(0, 0, Left), 0);
+        assert_eq!(calculate_new_focus_index(0, 0, Right), 0);
+        assert_eq!(calculate_new_focus_index(0, 0, Up), 0);
+        assert_eq!(calculate_new_focus_index(0, 0, Down), 0);
     }
     #[test]
     fn it_calculates_correct_down_indexes() {

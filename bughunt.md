@@ -42,9 +42,6 @@ std::fs::read(&full_path)
 ### C3 — `serve()` panics on bind/serve + stale comment `[LOW]`
 `src/main.rs:200-209` — `.unwrap()`/`.expect()` instead of `?`; line 197 comment says "Placeholder for future server implementation" though it's fully implemented. Propagate errors and delete the comment.
 
-### C4 — TUI focus underflow when no images `[MED]`
-`src/tui/app/focus.rs:32-33` — `images_len - 1` on unsigned/`u8` when `images_len == 0` wraps/panics. Guard the empty case. *(Confirm exact lines before fixing.)*
-
 ### C5 — TUI zoom path full of `.expect()` `[MED]`
 `src/tui/app/zoom.rs:34,73-75,94` — chained `expect()` on image lookup, file open, decode, and channel send. A missing/unreadable image panics the whole TUI. **Fix:** handle errors and surface a message instead of crashing.
 
