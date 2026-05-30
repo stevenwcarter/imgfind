@@ -22,9 +22,6 @@ Audit date: 2026-05-29. Scope: full repo (Rust CLI/TUI/Axum server + React SPA).
 
 ## DEAD CODE / QUALITY
 
-### D1 — `err_wrapper` is dead AND buggy `[LOW]`
-`src/api/mod.rs:32` — zero callers; also `result.map_err(...).unwrap()` would panic on `Err` rather than returning an error response. Delete.
-
 ### D2 — `graphql_translate` is dead `[LOW]`
 `src/graphql.rs:97` — zero callers. Delete.
 
