@@ -22,9 +22,6 @@ Audit date: 2026-05-29. Scope: full repo (Rust CLI/TUI/Axum server + React SPA).
 
 ## DEAD CODE / QUALITY
 
-### D2 — `graphql_translate` is dead `[LOW]`
-`src/graphql.rs:97` — zero callers. Delete.
-
 ### D3 — `Mutation` struct unused `[LOW]`
 `src/graphql.rs:85` — schema uses `EmptyMutation`. Delete.
 

@@ -1,6 +1,6 @@
 use base64::{Engine, engine::general_purpose};
-use juniper::{EmptyMutation, EmptySubscription, FieldError, FieldResult, GraphQLObject, RootNode};
-use tracing::{error, info};
+use juniper::{EmptyMutation, EmptySubscription, FieldResult, GraphQLObject, RootNode};
+use tracing::info;
 
 use crate::context::GraphQLContext;
 
@@ -91,14 +91,4 @@ pub fn create_schema() -> Schema {
         EmptyMutation::<GraphQLContext>::new(),
         EmptySubscription::<GraphQLContext>::new(),
     )
-}
-
-pub fn graphql_translate<T>(res: Result<T, anyhow::Error>) -> FieldResult<T> {
-    match res {
-        Ok(t) => Ok(t),
-        Err(e) => {
-            error!("graphql error: {:#?}", e);
-            Err(FieldError::from(e))
-        }
-    }
 }
