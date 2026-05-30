@@ -39,9 +39,6 @@ std::fs::read(&full_path)
 
 ## CORRECTNESS
 
-### C1 — `get_db_path(Some(dir))` panics instead of returning Err `[MED]`
-`src/lib.rs:27` — `panic!("No database found in this directory")`. Reachable from `serve`/`tui`/`metadata` with `--dir`. **Fix:** return `Err(anyhow!(...))` so the CLI prints a clean message.
-
 ### C3 — `serve()` panics on bind/serve + stale comment `[LOW]`
 `src/main.rs:200-209` — `.unwrap()`/`.expect()` instead of `?`; line 197 comment says "Placeholder for future server implementation" though it's fully implemented. Propagate errors and delete the comment.
 

@@ -24,7 +24,7 @@ pub fn get_db_path(dir: Option<&str>) -> Result<PathBuf> {
         if potential_db.exists() {
             return Ok(potential_db);
         } else {
-            panic!("No database found in this directory")
+            return Err(anyhow::anyhow!("No database found in directory: {dir}"));
         }
     }
 
