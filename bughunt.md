@@ -6,13 +6,6 @@ Audit date: 2026-05-29. Scope: full repo (Rust CLI/TUI/Axum server + React SPA).
 
 ---
 
-## SECURITY
-
-### S2 — Server binds `0.0.0.0` with no auth `[MED]`
-`src/main.rs:200` — `TcpListener::bind(format!("0.0.0.0:{port}"))`. Exposes the SPA, GraphQL, and the (vulnerable) file endpoint on all interfaces. Consider binding `127.0.0.1` by default with an opt-in flag for `0.0.0.0`.
-
----
-
 ## PERFORMANCE / ARCHITECTURE
 
 ### P3 — TUI clones decoded images per page update `[MED]`

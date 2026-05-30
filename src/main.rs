@@ -100,6 +100,9 @@ enum Commands {
     Serve {
         #[arg(short, long)]
         dir: Option<String>,
+        /// Address to bind. Use 0.0.0.0 to expose on all interfaces.
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
         #[arg(short, long, default_value_t = 6060)]
         port: usize,
     },
@@ -184,23 +187,23 @@ async fn main() -> Result<()> {
             let mut db = Database::new(&db_path)?;
             generate_thumbnails_batch(&mut db, size, count)?;
         }
-        Commands::Serve { dir, port } => {
+        Commands::Serve { dir, host, port } => {
             let db_path = get_db_path(dir.as_deref())?;
             let db = Database::new(&db_path)?;
-            serve(db, dir.unwrap_or(".".to_owned()), port).await?;
+            serve(db, dir.unwrap_or(".".to_owned()), host, port).await?;
         }
     }
 
     Ok(())
 }
 
-async fn serve(db: Database, directory: String, port: usize) -> Result<()> {
+async fn serve(db: Database, directory: String, host: String, port: usize) -> Result<()> {
     info!("Loading CLIP model...");
     let embedder =
         Arc::new(ClipEmbedder::new(None, None, false).context("Failed to create ClipEmbedder")?);
     let context = GraphQLContext::new(db, directory, embedder);
     let app = app(context.clone());
-    let addr = format!("0.0.0.0:{port}");
+    let addr = format!("{host}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .with_context(|| format!("Failed to bind to {addr}"))?;
