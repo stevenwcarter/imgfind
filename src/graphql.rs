@@ -81,8 +81,6 @@ impl Query {
     }
 }
 
-pub struct Mutation;
-
 pub type Schema = RootNode<Query, EmptyMutation<GraphQLContext>, EmptySubscription<GraphQLContext>>;
 
 pub fn create_schema() -> Schema {

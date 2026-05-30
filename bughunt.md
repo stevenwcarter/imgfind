@@ -22,9 +22,6 @@ Audit date: 2026-05-29. Scope: full repo (Rust CLI/TUI/Axum server + React SPA).
 
 ## DEAD CODE / QUALITY
 
-### D3 — `Mutation` struct unused `[LOW]`
-`src/graphql.rs:85` — schema uses `EmptyMutation`. Delete.
-
 ### D4 — `Query::search` GraphQL resolver is a stub `[LOW]`
 `src/graphql.rs:29` — returns hardcoded `"Search result 1/2/3"`. Either implement or remove.
 
