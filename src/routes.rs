@@ -69,7 +69,6 @@ pub fn app(context: GraphQLContext) -> Router {
             "/playground",
             get(playground("/graphql", "/graphql/subscriptions")),
         )
-        .route("/test", get(root))
         .layer(Extension(context.clone()))
         .layer(Extension(Arc::new(qm_schema)))
         .layer(middleware.clone());
@@ -83,10 +82,6 @@ pub fn app(context: GraphQLContext) -> Router {
         .fallback_service(get(index_handler))
         .layer(Extension(context.clone()))
         .layer(middleware)
-}
-
-async fn root() -> &'static str {
-    "Hello world!"
 }
 
 async fn custom_graphql(

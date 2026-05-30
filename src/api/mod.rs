@@ -1,5 +1,5 @@
 use axum::response::{IntoResponse, Response};
-use axum::{Router, http::StatusCode, routing::get};
+use axum::{Router, http::StatusCode};
 use tower::ServiceBuilder;
 use tower_http::compression::CompressionLayer;
 
@@ -18,13 +18,7 @@ pub fn middleware() -> tower::ServiceBuilder<
 }
 
 pub fn api_routes(context: GraphQLContext) -> Router {
-    Router::new()
-        .route("/test", get(get_test))
-        .nest("/search", search_routes(context.clone()))
-}
-
-pub async fn get_test() -> &'static str {
-    "hello world"
+    Router::new().nest("/search", search_routes(context.clone()))
 }
 
 // Make our own error that wraps `anyhow::Error`.

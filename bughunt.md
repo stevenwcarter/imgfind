@@ -31,9 +31,6 @@ Audit date: 2026-05-29. Scope: full repo (Rust CLI/TUI/Axum server + React SPA).
 ### D4 — `Query::search` GraphQL resolver is a stub `[LOW]`
 `src/graphql.rs:29` — returns hardcoded `"Search result 1/2/3"`. Either implement or remove.
 
-### D5 — Leftover scaffolding routes `[LOW]`
-`src/routes.rs:88` (`root` → "Hello world!", route `/graphql/test`) and `src/api/mod.rs:28` (`get_test` → "hello world", route `/api/v1/test`). Remove.
-
 ### D6 — Commented-out dead code `[LOW]`
 `src/database.rs:386` (`get_connection`), `database.rs:427-435` (path conversion in `get_image_hash`), `database.rs:239-240` (rel→abs in `search_similar_images`), `src/routes.rs:62` (subscriptions route), `tui/app/search.rs:171-173` (`.skip/.take` + no-op `.filter(|_| true)`), `tui/app/zoom.rs:78` (resize), `site/src/page/MapView.tsx:238-264` (Popup block). Remove.
 
