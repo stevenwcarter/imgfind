@@ -23,7 +23,8 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - Why: The vim-style bindings are documented only in CLAUDE.md, not discoverable in the app; new users must guess or read source. A `?` help overlay is the standard TUI affordance (less, vim).
 - Blocked by: —
 - Notes: Bindings are scattered in app.rs ~264-290; a help widget slots into the ui.rs render pipeline.
-- [ ] execute   [ ] skip
+- [x] execute   [ ] skip
+> in-flight (handed to /ship-it on 2026-05-31)
 
 ### W2. Confirmation/dry-run before the destructive `clean` command (CLI — src/main.rs:172)
 - Lens: ux
@@ -57,7 +58,8 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - What: Track a loading boolean and show a spinner / disabled input / "Searching…" message during the async fetch in `getImages()`.
 - Why: There is no feedback during CLIP embedding + DB query, so users can't tell whether a search is running or stalled — especially on first use.
 - Blocked by: —
-- [ ] execute   [ ] skip
+- [x] execute   [ ] skip
+> in-flight (handed to /ship-it on 2026-05-31)
 
 ### W6. Empty-state and no-results messaging in the web SPA (React SPA — site/src/page/Images.tsx:104)
 - Lens: ux
@@ -66,7 +68,8 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - Why: A blank page is currently ambiguous between "no search yet", "no matches", and "an error occurred". Clear states remove that confusion.
 - Blocked by: —
 - Notes: Fetch errors are currently swallowed to `console.error`; surface them visibly as part of this work.
-- [ ] execute   [ ] skip
+- [x] execute   [ ] skip
+> in-flight (handed to /ship-it on 2026-05-31)
 
 ### W7. Persist the search query in the URL for shareable links and back/forward (React SPA — site/src/page/Images.tsx:28)
 - Lens: ux
@@ -92,7 +95,8 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - Why: Users can't distinguish "hung" from "slow first load" and may kill the process. A message manages expectations.
 - Blocked by: —
 - Notes: `indicatif` is already used for indexing progress; reuse it.
-- [ ] execute   [ ] skip
+- [x] execute   [ ] skip
+> in-flight (handed to /ship-it on 2026-05-31)
 
 ### W10. Composite/covering indexes on metadata for map and filter queries (database — src/database.rs:138)
 - Lens: scale-perf
@@ -101,7 +105,8 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - Why: `get_images_by_bounds` filters a lat/lon range and orders by datetime; a covering index enables index-only scans (5-10× faster at 100K+ images) and makes the proposed metadata filters (W33) sublinear.
 - Blocked by: —
 - Notes: Additive, no migration needed. Impact grows with library size.
-- [ ] execute   [ ] skip
+- [x] execute   [ ] skip
+> in-flight (handed to /ship-it on 2026-05-31)
 
 ### W11. "No data" messaging on the map view (React SPA — site/src/page/MapView.tsx:196)
 - Lens: ux
@@ -125,7 +130,8 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - What: Add a status line in the zoomed view: "scroll to zoom | right-click to reset | ESC to close".
 - Why: Scroll-zoom direction, right-click reset, and ESC close are all undiscoverable today; users fumble navigating a zoomed image.
 - Blocked by: —
-- [ ] execute   [ ] skip
+- [x] execute   [ ] skip
+> in-flight (handed to /ship-it on 2026-05-31)
 
 ### W14. Show result count and active query in the web results header (React SPA — site/src/page/Images.tsx:85)
 - Lens: ux
@@ -142,7 +148,8 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - Why: The current loop runs one forward pass per image; CLIP is GPU-bound, so batching amortizes overhead ~10-50× — the difference between ~10 min and ~1 min for 10K images. This is the dominant indexing-throughput ceiling.
 - Blocked by: —
 - Notes: `ClipEmbedder::get_image_embeddings()` already exists in clipper (lib.rs:117). Enables W42 (parallel thumbnails) to run in the same pass.
-- [ ] execute   [ ] skip
+- [x] execute   [ ] skip
+> in-flight (handed to /ship-it on 2026-05-31)
 
 ## High
 
@@ -160,7 +167,8 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - What: Lead `status` output with `Database: <resolved path>` before the stats.
 - Why: Because the DB is resolved by walking up the tree (or falling back to `~/.imgfind`), users troubleshooting "why aren't my images here" need to confirm which DB is in use; today the path is buried.
 - Blocked by: —
-- [ ] execute   [ ] skip
+- [x] execute   [ ] skip
+> in-flight (handed to /ship-it on 2026-05-31)
 
 ### W18. Make search distance threshold and k clamping configurable (search — src/database.rs:216)
 - Lens: unblock-debt
@@ -168,7 +176,8 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - What: Extract the hardcoded distance threshold (1.3) and k clamp (1-100) from the SQL into a `SearchConfig` / query parameters.
 - Why: Different tasks want different sensitivity — strict for exact-duplicate hunting, loose for "similar concept". Unblocks user-tunable recall/precision and A/B quality testing.
 - Blocked by: —
-- [ ] execute   [ ] skip
+- [x] execute   [ ] skip
+> in-flight (handed to /ship-it on 2026-05-31)
 
 ### W19. `index --max-depth` / `--watch` modes (CLI — src/main.rs:146)
 - Lens: feature-gap
@@ -217,7 +226,8 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - Why: At 100K+ images the WAL can grow to hundreds of MB, and the default pool can bottleneck parallel indexing on 16+ core machines.
 - Blocked by: —
 - Notes: Worth a light load-test to pick the pool size.
-- [ ] execute   [ ] skip
+- [x] execute   [ ] skip
+> in-flight (handed to /ship-it on 2026-05-31)
 
 ### W25. Inline keybinding hints in TUI pagination (TUI — src/tui/ui.rs:19)
 - Lens: ux
@@ -225,7 +235,8 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - What: Change the pagination line to `Page X/Y (N results) [H prev | L next]`.
 - Why: H/L paging is undiscoverable; showing the keys where users already look teaches the binding in context.
 - Blocked by: —
-- [ ] execute   [ ] skip
+- [x] execute   [ ] skip
+> in-flight (handed to /ship-it on 2026-05-31)
 
 ### W26. Export current TUI results to a file (TUI — src/tui/app.rs)
 - Lens: feature-gap
@@ -241,7 +252,8 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - What: Replace the fixed flex-wrap grid with a masonry layout that accommodates varying aspect ratios.
 - Why: The current grid wastes space and creates awkward gaps with mixed aspect ratios; masonry is the standard photo-gallery layout.
 - Blocked by: —
-- [ ] execute   [ ] skip
+- [x] execute   [ ] skip
+> in-flight (handed to /ship-it on 2026-05-31)
 
 ### W28. Consistent API error shape and HTTP status codes (API — src/api/mod.rs:28)
 - Lens: ux
@@ -282,7 +294,8 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - What: Replace `EmptyMutation` with a real Mutation root (and write access through `GraphQLContext`'s `Arc<Mutex<Database>>`) to support `addTag`, `createCollection`, `toggleFavorite`, `updateMetadata`.
 - Why: The schema is read-only today, so no interactive web feature beyond browsing is possible. This is the prerequisite enabler for tagging (W55), albums (W54), favorites, and manual metadata correction.
 - Blocked by: —
-- [ ] execute   [ ] skip
+- [x] execute   [ ] skip
+> in-flight (handed to /ship-it on 2026-05-31)
 
 ### W33. Metadata-based search filters (date range, camera, GPS, dimensions) (Search Engine/GraphQL — src/graphql.rs)
 - Lens: feature-gap
