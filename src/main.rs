@@ -70,7 +70,7 @@ enum Commands {
         #[arg(short, long, default_value_t = 10)]
         limit: usize,
         /// Max cosine distance to include (lower = stricter). Overrides config [search].distance_threshold.
-        #[arg(long)]
+        #[arg(long, value_parser = parse_threshold)]
         threshold: Option<f32>,
         /// Output only image paths, one per line (useful for piping to other tools)
         #[arg(short, long)]
@@ -240,6 +240,21 @@ async fn serve(db: Database, directory: String, host: String, port: usize) -> Re
     server.await.context("Server error")?;
 
     Ok(())
+}
+
+/// Parse a `--threshold` value, rejecting non-finite or negative numbers.
+///
+/// The value is interpolated into SQL as `distance <= {:.6}`, so `nan`/`inf`/
+/// negative inputs would render invalid or nonsensical SQL. Reject them up front
+/// with a clear message instead of failing opaquely at query time.
+fn parse_threshold(s: &str) -> Result<f32, String> {
+    let v: f32 = s
+        .parse()
+        .map_err(|_| format!("invalid number: {s}"))?;
+    if !v.is_finite() || v < 0.0 {
+        return Err("threshold must be a finite, non-negative number".to_string());
+    }
+    Ok(v)
 }
 
 fn metadata(db: &mut Database, quiet: bool, count: usize) -> Result<()> {
@@ -812,4 +827,24 @@ fn generate_thumbnails_batch(db: &mut Database, size: u32, count: usize) -> Resu
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_threshold;
+
+    #[test]
+    fn parse_threshold_accepts_valid_values() {
+        assert_eq!(parse_threshold("1.3").unwrap(), 1.3);
+        assert_eq!(parse_threshold("0.0").unwrap(), 0.0);
+    }
+
+    #[test]
+    fn parse_threshold_rejects_invalid_values() {
+        assert!(parse_threshold("-1.0").is_err());
+        assert!(parse_threshold("inf").is_err());
+        assert!(parse_threshold("-inf").is_err());
+        assert!(parse_threshold("nan").is_err());
+        assert!(parse_threshold("abc").is_err());
+    }
 }
