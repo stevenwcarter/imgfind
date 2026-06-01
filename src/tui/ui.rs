@@ -10,9 +10,9 @@ use tracing::error;
 
 use super::app::App;
 use crate::tui::{
-    app::InputMode,
+    app::{InputMode, keybindings_help},
     event::AppEvent,
-    widget::{nine_block, render_image},
+    widget::{center, nine_block, render_image},
 };
 
 impl App {
@@ -34,6 +34,27 @@ impl App {
             .alignment(Alignment::Center);
         pagination.render(area, buf);
     }
+    fn render_help_overlay(&self, area: Rect, buf: &mut Buffer) {
+        let lines = keybindings_help();
+        // Size the box to fit the content, with a little padding for borders.
+        let inner_width = lines.iter().map(|l| l.len()).max().unwrap_or(0) as u16;
+        let width = (inner_width + 4).min(area.width);
+        let height = (lines.len() as u16 + 2).min(area.height);
+        let popup = center(
+            area,
+            Constraint::Length(width),
+            Constraint::Length(height),
+        );
+        Clear.render(popup, buf);
+        let help = Paragraph::new(lines.join("\n")).block(
+            Block::bordered()
+                .border_type(BorderType::Rounded)
+                .title("Keybindings (? to close)")
+                .title_alignment(Alignment::Center),
+        );
+        help.render(popup, buf);
+    }
+
     fn render_input(&self, area: Rect, buf: &mut Buffer) {
         // keep 2 for borders and 1 for cursor
         let width = area.width.max(3) - 3;
@@ -130,5 +151,9 @@ impl Widget for &mut App {
         self.render_pagination(layout[1], buf);
 
         self.render_input(layout[2], buf);
+
+        if self.show_help {
+            self.render_help_overlay(area, buf);
+        }
     }
 }

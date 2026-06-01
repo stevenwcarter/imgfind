@@ -32,6 +32,22 @@ pub use focus::FocusDirection;
 pub use search::SearchResult;
 use zoom::focal_for_zoom_at_cursor;
 
+/// Single source of truth for the help overlay. One entry per binding.
+pub fn keybindings_help() -> Vec<String> {
+    vec![
+        "e          edit search".into(),
+        "h/j/k/l    move focus".into(),
+        "H/L        previous / next page".into(),
+        "1-9        zoom that image".into(),
+        "Enter      zoom focused image".into(),
+        "Esc        close zoom / help".into(),
+        "scroll     zoom in/out (in zoom view)".into(),
+        "right-click reset zoom".into(),
+        "?          toggle this help".into(),
+        "q / Ctrl-C quit".into(),
+    ]
+}
+
 /// Application.
 pub struct App {
     /// Handle to the database for performing queries
@@ -78,6 +94,8 @@ pub struct App {
     /// Loading state
     pub is_searching: bool,
     pub mouse_click: Option<MouseEvent>,
+    /// Whether the keybindings help overlay is shown
+    pub show_help: bool,
 }
 
 impl App {
@@ -111,6 +129,7 @@ impl App {
             current_search_task: None,
             is_searching: false,
             mouse_click: None,
+            show_help: false,
         })
     }
 
@@ -260,8 +279,23 @@ impl App {
     pub fn handle_key_events(&mut self, key_event: KeyEvent) {
         use FocusDirection::*;
 
+        // While the help overlay is open it is modal: only quit, Esc, and '?'
+        // are honored; everything else is swallowed so navigation is blocked.
+        if self.show_help && self.input_mode == InputMode::Normal {
+            match key_event.code {
+                KeyCode::Char('c' | 'C') if key_event.modifiers == KeyModifiers::CONTROL => {
+                    self.events.send(AppEvent::Quit)
+                }
+                KeyCode::Char('q') => self.events.send(AppEvent::Quit),
+                KeyCode::Esc | KeyCode::Char('?') => self.show_help = false,
+                _ => {}
+            }
+            return;
+        }
+
         match self.input_mode {
             InputMode::Normal => match key_event.code {
+                KeyCode::Char('?') => self.show_help = !self.show_help,
                 KeyCode::Char('e') => {
                     self.input_mode = InputMode::Editing;
                 }
@@ -318,5 +352,20 @@ impl App {
     /// Set running to false to quit the application.
     pub fn quit(&mut self) {
         self.running = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keybindings_help_lists_core_keys() {
+        let lines = keybindings_help();
+        assert!(!lines.is_empty());
+        let joined = lines.join(" ");
+        for key in ["e", "h/j/k/l", "H/L", "1-9", "Enter", "Esc", "?", "q"] {
+            assert!(joined.contains(key), "help should mention {key}");
+        }
     }
 }
