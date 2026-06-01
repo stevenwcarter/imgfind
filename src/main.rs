@@ -291,11 +291,17 @@ fn index_directory(
         return Err(anyhow::anyhow!("Path is not a directory: {}", dir));
     }
 
-    if !quiet {
-        println!("Loading CLIP model...");
-    }
     info!("Loading CLIP model...");
+    let spinner = if quiet {
+        ProgressBar::hidden()
+    } else {
+        let pb = ProgressBar::new_spinner();
+        pb.set_message("Loading CLIP model… (this may take a minute on first use)");
+        pb.enable_steady_tick(std::time::Duration::from_millis(120));
+        pb
+    };
     let model = ClipEmbedder::new(None, None, false).context("Failed to create ClipEmbedder")?;
+    spinner.finish_and_clear();
     info!("CLIP model loaded successfully");
 
     let image_extensions: HashSet<&str> = ["jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp"]
@@ -591,7 +597,11 @@ fn search_images(
     }
 
     info!("Loading CLIP model...");
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_message("Loading CLIP model… (this may take a minute on first use)");
+    spinner.enable_steady_tick(std::time::Duration::from_millis(120));
     let model = ClipEmbedder::new(None, None, false).context("Failed to create ClipEmbedder")?;
+    spinner.finish_and_clear();
 
     // Generate embedding for query
     info!("Generating embedding for query...");
@@ -723,9 +733,9 @@ fn clean_database(db: &mut Database) -> Result<()> {
 }
 
 fn show_status(db: &Database, db_path: &PathBuf) -> Result<()> {
+    println!("Database: {}", db_path.display());
     println!("imgfind Database Status");
     println!("======================");
-    println!("Database location: {}", db_path.display());
 
     let total_images = db.get_image_count()?;
     println!("Total indexed images: {}", total_images);
