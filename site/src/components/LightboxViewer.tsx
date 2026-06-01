@@ -12,8 +12,7 @@ export const LightboxViewer = (props: LightboxViewerProps) => {
   const { image, handleClick } = props;
 
   const classes = clsx(
-    'max-w-[300px] max-h-[300px]',
-    'object-scale-down',
+    'w-full h-auto',
     'cursor-pointer',
     'hover:opacity-80',
     'transition-all ease-in-out duration-100',

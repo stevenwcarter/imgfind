@@ -144,9 +144,11 @@ export const Images = () => {
       )}
 
       {viewState === 'results' && (
-        <div className="flex flex-wrap gap-4 p-4">
+        <div className="columns-2 gap-4 p-4 sm:columns-3 lg:columns-4">
           {images.map((image) => (
-            <LightboxViewer key={image[0]} image={image} handleClick={handleClick} />
+            <div key={image[0]} className="mb-4 break-inside-avoid">
+              <LightboxViewer image={image} handleClick={handleClick} />
+            </div>
           ))}
         </div>
       )}
