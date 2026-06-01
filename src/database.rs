@@ -5,7 +5,7 @@ use hashbrown::HashMap;
 use image::GenericImageView;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{ffi::sqlite3_auto_extension, params};
+use rusqlite::{OptionalExtension, ffi::sqlite3_auto_extension, params};
 use sqlite_vec::sqlite3_vec_init;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -173,6 +173,16 @@ impl Database {
             [],
         )?;
 
+        // Create favorites table for marking favorite images
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS favorites (
+                image_id INTEGER PRIMARY KEY,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(image_id) REFERENCES images(id) ON DELETE CASCADE
+            )",
+            [],
+        )?;
+
         Ok(())
     }
 
@@ -220,6 +230,69 @@ impl Database {
             tx.commit()?;
         }
         Ok(())
+    }
+
+    /// Toggle the favorite flag for the image at `relative_path`, returning the
+    /// new state (`true` = now favorited, `false` = now un-favorited).
+    pub fn toggle_favorite(&self, relative_path: &str) -> Result<bool> {
+        let conn = self.pool.get().context("get connection")?;
+        let image_id: i64 = conn
+            .query_row(
+                "SELECT id FROM images WHERE path = ?1",
+                [relative_path],
+                |r| r.get(0),
+            )
+            .with_context(|| format!("no indexed image at {relative_path}"))?;
+        let exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM favorites WHERE image_id = ?1",
+                [image_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if exists {
+            conn.execute("DELETE FROM favorites WHERE image_id = ?1", [image_id])?;
+            Ok(false)
+        } else {
+            conn.execute("INSERT INTO favorites (image_id) VALUES (?1)", [image_id])?;
+            Ok(true)
+        }
+    }
+
+    /// Return whether the image at `relative_path` is favorited. Unknown paths
+    /// are not favorites.
+    pub fn is_favorite(&self, relative_path: &str) -> Result<bool> {
+        let conn = self.pool.get().context("get connection")?;
+        let id: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM images WHERE path = ?1",
+                [relative_path],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(image_id) = id else {
+            return Ok(false);
+        };
+        Ok(conn
+            .query_row(
+                "SELECT 1 FROM favorites WHERE image_id = ?1",
+                [image_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// List the relative paths of all favorited images, most recently favorited
+    /// first.
+    pub fn list_favorites(&self) -> Result<Vec<String>> {
+        let conn = self.pool.get().context("get connection")?;
+        let mut stmt = conn.prepare(
+            "SELECT i.path FROM favorites f JOIN images i ON i.id = f.image_id ORDER BY f.created_at DESC",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
     /// Insert many (relative_path, hash, normalized_embedding) rows in one transaction.
@@ -1012,6 +1085,32 @@ mod tests {
             )
             .expect("count metadata");
         assert_eq!(meta_count, 0, "metadata should cascade-delete with its image");
+
+        // Remove the unique temp dir (grandparent of the .imgfind/imgfind.db path).
+        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn toggle_favorite_flips_state() {
+        let db_path = temp_db_path();
+        let db = Database::new(&db_path).expect("create db");
+
+        // Insert an image directly so the stored path is a known relative value.
+        let conn = db.pool.get().expect("get conn");
+        conn.execute(
+            "INSERT INTO images (id, path, hash) VALUES (1, 'a.jpg', 'h')",
+            [],
+        )
+        .expect("insert image");
+        drop(conn);
+
+        let p = "a.jpg";
+        assert_eq!(db.is_favorite(p).unwrap(), false);
+        assert_eq!(db.toggle_favorite(p).unwrap(), true);
+        assert_eq!(db.is_favorite(p).unwrap(), true);
+        assert_eq!(db.list_favorites().unwrap(), vec![p.to_string()]);
+        assert_eq!(db.toggle_favorite(p).unwrap(), false);
+        assert_eq!(db.is_favorite(p).unwrap(), false);
 
         // Remove the unique temp dir (grandparent of the .imgfind/imgfind.db path).
         let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
