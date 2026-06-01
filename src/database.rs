@@ -140,6 +140,24 @@ impl Database {
             [],
         )?;
 
+        // Composite index covering geo + time for map queries ordered by capture time
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_metadata_geo_time ON image_metadata(latitude, longitude, datetime_taken)",
+            [],
+        )?;
+
+        // Composite index for camera-model filters ordered by capture time
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_metadata_camera_time ON image_metadata(camera_model, datetime_taken)",
+            [],
+        )?;
+
+        // Partial index over capture time, skipping rows without a datetime
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_metadata_datetime ON image_metadata(datetime_taken) WHERE datetime_taken IS NOT NULL",
+            [],
+        )?;
+
         Ok(())
     }
 
