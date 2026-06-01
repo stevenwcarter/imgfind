@@ -16,16 +16,6 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 
 ## Critical
 
-### W1. TUI help overlay showing keybindings (TUI — src/tui/app.rs:264)
-- Lens: ux
-- Score: 5.00 (value 5 / effort S)
-- What: Add a help modal toggled with `?` that lists all keybindings (e=edit, h/j/k/l=move, H/L=page, 1-9/Enter=zoom, q=quit, scroll/right-click=zoom).
-- Why: The vim-style bindings are documented only in CLAUDE.md, not discoverable in the app; new users must guess or read source. A `?` help overlay is the standard TUI affordance (less, vim).
-- Blocked by: —
-- Notes: Bindings are scattered in app.rs ~264-290; a help widget slots into the ui.rs render pipeline.
-- [x] execute   [ ] skip
-> in-flight (handed to /ship-it on 2026-05-31)
-
 ### W2. Confirmation/dry-run before the destructive `clean` command (CLI — src/main.rs:172)
 - Lens: ux
 - Score: 4.00 (value 4 / effort S)
@@ -52,25 +42,6 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - Notes: `search_with_thumbnails_raw()` already supports limit+offset; merged with the unblock-debt finding on the same route (lower effort S kept). Pairs well with W41 (lazy thumbnail loading).
 - [ ] execute   [ ] skip
 
-### W5. Loading indicator on the web search input (React SPA — site/src/page/Images.tsx:40)
-- Lens: ux
-- Score: 4.00 (value 4 / effort S)
-- What: Track a loading boolean and show a spinner / disabled input / "Searching…" message during the async fetch in `getImages()`.
-- Why: There is no feedback during CLIP embedding + DB query, so users can't tell whether a search is running or stalled — especially on first use.
-- Blocked by: —
-- [x] execute   [ ] skip
-> in-flight (handed to /ship-it on 2026-05-31)
-
-### W6. Empty-state and no-results messaging in the web SPA (React SPA — site/src/page/Images.tsx:104)
-- Lens: ux
-- Score: 4.00 (value 4 / effort S)
-- What: Add a dedicated "enter a query to search" empty state and a distinct "No images found for X" zero-results state.
-- Why: A blank page is currently ambiguous between "no search yet", "no matches", and "an error occurred". Clear states remove that confusion.
-- Blocked by: —
-- Notes: Fetch errors are currently swallowed to `console.error`; surface them visibly as part of this work.
-- [x] execute   [ ] skip
-> in-flight (handed to /ship-it on 2026-05-31)
-
 ### W7. Persist the search query in the URL for shareable links and back/forward (React SPA — site/src/page/Images.tsx:28)
 - Lens: ux
 - Score: 4.00 (value 4 / effort S)
@@ -88,26 +59,6 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - Blocked by: —
 - [ ] execute   [ ] skip
 
-### W9. Model-load progress feedback for slow first-run operations (CLI — src/main.rs:226)
-- Lens: ux
-- Score: 3.00 (value 3 / effort S)
-- What: When the CLIP model loads (seconds-to-minutes on first run) show "Loading CLIP model… (this may take a minute on first use)"; reuse the same for embedding generation during search.
-- Why: Users can't distinguish "hung" from "slow first load" and may kill the process. A message manages expectations.
-- Blocked by: —
-- Notes: `indicatif` is already used for indexing progress; reuse it.
-- [x] execute   [ ] skip
-> in-flight (handed to /ship-it on 2026-05-31)
-
-### W10. Composite/covering indexes on metadata for map and filter queries (database — src/database.rs:138)
-- Lens: scale-perf
-- Score: 3.00 (value 3 / effort S)
-- What: Add composite indexes `(latitude, longitude, datetime_taken)` for map-bounds queries and `(camera_model, datetime_taken)`; consider a partial index on `datetime_taken WHERE datetime_taken IS NOT NULL`.
-- Why: `get_images_by_bounds` filters a lat/lon range and orders by datetime; a covering index enables index-only scans (5-10× faster at 100K+ images) and makes the proposed metadata filters (W33) sublinear.
-- Blocked by: —
-- Notes: Additive, no migration needed. Impact grows with library size.
-- [x] execute   [ ] skip
-> in-flight (handed to /ship-it on 2026-05-31)
-
 ### W11. "No data" messaging on the map view (React SPA — site/src/page/MapView.tsx:196)
 - Lens: ux
 - Score: 3.00 (value 3 / effort S)
@@ -124,15 +75,6 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - Blocked by: —
 - [ ] execute   [ ] skip
 
-### W13. Direction/control cues in the TUI zoom view (TUI — src/tui/app.rs:232)
-- Lens: ux
-- Score: 3.00 (value 3 / effort S)
-- What: Add a status line in the zoomed view: "scroll to zoom | right-click to reset | ESC to close".
-- Why: Scroll-zoom direction, right-click reset, and ESC close are all undiscoverable today; users fumble navigating a zoomed image.
-- Blocked by: —
-- [x] execute   [ ] skip
-> in-flight (handed to /ship-it on 2026-05-31)
-
 ### W14. Show result count and active query in the web results header (React SPA — site/src/page/Images.tsx:85)
 - Lens: ux
 - Score: 3.00 (value 3 / effort S)
@@ -140,16 +82,6 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - Why: After typing, the query scrolls out of view and users can't tell how many results came back or how confident the matches are.
 - Blocked by: —
 - [ ] execute   [ ] skip
-
-### W15. Batch embedding generation during indexing to leverage the GPU (indexing — src/main.rs:343)
-- Lens: scale-perf
-- Score: 2.50 (value 5 / effort M)
-- What: Replace the per-image embedding loop with batched inference via `ClipEmbedder::get_image_embeddings()` (32-64 images per forward pass), then insert results in a transaction.
-- Why: The current loop runs one forward pass per image; CLIP is GPU-bound, so batching amortizes overhead ~10-50× — the difference between ~10 min and ~1 min for 10K images. This is the dominant indexing-throughput ceiling.
-- Blocked by: —
-- Notes: `ClipEmbedder::get_image_embeddings()` already exists in clipper (lib.rs:117). Enables W42 (parallel thumbnails) to run in the same pass.
-- [x] execute   [ ] skip
-> in-flight (handed to /ship-it on 2026-05-31)
 
 ## High
 
@@ -160,24 +92,6 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - Why: Auditing EXIF coverage or extracting by date/camera currently requires manual redirection; a flag makes the intent explicit and scriptable.
 - Blocked by: —
 - [ ] execute   [ ] skip
-
-### W17. Surface the resolved database path in `status` output (CLI — src/main.rs:615)
-- Lens: ux
-- Score: 2.00 (value 2 / effort S)
-- What: Lead `status` output with `Database: <resolved path>` before the stats.
-- Why: Because the DB is resolved by walking up the tree (or falling back to `~/.imgfind`), users troubleshooting "why aren't my images here" need to confirm which DB is in use; today the path is buried.
-- Blocked by: —
-- [x] execute   [ ] skip
-> in-flight (handed to /ship-it on 2026-05-31)
-
-### W18. Make search distance threshold and k clamping configurable (search — src/database.rs:216)
-- Lens: unblock-debt
-- Score: 2.00 (value 2 / effort S)
-- What: Extract the hardcoded distance threshold (1.3) and k clamp (1-100) from the SQL into a `SearchConfig` / query parameters.
-- Why: Different tasks want different sensitivity — strict for exact-duplicate hunting, loose for "similar concept". Unblocks user-tunable recall/precision and A/B quality testing.
-- Blocked by: —
-- [x] execute   [ ] skip
-> in-flight (handed to /ship-it on 2026-05-31)
 
 ### W19. `index --max-depth` / `--watch` modes (CLI — src/main.rs:146)
 - Lens: feature-gap
@@ -219,25 +133,6 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - Blocked by: —
 - [ ] execute   [ ] skip
 
-### W24. Tune r2d2 pool size and checkpoint WAL at indexing completion (database — src/database.rs:49)
-- Lens: scale-perf
-- Score: 2.00 (value 2 / effort S)
-- What: Size the r2d2 pool to ~`min(num_cpus, 32)` and issue a `wal_checkpoint(RESTART)` when indexing finishes to reclaim log space.
-- Why: At 100K+ images the WAL can grow to hundreds of MB, and the default pool can bottleneck parallel indexing on 16+ core machines.
-- Blocked by: —
-- Notes: Worth a light load-test to pick the pool size.
-- [x] execute   [ ] skip
-> in-flight (handed to /ship-it on 2026-05-31)
-
-### W25. Inline keybinding hints in TUI pagination (TUI — src/tui/ui.rs:19)
-- Lens: ux
-- Score: 2.00 (value 2 / effort S)
-- What: Change the pagination line to `Page X/Y (N results) [H prev | L next]`.
-- Why: H/L paging is undiscoverable; showing the keys where users already look teaches the binding in context.
-- Blocked by: —
-- [x] execute   [ ] skip
-> in-flight (handed to /ship-it on 2026-05-31)
-
 ### W26. Export current TUI results to a file (TUI — src/tui/app.rs)
 - Lens: feature-gap
 - Score: 2.00 (value 2 / effort S)
@@ -245,15 +140,6 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - Why: TUI users can't pipe results the way the CLI's `--short` allows; an in-app export closes that gap.
 - Blocked by: —
 - [ ] execute   [ ] skip
-
-### W27. Masonry/waterfall layout for the web image grid (React SPA — site/src/page/Images.tsx:104)
-- Lens: feature-gap
-- Score: 2.00 (value 2 / effort S)
-- What: Replace the fixed flex-wrap grid with a masonry layout that accommodates varying aspect ratios.
-- Why: The current grid wastes space and creates awkward gaps with mixed aspect ratios; masonry is the standard photo-gallery layout.
-- Blocked by: —
-- [x] execute   [ ] skip
-> in-flight (handed to /ship-it on 2026-05-31)
 
 ### W28. Consistent API error shape and HTTP status codes (API — src/api/mod.rs:28)
 - Lens: ux
@@ -287,15 +173,6 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - Why: De-duplication is a top use case for large libraries; the embeddings are already computed, so this is threshold clustering over existing vector search.
 - Blocked by: —
 - [ ] execute   [ ] skip
-
-### W32. Real GraphQL Mutation root for user-facing writes (graphql — src/graphql.rs:84)
-- Lens: unblock-debt
-- Score: 2.00 (value 4 / effort M)
-- What: Replace `EmptyMutation` with a real Mutation root (and write access through `GraphQLContext`'s `Arc<Mutex<Database>>`) to support `addTag`, `createCollection`, `toggleFavorite`, `updateMetadata`.
-- Why: The schema is read-only today, so no interactive web feature beyond browsing is possible. This is the prerequisite enabler for tagging (W55), albums (W54), favorites, and manual metadata correction.
-- Blocked by: —
-- [x] execute   [ ] skip
-> in-flight (handed to /ship-it on 2026-05-31)
 
 ### W33. Metadata-based search filters (date range, camera, GPS, dimensions) (Search Engine/GraphQL — src/graphql.rs)
 - Lens: feature-gap
