@@ -1,5 +1,5 @@
 use base64::{Engine, engine::general_purpose};
-use juniper::{EmptyMutation, EmptySubscription, FieldResult, GraphQLObject, RootNode};
+use juniper::{EmptySubscription, FieldResult, GraphQLObject, RootNode};
 use tracing::info;
 
 use crate::context::GraphQLContext;
@@ -32,6 +32,16 @@ impl Query {
             "Search result 2".to_string(),
             "Search result 3".to_string(),
         ])
+    }
+
+    #[graphql(name = "favorites")]
+    pub fn favorites(context: &GraphQLContext) -> FieldResult<Vec<String>> {
+        Ok(context.db.list_favorites()?)
+    }
+
+    #[graphql(name = "isFavorite")]
+    pub fn is_favorite(context: &GraphQLContext, path: String) -> FieldResult<bool> {
+        Ok(context.db.is_favorite(&path)?)
     }
 
     #[graphql(name = "imagesByBounds")]
@@ -81,12 +91,22 @@ impl Query {
     }
 }
 
-pub type Schema = RootNode<Query, EmptyMutation<GraphQLContext>, EmptySubscription<GraphQLContext>>;
+pub struct Mutation;
+
+#[juniper::graphql_object(Context = GraphQLContext)]
+impl Mutation {
+    #[graphql(name = "toggleFavorite")]
+    pub fn toggle_favorite(context: &GraphQLContext, path: String) -> FieldResult<bool> {
+        Ok(context.db.toggle_favorite(&path)?)
+    }
+}
+
+pub type Schema = RootNode<Query, Mutation, EmptySubscription<GraphQLContext>>;
 
 pub fn create_schema() -> Schema {
     Schema::new(
         Query,
-        EmptyMutation::<GraphQLContext>::new(),
+        Mutation,
         EmptySubscription::<GraphQLContext>::new(),
     )
 }
