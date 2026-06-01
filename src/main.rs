@@ -454,6 +454,10 @@ fn index_directory(db: &mut Database, dir: &str, recursive: bool, quiet: bool) -
     info!("  Skipped: {}", skipped_count);
     info!("  Errors: {}", error_count);
 
+    if let Err(e) = db.checkpoint_wal() {
+        warn!("WAL checkpoint failed (non-fatal): {e:#}");
+    }
+
     Ok(())
 }
 

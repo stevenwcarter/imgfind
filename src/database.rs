@@ -44,15 +44,30 @@ impl Database {
         // per-connection, so setting this once on a single connection would leave
         // FK enforcement (and the ON DELETE CASCADE on image_metadata) off for the
         // rest of the pool.
-        let manager = SqliteConnectionManager::file(db_path)
-            .with_init(|conn| conn.execute_batch("PRAGMA foreign_keys = ON;"));
-        let pool = r2d2::Pool::new(manager)
+        let manager = SqliteConnectionManager::file(db_path).with_init(|conn| {
+            conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")
+        });
+        let max_size = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(8)
+            .min(32) as u32;
+        let pool = r2d2::Pool::builder()
+            .max_size(max_size)
+            .build(manager)
             .with_context(|| format!("Failed to open database at {:?}", db_path))?;
 
         let parent_dir = get_db_parent_dir(db_path)?;
         let mut db = Database { pool, parent_dir };
         db.initialize_schema()?;
         Ok(db)
+    }
+
+    /// Truncate the WAL back into the main DB file. Call after a large write batch (e.g. indexing).
+    pub fn checkpoint_wal(&self) -> Result<()> {
+        let conn = self.pool.get().context("get connection for WAL checkpoint")?;
+        conn.pragma_update(None, "wal_checkpoint", "RESTART")
+            .context("wal_checkpoint(RESTART)")?;
+        Ok(())
     }
 
     fn initialize_schema(&mut self) -> Result<()> {
