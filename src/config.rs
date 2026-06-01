@@ -26,6 +26,33 @@ impl Default for IndexConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchConfig {
+    /// Maximum cosine distance to include in results (lower = stricter)
+    #[serde(default = "default_distance_threshold")]
+    pub distance_threshold: f32,
+    /// Upper bound on the vec0 `k` value (result-set ceiling)
+    #[serde(default = "default_max_k")]
+    pub max_k: usize,
+}
+
+fn default_distance_threshold() -> f32 {
+    1.3
+}
+
+fn default_max_k() -> usize {
+    100
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        SearchConfig {
+            distance_threshold: default_distance_threshold(),
+            max_k: default_max_k(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Directory patterns to ignore during indexing
     #[serde(default)]
@@ -33,6 +60,9 @@ pub struct Config {
     /// Indexing tuning options
     #[serde(default)]
     pub index: IndexConfig,
+    /// Search tuning options
+    #[serde(default)]
+    pub search: SearchConfig,
     /// Cached compiled regexes (not serialized)
     #[serde(skip)]
     compiled_regexes: OnceCell<Vec<Option<Regex>>>,
@@ -42,6 +72,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             index: IndexConfig::default(),
+            search: SearchConfig::default(),
             ignore_patterns: vec![
                 // Default patterns to ignore
                 "node_modules".to_string(),
@@ -172,6 +203,7 @@ mod tests {
                 ".git".to_string(),
             ],
             index: IndexConfig::default(),
+            search: SearchConfig::default(),
             compiled_regexes: OnceCell::new(),
         };
 
@@ -196,6 +228,7 @@ mod tests {
                 r".*generated.*".to_string(),
             ],
             index: IndexConfig::default(),
+            search: SearchConfig::default(),
             compiled_regexes: OnceCell::new(),
         };
 
@@ -214,5 +247,30 @@ mod tests {
     fn test_empty_toml_defaults_batch_size() {
         let config: Config = toml::from_str("").unwrap();
         assert_eq!(config.index.batch_size, 32);
+    }
+
+    #[test]
+    fn search_config_has_sane_defaults() {
+        let sc = SearchConfig::default();
+        assert_eq!(sc.distance_threshold, 1.3);
+        assert_eq!(sc.max_k, 100);
+    }
+
+    #[test]
+    fn config_defaults_include_search_section() {
+        let cfg: Config = toml::from_str("").expect("empty toml parses");
+        assert_eq!(cfg.search.distance_threshold, 1.3);
+        assert_eq!(cfg.search.max_k, 100);
+    }
+
+    #[test]
+    fn config_roundtrips_search_section() {
+        let mut cfg = Config::default();
+        cfg.search.distance_threshold = 1.1;
+        cfg.search.max_k = 50;
+        let s = toml::to_string(&cfg).unwrap();
+        let back: Config = toml::from_str(&s).unwrap();
+        assert_eq!(back.search.distance_threshold, 1.1);
+        assert_eq!(back.search.max_k, 50);
     }
 }
