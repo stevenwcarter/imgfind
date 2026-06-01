@@ -40,7 +40,8 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - Why: Web/API clients can't control result volume or implement "load more"; the SPA always pulls all 80 results, wasting bandwidth and slowing first paint.
 - Blocked by: —
 - Notes: `search_with_thumbnails_raw()` already supports limit+offset; merged with the unblock-debt finding on the same route (lower effort S kept). Pairs well with W41 (lazy thumbnail loading).
-- [ ] execute   [ ] skip
+- [x] execute   [ ] skip
+> in-flight (handed to /ship-it on 2026-06-01)
 
 ### W7. Persist the search query in the URL for shareable links and back/forward (React SPA — site/src/page/Images.tsx:28)
 - Lens: ux
@@ -252,7 +253,8 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - Why: Encoding/decoding 80 thumbnails per search is CPU-bound and base64 doubles payload size; deferring gives first results in ~50 ms — a large perceived-latency win.
 - Blocked by: —
 - Notes: DB query already supports OFFSET; pairs with W4 (pagination).
-- [ ] execute   [ ] skip
+- [x] execute   [ ] skip
+> in-flight (handed to /ship-it on 2026-06-01)
 
 ### W42. Parallel thumbnail generation during indexing (thumbnails — src/main.rs:343)
 - Lens: scale-perf
@@ -260,7 +262,8 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - What: Generate thumbnails in a rayon pool as part of the indexing run (currently a separate `thumbnails` command), reusing the par_iter + channel-writer pattern already in thumbnail.rs.
 - Why: Thumbnail resize is CPU-bound and currently sequential; parallelizing gains 4-8× on multi-core machines and folds thumbnailing into one indexing pass.
 - Blocked by: —
-- [ ] execute   [ ] skip
+- [x] execute   [ ] skip
+> in-flight (handed to /ship-it on 2026-06-01)
 
 ### W43. Versioned schema-migration system (database — src/database.rs:58)
 - Lens: unblock-debt
@@ -269,7 +272,8 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - Why: Upcoming features (W36 user tables, W52 model_id column) need coordinated, safe schema evolution; without migrations, upgrades risk old code hitting new schema or vice versa.
 - Blocked by: —
 - Notes: A light hand-rolled runner is simpler than full diesel integration; the diesel deps are currently dead code.
-- [ ] execute   [ ] skip
+- [x] execute   [ ] skip
+> in-flight (handed to /ship-it on 2026-06-01)
 
 ### W44. Show similarity scores beside TUI thumbnails (TUI — src/tui/widget/image.rs)
 - Lens: ux
