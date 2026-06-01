@@ -10,6 +10,7 @@ pub mod config;
 pub mod context;
 pub mod database;
 pub mod graphql;
+pub mod indexing;
 pub mod logging;
 pub mod metadata;
 pub mod routes;

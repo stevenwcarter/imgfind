@@ -7,10 +7,32 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexConfig {
+    /// Number of images to embed per CLIP batch during indexing
+    #[serde(default = "default_batch_size")]
+    pub batch_size: usize,
+}
+
+fn default_batch_size() -> usize {
+    32
+}
+
+impl Default for IndexConfig {
+    fn default() -> Self {
+        IndexConfig {
+            batch_size: default_batch_size(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Directory patterns to ignore during indexing
     #[serde(default)]
     pub ignore_patterns: Vec<String>,
+    /// Indexing tuning options
+    #[serde(default)]
+    pub index: IndexConfig,
     /// Cached compiled regexes (not serialized)
     #[serde(skip)]
     compiled_regexes: OnceCell<Vec<Option<Regex>>>,
@@ -19,6 +41,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            index: IndexConfig::default(),
             ignore_patterns: vec![
                 // Default patterns to ignore
                 "node_modules".to_string(),
@@ -148,6 +171,7 @@ mod tests {
                 r".*generated.*".to_string(),
                 ".git".to_string(),
             ],
+            index: IndexConfig::default(),
             compiled_regexes: OnceCell::new(),
         };
 
@@ -171,6 +195,7 @@ mod tests {
                 "node_modules".to_string(),
                 r".*generated.*".to_string(),
             ],
+            index: IndexConfig::default(),
             compiled_regexes: OnceCell::new(),
         };
 
@@ -178,5 +203,16 @@ mod tests {
         let deserialized: Config = toml::from_str(&toml_str).unwrap();
         
         assert_eq!(config.ignore_patterns, deserialized.ignore_patterns);
+    }
+
+    #[test]
+    fn test_default_index_batch_size() {
+        assert_eq!(IndexConfig::default().batch_size, 32);
+    }
+
+    #[test]
+    fn test_empty_toml_defaults_batch_size() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.index.batch_size, 32);
     }
 }
