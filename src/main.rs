@@ -14,7 +14,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use walkdir::WalkDir;
 
+use imgfind::abs_to_relative_path;
 use imgfind::database::{Database, extract_image_metadata};
+use imgfind::indexing::chunk_pending;
 use imgfind::routes::app;
 use imgfind::search::{SearchEngine, normalize_vector};
 use imgfind::thumbnail::generate_missing_thumbnails_batch;
@@ -44,6 +46,9 @@ enum Commands {
         /// Create database in current directory instead of using existing or global database
         #[arg(long)]
         root: bool,
+        /// Number of images to embed per CLIP batch (default: [index].batch_size config, 32)
+        #[arg(long)]
+        batch_size: Option<usize>,
     },
     Metadata {
         #[arg(short, long)]
@@ -148,6 +153,7 @@ async fn main() -> Result<()> {
             recursive,
             quiet,
             root,
+            batch_size,
         } => {
             let db_path = if root {
                 get_local_db_path()?
@@ -155,7 +161,7 @@ async fn main() -> Result<()> {
                 get_db_path(None)?
             };
             let mut db = Database::new(&db_path)?;
-            index_directory(&mut db, &dir, recursive, quiet)?;
+            index_directory(&mut db, &dir, recursive, quiet, batch_size)?;
         }
         Commands::Search {
             prompt,
@@ -223,7 +229,13 @@ fn metadata(db: &mut Database, quiet: bool, count: usize) -> Result<()> {
     extract_missing_metadata(db, quiet, count)
 }
 
-fn index_directory(db: &mut Database, dir: &str, recursive: bool, quiet: bool) -> Result<()> {
+fn index_directory(
+    db: &mut Database,
+    dir: &str,
+    recursive: bool,
+    quiet: bool,
+    batch_size_override: Option<usize>,
+) -> Result<()> {
     if !quiet {
         println!("Indexing directory: {}", dir);
     }
@@ -334,11 +346,19 @@ fn index_directory(db: &mut Database, dir: &str, recursive: bool, quiet: bool) -
         pb
     };
 
+    let batch_size = batch_size_override.unwrap_or(config.index.batch_size);
+
     let mut indexed_count = 0;
     let mut skipped_count = 0;
     let mut error_count = 0;
 
     info!("Starting to process images...");
+
+    // Phase 1: collect images that are not yet indexed. We compute the content
+    // hash and run the existing already-indexed check here; only genuinely-new
+    // images make it into `pending`. Each entry carries (abs_path, hash) — the
+    // relative path is derived just before insertion.
+    let mut pending: Vec<(PathBuf, String)> = Vec::new();
 
     for path in image_files.iter() {
         // Convert to absolute path for storage consistency
@@ -347,13 +367,6 @@ fn index_directory(db: &mut Database, dir: &str, recursive: bool, quiet: bool) -
             Err(_) => path.to_path_buf(), // fallback to original path if canonicalize fails
         };
         let path_str = abs_path.to_string_lossy();
-
-        if !quiet {
-            progress_bar.set_message(format!(
-                "Processing: {}",
-                path.file_name().unwrap_or_default().to_string_lossy()
-            ));
-        }
 
         // Calculate hash
         let hash = match oshash(&path_str) {
@@ -374,57 +387,115 @@ fn index_directory(db: &mut Database, dir: &str, recursive: bool, quiet: bool) -
             continue;
         }
 
-        // Generate embedding
-        debug!("Processing: {}", path_str);
-        let embedding = match model.get_image_embedding(&path_str) {
-            Ok(emb) => emb,
+        pending.push((abs_path, hash));
+    }
+
+    // Phase 2: batch-embed and insert the pending images. Images are decoded
+    // individually so a single corrupt file can be skipped and counted rather
+    // than failing an entire embedding batch.
+    for chunk in chunk_pending(&pending, batch_size) {
+        // Decode each image individually; survivors stay index-aligned with the
+        // DynamicImage vec passed to the embedder.
+        let mut survivors: Vec<(String, String, String)> = Vec::new(); // (abs_path_str, rel_path_str, hash)
+        let mut images: Vec<image::DynamicImage> = Vec::new();
+
+        for (abs_path, hash) in chunk {
+            let path_str = abs_path.to_string_lossy().to_string();
+
+            if !quiet {
+                progress_bar.set_message(format!(
+                    "Processing: {}",
+                    abs_path.file_name().unwrap_or_default().to_string_lossy()
+                ));
+            }
+
+            let img = match image::open(abs_path) {
+                Ok(img) => img,
+                Err(e) => {
+                    warn!("Failed to decode image {}: {}", path_str, e);
+                    error_count += 1;
+                    progress_bar.inc(1);
+                    continue;
+                }
+            };
+
+            let rel_path = match abs_to_relative_path(abs_path, &db.parent_dir) {
+                Ok(p) => p.to_string_lossy().to_string(),
+                Err(e) => {
+                    warn!(
+                        "Failed to convert path {} to relative path: {}",
+                        path_str, e
+                    );
+                    error_count += 1;
+                    progress_bar.inc(1);
+                    continue;
+                }
+            };
+
+            survivors.push((path_str, rel_path, hash.clone()));
+            images.push(img);
+        }
+
+        if survivors.is_empty() {
+            continue;
+        }
+
+        // Whole-batch embedding: a failure here drops the entire surviving chunk.
+        let embeddings = match model.get_image_embeddings_from_dynamic(images) {
+            Ok(embs) => embs,
             Err(e) => {
-                warn!("Failed to generate embedding for {}: {}", path_str, e);
-                error_count += 1;
-                progress_bar.inc(1);
+                warn!("Failed to generate embeddings for batch: {}", e);
+                error_count += survivors.len();
+                progress_bar.inc(survivors.len() as u64);
                 continue;
             }
         };
 
-        // Normalize embedding
-        let normalized_embedding = normalize_vector(&embedding);
+        // Build rows (relative_path, hash, normalized_embedding) for batch insert.
+        let rows: Vec<(String, String, Vec<f32>)> = survivors
+            .iter()
+            .zip(embeddings.iter())
+            .map(|((_, rel_path, hash), embedding)| {
+                (rel_path.clone(), hash.clone(), normalize_vector(embedding))
+            })
+            .collect();
 
-        // Store in database
-        if let Err(e) = db.insert_image(&path_str, &hash, &normalized_embedding) {
-            warn!("Failed to insert image into database {}: {}", path_str, e);
-            error_count += 1;
-            progress_bar.inc(1);
+        if let Err(e) = db.insert_images_batch(&rows) {
+            warn!("Failed to insert image batch into database: {}", e);
+            error_count += rows.len();
+            progress_bar.inc(survivors.len() as u64);
             continue;
         }
 
-        // Extract and store metadata
-        match extract_image_metadata(&path_str) {
-            Ok(metadata) => {
-                // Get the image ID to store metadata
-                match db.get_image_id(&path_str) {
+        indexed_count += rows.len();
+
+        // Extract and store metadata for the newly-indexed images. Metadata
+        // extraction stays per-image and is non-critical.
+        for (abs_path_str, _, _) in survivors.iter() {
+            match extract_image_metadata(abs_path_str) {
+                Ok(metadata) => match db.get_image_id(abs_path_str) {
                     Ok(image_id) => {
                         if let Err(e) = db.insert_or_update_metadata(image_id, &metadata) {
-                            warn!("Failed to store metadata for {}: {}", path_str, e);
+                            warn!("Failed to store metadata for {}: {}", abs_path_str, e);
                         } else {
-                            debug!("Stored metadata for: {}", path_str);
+                            debug!("Stored metadata for: {}", abs_path_str);
                         }
                     }
                     Err(e) => {
                         warn!(
                             "Failed to get image ID for metadata storage {}: {}",
-                            path_str, e
+                            abs_path_str, e
                         );
                     }
+                },
+                Err(e) => {
+                    debug!("Failed to extract metadata for {}: {}", abs_path_str, e);
+                    // This is not critical, so we don't increment error_count
                 }
-            }
-            Err(e) => {
-                debug!("Failed to extract metadata for {}: {}", path_str, e);
-                // This is not critical, so we don't increment error_count
             }
         }
 
-        indexed_count += 1;
-        progress_bar.inc(1);
+        progress_bar.inc(survivors.len() as u64);
     }
 
     progress_bar.finish_with_message("Indexing complete!");
@@ -435,7 +506,7 @@ fn index_directory(db: &mut Database, dir: &str, recursive: bool, quiet: bool) -
         println!("  ✅ Newly indexed: {}", indexed_count);
         println!("  ⏭️  Already indexed (skipped): {}", skipped_count);
         if error_count > 0 {
-            println!("  ❌ Errors: {}", error_count);
+            println!("  ❌ Failed: {}", error_count);
         }
         println!();
     }
@@ -452,7 +523,7 @@ fn index_directory(db: &mut Database, dir: &str, recursive: bool, quiet: bool) -
     info!("  Total files: {}", image_files.len());
     info!("  Indexed: {}", indexed_count);
     info!("  Skipped: {}", skipped_count);
-    info!("  Errors: {}", error_count);
+    info!("  Failed: {}", error_count);
 
     if let Err(e) = db.checkpoint_wal() {
         warn!("WAL checkpoint failed (non-fatal): {e:#}");

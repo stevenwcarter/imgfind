@@ -222,6 +222,52 @@ impl Database {
         Ok(())
     }
 
+    /// Insert many (relative_path, hash, normalized_embedding) rows in one transaction.
+    ///
+    /// Paths are expected to already be relative to `parent_dir` (matching the
+    /// storage invariant). Replicates `insert_image`'s per-row writes (an
+    /// `images` row plus the corresponding `image_vectors` vec0 row) against a
+    /// single transaction.
+    pub fn insert_images_batch(&mut self, rows: &[(String, String, Vec<f32>)]) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self
+            .pool
+            .get()
+            .context("get connection for batch insert")?;
+        let tx = conn.transaction()?;
+        for (rel_path_str, hash, embedding) in rows {
+            // Insert into images table with relative path
+            tx.execute(
+                "INSERT OR REPLACE INTO images (path, hash) VALUES (?1, ?2)",
+                params![rel_path_str.as_str(), hash],
+            )?;
+
+            // Get the image ID
+            let image_id: i64 = tx.query_row(
+                "SELECT id FROM images WHERE path = ?1",
+                params![rel_path_str.as_str()],
+                |row| row.get(0),
+            )?;
+
+            // Insert into vector table using sqlite-vec.
+            // First delete any existing vector for this image.
+            tx.execute(
+                "DELETE FROM image_vectors WHERE rowid = ?1",
+                params![image_id],
+            )?;
+
+            // Insert the new vector using zerocopy for efficiency.
+            tx.execute(
+                "INSERT INTO image_vectors (rowid, embedding) VALUES (?1, ?2)",
+                params![image_id, embedding.as_slice().as_bytes()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn is_image_indexed(&self, path: &str, hash: &str) -> Result<bool> {
         // Convert absolute path to relative path for database lookup
         let abs_path = Path::new(path);
