@@ -24,7 +24,7 @@ impl App {
         let search_result = search_result.unwrap();
         let total_pages = search_result.result_count.div_ceil(9);
         let page_info = format!(
-            "Page {}/{} ({} results)",
+            "Page {}/{} ({} results) [H prev | L next]",
             self.page + 1,
             total_pages.max(1),
             search_result.result_count
@@ -85,6 +85,24 @@ impl App {
         }
     }
 
+    /// Renders a one-line control hint at the bottom of the zoom area while an
+    /// image is zoomed.
+    fn render_zoom_status(&self, area: Rect, buf: &mut Buffer) {
+        if self.zoomed_image.is_none() {
+            return;
+        }
+        // Place the hint on the bottom row of the displayed zoom image when its
+        // rect is known, otherwise fall back to the bottom of the main area.
+        let status_area = self
+            .zoomed_image_rect
+            .map(|rect| Rect::new(rect.x, rect.bottom().saturating_sub(1), rect.width, 1))
+            .unwrap_or_else(|| Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1));
+        Paragraph::new("scroll to zoom | right-click to reset | ESC to close")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center)
+            .render(status_area, buf);
+    }
+
     fn render_images(&mut self, area: Rect, buf: &mut Buffer) {
         if let Some(image) = self.zoomed_image.as_mut() {
             Clear.render(area, buf);
@@ -92,6 +110,7 @@ impl App {
                 Ok(rect) => self.zoomed_image_rect = Some(rect),
                 Err(e) => error!("Failed to render zoomed image: {}", e),
             }
+            self.render_zoom_status(area, buf);
         } else {
             self.zoomed_image_rect = None;
             let nines = nine_block(area);
