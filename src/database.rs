@@ -290,16 +290,21 @@ impl Database {
         &self,
         query_embedding: &[f32],
         limit: usize,
+        distance_threshold: f32,
+        max_k: usize,
     ) -> Result<Vec<(String, f32)>> {
         // Use a reasonable k value that's at least the limit but not too large
-        let k = limit.clamp(1, 100);
+        let k = limit.clamp(1, max_k);
 
+        // `k` and the distance threshold are interpolated as the vec0 MATCH/k
+        // syntax requires literal values (not bound params). Both are trusted
+        // numeric config values, never user free-text.
         let query = format!(
-            "SELECT i.path, distance 
+            "SELECT i.path, distance
              FROM image_vectors v
              JOIN images i ON i.id = v.rowid
-             WHERE v.embedding MATCH ? AND k={k} 
-            AND distance <= 1.3
+             WHERE v.embedding MATCH ? AND k={k}
+            AND distance <= {distance_threshold:.6}
              ORDER BY distance LIMIT {k}"
         );
 
@@ -329,17 +334,22 @@ impl Database {
         query_embedding: &[f32],
         limit: usize,
         offset: usize,
+        distance_threshold: f32,
+        max_k: usize,
     ) -> ImageSearchResult {
         // Use a reasonable k value that's at least the limit but not too large
-        let k = limit.clamp(1, 100);
+        let k = limit.clamp(1, max_k);
 
+        // `k` and the distance threshold are interpolated as the vec0 MATCH/k
+        // syntax requires literal values (not bound params). Both are trusted
+        // numeric config values, never user free-text.
         let query = format!(
             "SELECT i.path, distance, t.thumbnail_data
               FROM image_vectors v
               JOIN images i ON i.id = v.rowid
               LEFT OUTER JOIN thumbnails t ON i.hash = t.image_hash AND t.size = 300
-              WHERE v.embedding MATCH ? AND k={k} 
-            AND distance <= 1.3
+              WHERE v.embedding MATCH ? AND k={k}
+            AND distance <= {distance_threshold:.6}
               ORDER BY distance LIMIT {k} OFFSET {offset}"
         );
 
@@ -368,8 +378,16 @@ impl Database {
         &self,
         query_embedding: &[f32],
         limit: usize,
+        distance_threshold: f32,
+        max_k: usize,
     ) -> Result<Vec<(String, f32, Option<String>)>> {
-        let search_results = self.search_similar_images_with_raw_blob(query_embedding, limit, 0)?;
+        let search_results = self.search_similar_images_with_raw_blob(
+            query_embedding,
+            limit,
+            0,
+            distance_threshold,
+            max_k,
+        )?;
         let search_results: Vec<(String, f32, Option<String>)> = search_results
             .into_iter()
             .map(|(path, distance, thumbnail_data)| {

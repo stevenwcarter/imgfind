@@ -87,9 +87,12 @@ async fn search(
         .get_text_embedding(search.as_str())
         .context("Failed to generate text embedding")?;
 
+    // TODO(W33): thread per-request SearchConfig overrides; defaults preserve
+    // the prior hardcoded behavior (distance <= 1.3, k ceiling 100).
+    let sc = crate::config::SearchConfig::default();
     let search = SearchEngine::new(&context.db);
     let result = search
-        .search_with_thumbnails(&query_embedding, 80)
+        .search_with_thumbnails(&query_embedding, 80, sc.distance_threshold, sc.max_k)
         .context("Failed to perform search")?;
 
     Ok(Json(result))

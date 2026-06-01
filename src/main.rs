@@ -69,6 +69,9 @@ enum Commands {
         /// Number of results to return
         #[arg(short, long, default_value_t = 10)]
         limit: usize,
+        /// Max cosine distance to include (lower = stricter). Overrides config [search].distance_threshold.
+        #[arg(long)]
+        threshold: Option<f32>,
         /// Output only image paths, one per line (useful for piping to other tools)
         #[arg(short, long)]
         short: bool,
@@ -166,6 +169,7 @@ async fn main() -> Result<()> {
         Commands::Search {
             prompt,
             limit,
+            threshold,
             short,
             recursive,
             all,
@@ -173,7 +177,20 @@ async fn main() -> Result<()> {
         } => {
             let db_path = get_db_path(None)?;
             let db = Database::new(&db_path)?;
-            search_images(&db, &prompt, limit, short, recursive, all, display)?;
+            let config = config::Config::load()?;
+            let distance_threshold = threshold.unwrap_or(config.search.distance_threshold);
+            let max_k = config.search.max_k;
+            search_images(
+                &db,
+                &prompt,
+                limit,
+                distance_threshold,
+                max_k,
+                short,
+                recursive,
+                all,
+                display,
+            )?;
         }
         Commands::Clean => {
             let db_path = get_db_path(None)?;
@@ -536,6 +553,8 @@ fn search_images(
     db: &Database,
     prompt: &str,
     limit: usize,
+    distance_threshold: f32,
+    max_k: usize,
     short: bool,
     recursive: bool,
     all: bool,
@@ -568,7 +587,8 @@ fn search_images(
     // Search database (SearchEngine normalizes the query internally)
     info!("Searching database...");
     let search_engine = SearchEngine::new(db);
-    let all_results = search_engine.search(&query_embedding, usize::MAX)?; // Get all results first
+    let all_results =
+        search_engine.search(&query_embedding, usize::MAX, distance_threshold, max_k)?; // Get all results first
 
     // Filter results based on current directory and recursive flag
     let filtered_results: Vec<_> = all_results

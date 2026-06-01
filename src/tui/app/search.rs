@@ -153,10 +153,17 @@ impl App {
                     .get_text_embedding(&query)
                     .context("Failed to generate text embedding")?;
 
-                // Search database (SearchEngine normalizes the query internally)
+                // Search database (SearchEngine normalizes the query internally).
+                // Defaults preserve the prior hardcoded behavior (distance <= 1.3, k ceiling 100).
+                let sc = crate::config::SearchConfig::default();
                 let search_engine = SearchEngine::new(&db);
-                let all_results =
-                    search_engine.search_with_thumbnails_raw(&query_embedding, 99, 0)?;
+                let all_results = search_engine.search_with_thumbnails_raw(
+                    &query_embedding,
+                    99,
+                    0,
+                    sc.distance_threshold,
+                    sc.max_k,
+                )?;
 
                 let result_count = all_results.len();
 
