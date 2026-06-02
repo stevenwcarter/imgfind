@@ -4,6 +4,7 @@ import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faTimesCircle } from '@fortawesome/free-solid-svg-icons';
 import { useKeyPress, useBodyScrollLock } from '../hooks';
 import { selectViewState } from './searchViewState';
+import { buildSearchUrl, SearchResponse, SearchResultItem } from './searchUrl';
 import LightboxViewer from 'components/LightboxViewer';
 import Lightbox from 'yet-another-react-lightbox';
 import Download from 'yet-another-react-lightbox/plugins/download';
@@ -12,15 +13,14 @@ import Zoom from 'yet-another-react-lightbox/plugins/zoom';
 import 'yet-another-react-lightbox/styles.css';
 import 'yet-another-react-lightbox/plugins/thumbnails.css';
 
-export type ImageFromServer = [string, string, string | null]; // [filename, filesize, base64]
-
 export const Images = () => {
   const [search, setSearch] = useSearchParams();
   const [query, setQuery] = useState(search.get('query') || '');
-  const [images, setImages] = useState<ImageFromServer[]>([]);
+  const [images, setImages] = useState<SearchResultItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hasSearched, setHasSearched] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
   const [isOpen, setIsOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
@@ -41,31 +41,32 @@ export const Images = () => {
   useKeyPress('Escape', closeModal, !!selectedImage);
   useBodyScrollLock(!!selectedImage);
 
-  const getImages = async (q: string) => {
+  const getImages = async (q: string, offset = 0) => {
     setLoading(true);
     setError(null);
     setHasSearched(true);
     try {
-      const response = await fetch(`/api/v1/search/${encodeURIComponent(q)}`);
+      const response = await fetch(buildSearchUrl(q, offset));
       if (!response.ok) {
         throw new Error(`Search failed (${response.status})`);
       }
-      const data = await response.json();
-      setImages(data || []);
+      const data: SearchResponse = await response.json();
+      setImages((prev) => (offset === 0 ? data.results : [...prev, ...data.results]));
+      setHasMore(data.hasMore);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Search failed');
-      setImages([]);
+      if (offset === 0) setImages([]);
     } finally {
       setLoading(false);
     }
   };
 
-  const handleClick = (e: any, image: ImageFromServer) => {
+  const handleClick = (e: React.MouseEvent, item: SearchResultItem) => {
     if (e.ctrlKey) {
-      const mainSrc = `/api/v1/search/file/${image[0]}`;
+      const mainSrc = `/api/v1/search/file/${item.path}`;
       window.open(mainSrc, '_blank');
     } else {
-      setActiveIndex(images.findIndex((img) => img[0] === image[0]));
+      setActiveIndex(images.findIndex((img) => img.path === item.path));
       setIsOpen(true);
     }
   };
@@ -88,6 +89,7 @@ export const Images = () => {
       setImages([]);
       setError(null);
       setHasSearched(false);
+      setHasMore(false);
     }
   }, [search]);
 
@@ -145,13 +147,26 @@ export const Images = () => {
 
       {viewState === 'results' && (
         <div className="columns-2 gap-4 p-4 sm:columns-3 lg:columns-4">
-          {images.map((image) => (
-            <div key={image[0]} className="mb-4 break-inside-avoid">
-              <LightboxViewer image={image} handleClick={handleClick} />
+          {images.map((item) => (
+            <div key={item.path} className="mb-4 break-inside-avoid">
+              <LightboxViewer item={item} handleClick={handleClick} />
             </div>
           ))}
         </div>
       )}
+
+      {hasMore && !loading && (
+        <div className="flex justify-center p-4">
+          <button
+            type="button"
+            className="rounded bg-gray-700 px-4 py-2 text-white hover:bg-gray-600"
+            onClick={() => getImages(query, images.length)}
+          >
+            Load more
+          </button>
+        </div>
+      )}
+
       {images && images.length > 0 && (
         <Lightbox
           plugins={[Download, Thumbnails, Zoom]}
@@ -159,9 +174,9 @@ export const Images = () => {
           carousel={{ preload: 3 }}
           zoom={{ ref: zoomRef, scrollToZoom: true, maxZoomPixelRatio: 2 }}
           open={isOpen}
-          slides={images.map((img) => ({
-            src: `/api/v1/search/file/${img[0]}`,
-            thumbnail: `/api/v1/search/thumb:300/${img[0]}`,
+          slides={images.map((item) => ({
+            src: `/api/v1/search/file/${item.path}`,
+            thumbnail: `/api/v1/search/thumb:300/${item.path}`,
           }))}
           close={handleClose}
           index={activeIndex}

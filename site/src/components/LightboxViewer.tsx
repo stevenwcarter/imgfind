@@ -1,15 +1,13 @@
 import clsx from 'clsx';
-import { ImageFromServer } from 'page/Images';
+import { SearchResultItem } from '../page/searchUrl';
 
 interface LightboxViewerProps {
-  image: ImageFromServer; // [filename, filesize, base64]
-  mainSrc?: string;
-  mainSrcThumbnail?: string;
-  handleClick: (e: any, image: ImageFromServer) => void;
+  item: SearchResultItem;
+  handleClick: (e: React.MouseEvent, item: SearchResultItem) => void;
 }
 
 export const LightboxViewer = (props: LightboxViewerProps) => {
-  const { image, handleClick } = props;
+  const { item, handleClick } = props;
 
   const classes = clsx(
     'w-full h-auto',
@@ -21,23 +19,21 @@ export const LightboxViewer = (props: LightboxViewerProps) => {
     'hover:scale-105',
   );
 
-  const imageSrc = image[2]
-    ? `data:image/jpg;base64,${image[2]}`
-    : `/api/v1/search/thumb:300/${image[0]}`;
-
-  // TODO - update this to dynamically set size
   return (
     <div className={`flex justify-center items-center`}>
       <div className="relative group">
         <img
           className={classes}
-          src={imageSrc}
-          alt={image[0]}
-          onClick={(e) => handleClick(e, image)}
+          src={`/api/v1/search/thumb:300/${item.path}`}
+          loading="lazy"
+          alt={item.path}
+          onClick={(e) => handleClick(e, item)}
         />
-        <span className="absolute bottom-0.5 right-2 opacity-0 group-hover:opacity-80 transition-opacity">
-          {image[1]}
-        </span>
+        {item.fileSize != null && (
+          <span className="absolute bottom-0.5 right-2 opacity-0 group-hover:opacity-80 transition-opacity">
+            {Math.round(item.fileSize / 1024)} KB
+          </span>
+        )}
       </div>
     </div>
   );
