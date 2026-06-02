@@ -103,9 +103,18 @@ async fn search(
     let limit = params.limit.unwrap_or(80);
     let offset = params.offset.unwrap_or(0);
 
+    // The CLIP model loads in the background; report 503 until it is ready.
+    let Some(embedder) = context.embedder_ready() else {
+        return Ok((
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            [(axum::http::header::RETRY_AFTER, "5")],
+            "model loading",
+        )
+            .into_response());
+    };
+
     // Generate embedding for query using the cached model.
-    let query_embedding = context
-        .embedder
+    let query_embedding = embedder
         .get_text_embedding(search.as_str())
         .context("Failed to generate text embedding")?;
 
@@ -114,7 +123,13 @@ async fn search(
     let sc = crate::config::SearchConfig::default();
     let engine = SearchEngine::new(&context.db);
     let rows = engine
-        .search_meta(query_embedding, limit, offset, sc.distance_threshold, sc.max_k)
+        .search_meta(
+            query_embedding,
+            limit,
+            offset,
+            sc.distance_threshold,
+            sc.max_k,
+        )
         .context("Failed to perform search")?;
 
     let has_more = rows.len() == limit;
@@ -127,7 +142,7 @@ async fn search(
         })
         .collect();
 
-    Ok(Json(SearchResponse { results, has_more }))
+    Ok(Json(SearchResponse { results, has_more }).into_response())
 }
 
 async fn file(

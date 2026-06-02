@@ -40,7 +40,10 @@ impl Query {
         limit: Option<i32>,
         offset: Option<i32>,
     ) -> FieldResult<Vec<ImageResult>> {
-        let emb = context.embedder.get_text_embedding(&query)?;
+        let emb = context
+            .embedder_ready()
+            .ok_or_else(|| juniper::FieldError::new("model still loading", juniper::Value::null()))?
+            .get_text_embedding(&query)?;
         let sc = crate::config::SearchConfig::default();
         let rows = crate::search::SearchEngine::new(&context.db).search_meta(
             emb,

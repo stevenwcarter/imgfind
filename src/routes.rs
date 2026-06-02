@@ -77,11 +77,21 @@ pub fn app(context: GraphQLContext) -> Router {
         .nest("/graphql", graphql_routes)
         .nest("/api/v1", api_routes(context.clone()))
         // .layer(middleware::from_fn(track_metrics))
+        .route("/healthz", get(healthz))
         .route("/", get(index_handler))
         .route("/{*uri}", get(static_handler))
         .fallback_service(get(index_handler))
         .layer(Extension(context.clone()))
         .layer(middleware)
+}
+
+async fn healthz(Extension(ctx): Extension<GraphQLContext>) -> impl IntoResponse {
+    let status = if ctx.embedder_ready().is_some() {
+        "ready"
+    } else {
+        "loading"
+    };
+    axum::Json(serde_json::json!({ "model": status }))
 }
 
 async fn custom_graphql(

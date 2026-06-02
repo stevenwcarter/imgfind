@@ -269,10 +269,20 @@ async fn main() -> Result<()> {
 }
 
 async fn serve(db: Database, directory: String, host: String, port: usize) -> Result<()> {
-    info!("Loading CLIP model...");
-    let embedder =
-        Arc::new(ClipEmbedder::new(None, None, false).context("Failed to create ClipEmbedder")?);
-    let context = GraphQLContext::new(db, directory, embedder);
+    // Load the CLIP model in the background so the server starts accepting
+    // connections immediately; search endpoints report 503 until it is ready.
+    let cell: Arc<std::sync::OnceLock<ClipEmbedder>> = Arc::new(std::sync::OnceLock::new());
+    {
+        let cell = cell.clone();
+        tokio::task::spawn_blocking(move || match ClipEmbedder::new(None, None, false) {
+            Ok(m) => {
+                let _ = cell.set(m);
+                info!("CLIP model loaded");
+            }
+            Err(e) => log::error!("CLIP model load failed: {e:#}"),
+        });
+    }
+    let context = GraphQLContext::new(db, directory, cell);
     let app = app(context.clone());
     let addr = format!("{host}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr)
