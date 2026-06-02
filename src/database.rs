@@ -75,7 +75,7 @@ impl Database {
     }
 }
 
-const LATEST_MIGRATION_VERSION: i32 = 1;
+const LATEST_MIGRATION_VERSION: i32 = 2;
 
 /// Apply any pending schema migrations, gated by SQLite's `PRAGMA user_version`.
 ///
@@ -87,10 +87,29 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     let current: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if current < 1 {
         migration_001_baseline(conn).context("migration 1 (baseline schema)")?;
+    }
+    if current < 2 {
+        migration_002_models_and_userdata(conn).context("migration 2")?;
+    }
+    if current < LATEST_MIGRATION_VERSION {
         conn.execute_batch(&format!(
             "PRAGMA user_version = {LATEST_MIGRATION_VERSION};"
         ))?;
     }
+    Ok(())
+}
+
+/// Migration 2: a `models` registry (which vec0 table is active for embeddings)
+/// plus user-data tables for tags and collections.
+fn migration_002_models_and_userdata(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS models (name TEXT PRIMARY KEY, dim INTEGER NOT NULL, table_name TEXT NOT NULL, is_active INTEGER NOT NULL DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+         INSERT OR IGNORE INTO models (name, dim, table_name, is_active) VALUES ('openai/clip-vit-base-patch32', 512, 'image_vectors', 1);
+         CREATE TABLE IF NOT EXISTS tags (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+         CREATE TABLE IF NOT EXISTS image_tags (image_id INTEGER NOT NULL, tag_id INTEGER NOT NULL, PRIMARY KEY(image_id, tag_id), FOREIGN KEY(image_id) REFERENCES images(id) ON DELETE CASCADE, FOREIGN KEY(tag_id) REFERENCES tags(id) ON DELETE CASCADE);
+         CREATE TABLE IF NOT EXISTS collections (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+         CREATE TABLE IF NOT EXISTS collection_images (collection_id INTEGER NOT NULL, image_id INTEGER NOT NULL, PRIMARY KEY(collection_id, image_id), FOREIGN KEY(collection_id) REFERENCES collections(id) ON DELETE CASCADE, FOREIGN KEY(image_id) REFERENCES images(id) ON DELETE CASCADE);",
+    )?;
     Ok(())
 }
 
@@ -1331,6 +1350,44 @@ mod tests {
             3,
             "the count value index_directory now passes covers all missing images"
         );
+
+        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn migration_2_seeds_baseline_model_and_user_tables() {
+        let db_path = temp_db_path();
+        let db = Database::new(&db_path).expect("create db");
+        let conn = db.pool.get().unwrap();
+        let v: i32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, LATEST_MIGRATION_VERSION);
+        let (name, dim, table, active): (String, i64, String, i64) = conn
+            .query_row(
+                "SELECT name, dim, table_name, is_active FROM models WHERE is_active = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!((dim, table.as_str(), active), (512, "image_vectors", 1));
+        assert!(name.contains("clip"));
+        for t in [
+            "tags",
+            "image_tags",
+            "collections",
+            "collection_images",
+            "models",
+        ] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE name=?1",
+                    [t],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "table {t} exists");
+        }
 
         let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
     }
