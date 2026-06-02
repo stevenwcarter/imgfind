@@ -5,7 +5,7 @@ use hashbrown::HashMap;
 use image::GenericImageView;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{OptionalExtension, ffi::sqlite3_auto_extension, params};
+use rusqlite::{Connection, OptionalExtension, ffi::sqlite3_auto_extension, params};
 use sqlite_vec::sqlite3_vec_init;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -57,56 +57,79 @@ impl Database {
             .with_context(|| format!("Failed to open database at {:?}", db_path))?;
 
         let parent_dir = get_db_parent_dir(db_path)?;
-        let mut db = Database { pool, parent_dir };
-        db.initialize_schema()?;
+        let db = Database { pool, parent_dir };
+        let conn = db.pool.get().context("Failed to get DB connection")?;
+        run_migrations(&conn)?;
         Ok(db)
     }
 
     /// Truncate the WAL back into the main DB file. Call after a large write batch (e.g. indexing).
     pub fn checkpoint_wal(&self) -> Result<()> {
-        let conn = self.pool.get().context("get connection for WAL checkpoint")?;
+        let conn = self
+            .pool
+            .get()
+            .context("get connection for WAL checkpoint")?;
         conn.pragma_update(None, "wal_checkpoint", "RESTART")
             .context("wal_checkpoint(RESTART)")?;
         Ok(())
     }
+}
 
-    fn initialize_schema(&mut self) -> Result<()> {
-        let conn = self.pool.get().context("Failed to get DB connection")?;
+const LATEST_MIGRATION_VERSION: i32 = 1;
 
-        // Create images table
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS images (
+/// Apply any pending schema migrations, gated by SQLite's `PRAGMA user_version`.
+///
+/// Each migration bumps `user_version` after it succeeds, so re-running is a no-op
+/// once a DB is at `LATEST_MIGRATION_VERSION`. Existing DBs created before this
+/// runner existed start at version 0; migration 1 is the full baseline schema with
+/// `IF NOT EXISTS` everywhere, so they adopt it as a no-op and get stamped to 1.
+fn run_migrations(conn: &Connection) -> Result<()> {
+    let current: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if current < 1 {
+        migration_001_baseline(conn).context("migration 1 (baseline schema)")?;
+        conn.execute_batch(&format!(
+            "PRAGMA user_version = {LATEST_MIGRATION_VERSION};"
+        ))?;
+    }
+    Ok(())
+}
+
+/// Migration 1: the full baseline schema (verbatim from the original `initialize_schema`).
+fn migration_001_baseline(conn: &Connection) -> Result<()> {
+    // Create images table
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS images (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 path TEXT UNIQUE NOT NULL,
                 hash TEXT NOT NULL,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )",
-            [],
-        )?;
+        [],
+    )?;
 
-        // Create vector table for embeddings using sqlite-vec
-        conn.execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS image_vectors USING vec0(
+    // Create vector table for embeddings using sqlite-vec
+    conn.execute(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS image_vectors USING vec0(
                 embedding float[512]
             )",
-            [],
-        )?;
+        [],
+    )?;
 
-        // Create index on path for faster lookups
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_images_path ON images(path)",
-            [],
-        )?;
+    // Create index on path for faster lookups
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_images_path ON images(path)",
+        [],
+    )?;
 
-        // Create index on hash for faster duplicate detection
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_images_hash ON images(hash)",
-            [],
-        )?;
+    // Create index on hash for faster duplicate detection
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_images_hash ON images(hash)",
+        [],
+    )?;
 
-        // Create thumbnails table for caching resized images
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS thumbnails (
+    // Create thumbnails table for caching resized images
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS thumbnails (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 image_hash TEXT NOT NULL,
                 size INTEGER NOT NULL,
@@ -114,18 +137,18 @@ impl Database {
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(image_hash, size)
             )",
-            [],
-        )?;
+        [],
+    )?;
 
-        // Create index on hash and size for faster thumbnail lookups
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_thumbnails_hash_size ON thumbnails(image_hash, size)",
-            [],
-        )?;
+    // Create index on hash and size for faster thumbnail lookups
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_thumbnails_hash_size ON thumbnails(image_hash, size)",
+        [],
+    )?;
 
-        // Create image_metadata table for storing EXIF data
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS image_metadata (
+    // Create image_metadata table for storing EXIF data
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS image_metadata (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 image_id INTEGER NOT NULL,
                 file_size INTEGER,
@@ -140,52 +163,53 @@ impl Database {
                 FOREIGN KEY(image_id) REFERENCES images(id) ON DELETE CASCADE,
                 UNIQUE(image_id)
             )",
-            [],
-        )?;
+        [],
+    )?;
 
-        // Create index on image_id for faster metadata lookups
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_metadata_image_id ON image_metadata(image_id)",
-            [],
-        )?;
+    // Create index on image_id for faster metadata lookups
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_metadata_image_id ON image_metadata(image_id)",
+        [],
+    )?;
 
-        // Create index on GPS coordinates for location-based queries
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_metadata_gps ON image_metadata(latitude, longitude)",
-            [],
-        )?;
+    // Create index on GPS coordinates for location-based queries
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_metadata_gps ON image_metadata(latitude, longitude)",
+        [],
+    )?;
 
-        // Composite index covering geo + time for map queries ordered by capture time
-        conn.execute(
+    // Composite index covering geo + time for map queries ordered by capture time
+    conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_metadata_geo_time ON image_metadata(latitude, longitude, datetime_taken)",
             [],
         )?;
 
-        // Composite index for camera-model filters ordered by capture time
-        conn.execute(
+    // Composite index for camera-model filters ordered by capture time
+    conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_metadata_camera_time ON image_metadata(camera_model, datetime_taken)",
             [],
         )?;
 
-        // Partial index over capture time, skipping rows without a datetime
-        conn.execute(
+    // Partial index over capture time, skipping rows without a datetime
+    conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_metadata_datetime ON image_metadata(datetime_taken) WHERE datetime_taken IS NOT NULL",
             [],
         )?;
 
-        // Create favorites table for marking favorite images
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS favorites (
+    // Create favorites table for marking favorite images
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS favorites (
                 image_id INTEGER PRIMARY KEY,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(image_id) REFERENCES images(id) ON DELETE CASCADE
             )",
-            [],
-        )?;
+        [],
+    )?;
 
-        Ok(())
-    }
+    Ok(())
+}
 
+impl Database {
     pub fn insert_image(&mut self, path: &str, hash: &str, embedding: &[f32]) -> Result<()> {
         // Convert absolute path to relative path for storage
         let abs_path = Path::new(path);
@@ -305,10 +329,7 @@ impl Database {
         if rows.is_empty() {
             return Ok(());
         }
-        let mut conn = self
-            .pool
-            .get()
-            .context("get connection for batch insert")?;
+        let mut conn = self.pool.get().context("get connection for batch insert")?;
         let tx = conn.transaction()?;
         for (rel_path_str, hash, embedding) in rows {
             // Insert into images table with relative path
@@ -1023,10 +1044,7 @@ mod tests {
     fn temp_db_path() -> PathBuf {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "imgfind_test_{}_{n}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("imgfind_test_{}_{n}", std::process::id()));
         // Database::new -> get_db_parent_dir requires a `.imgfind/imgfind.db` layout.
         dir.join(".imgfind").join("imgfind.db")
     }
@@ -1084,7 +1102,10 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("count metadata");
-        assert_eq!(meta_count, 0, "metadata should cascade-delete with its image");
+        assert_eq!(
+            meta_count, 0,
+            "metadata should cascade-delete with its image"
+        );
 
         // Remove the unique temp dir (grandparent of the .imgfind/imgfind.db path).
         let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
@@ -1113,6 +1134,49 @@ mod tests {
         assert_eq!(db.is_favorite(p).unwrap(), false);
 
         // Remove the unique temp dir (grandparent of the .imgfind/imgfind.db path).
+        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn migrations_set_user_version_and_create_tables() {
+        let db_path = temp_db_path();
+        let db = Database::new(&db_path).expect("create db");
+        let conn = db.pool.get().unwrap();
+        let v: i32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, LATEST_MIGRATION_VERSION);
+        for t in [
+            "images",
+            "image_vectors",
+            "thumbnails",
+            "image_metadata",
+            "favorites",
+        ] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE name = ?1",
+                    [t],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "table {t} should exist");
+        }
+
+        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn migrations_are_idempotent() {
+        let db_path = temp_db_path();
+        let db = Database::new(&db_path).expect("create db");
+        let conn = db.pool.get().unwrap();
+        run_migrations(&conn).unwrap(); // re-run: no-op
+        let v: i32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, LATEST_MIGRATION_VERSION);
+
         let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
     }
 }
