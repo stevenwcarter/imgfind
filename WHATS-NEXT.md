@@ -199,7 +199,8 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - Why: `image_metadata` holds only machine-extracted EXIF; any curation feature needs user-data tables. Foundation (with W32) for W55 (tagging) and W54 (albums).
 - Blocked by: —
 - Notes: Pairs with W32 (mutation root) and W43 (migrations) to evolve the schema safely.
-- [ ] execute   [ ] skip
+- [x] execute   [ ] skip
+> in-flight (handed to /ship-it on 2026-06-01)
 
 ### W37. Persistent embedding cache to skip re-computation on re-index (indexing — src/main.rs:254)
 - Lens: scale-perf
@@ -208,7 +209,8 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - Why: Re-indexing a partially-indexed tree currently re-embeds skipped images; a hash-keyed cache saves seconds per image (CPU) across sessions.
 - Blocked by: —
 - Notes: Invalidate only when the content hash changes.
-- [ ] execute   [ ] skip
+- [x] execute   [ ] skip
+> in-flight (handed to /ship-it on 2026-06-01)
 
 ### W38. Shell completion scripts (bash/zsh/fish) (CLI — src/main.rs:22)
 - Lens: ux
@@ -216,7 +218,8 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - What: Add an `imgfind completions {bash|zsh|fish}` command that emits a completion script (via `clap_complete`).
 - Why: Power users expect tab completion for subcommands and flags; without it they must memorize names or re-run `--help`.
 - Blocked by: —
-- [ ] execute   [ ] skip
+- [x] execute   [ ] skip
+> in-flight (handed to /ship-it on 2026-06-01)
 
 ### W39. Bulk export of search results as a zip (API/CLI — src/api/mod.rs)
 - Lens: feature-gap
@@ -242,7 +245,8 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - What: Render each result's similarity score as a small label/bar near its thumbnail in the 3×3 grid.
 - Why: Users can't judge result quality at a glance in the TUI; the CLI shows scores, so hiding them in the TUI is inconsistent.
 - Blocked by: —
-- [ ] execute   [ ] skip
+- [x] execute   [ ] skip
+> in-flight (handed to /ship-it on 2026-06-01)
 
 ### W45. Implement (or remove) the GraphQL `Query::search` stub (graphql — src/graphql.rs:29)
 - Lens: unblock-debt
@@ -251,7 +255,9 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - Why: A GraphQL search client is impossible while the resolver is a stub; only `imagesByBounds` and REST search work.
 - Blocked by: —
 - Notes: Overlaps bughunt D4 (which frames it as dead-code cleanup); here the forward value is "enable a GraphQL search client".
-- [ ] execute   [ ] skip
+- USER NOTE: implement this feature
+- [x] execute (implement this feature)   [ ] skip
+> in-flight (handed to /ship-it on 2026-06-01)
 
 ### W46. Async/lazy CLIP model initialization for fast server startup (embeddings — src/main.rs:203)
 - Lens: unblock-debt
@@ -259,7 +265,8 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - What: `ClipEmbedder::new()` blocks `serve()` until the model loads; lazy/async-init it in a background task cached in `Arc<OnceCell<_>>`.
 - Why: The server hangs (and health checks time out) until a 1GB+ model loads — a problem for containerized deploys and fast restart/failover.
 - Blocked by: —
-- [ ] execute   [ ] skip
+- [x] execute   [ ] skip
+> in-flight (handed to /ship-it on 2026-06-01)
 
 ### W47. Cache embeddings + results for hot repeat text queries (search — src/search.rs)
 - Lens: scale-perf
@@ -294,7 +301,8 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - Why: As path-handling surface grows (tagging, filtering, collections), the risk of storing absolute paths or passing the wrong kind grows; a type makes the invariant unmissable.
 - Blocked by: —
 - Notes: More of a type-safety hardening; consider running it through the `typecheck` sibling instead if that file is created.
-- [ ] execute   [ ] skip
+- [x] execute   [ ] skip
+> in-flight (handed to /ship-it on 2026-06-01)
 
 ### W51. Metadata-aware result re-ranking (Search Engine — src/search.rs)
 - Lens: feature-gap
@@ -312,7 +320,8 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - Why: Switching CLIP models (ViT-L vs ViT-H, or other vendors) currently requires a schema migration and full re-index; versioning unblocks fine-tuned/domain models and side-by-side quality comparison with gradual re-indexing.
 - Blocked by: —
 - Notes: Best done after W43 (migrations) so the schema change is safe.
-- [ ] execute   [ ] skip
+- [x] execute   [ ] skip
+> in-flight (handed to /ship-it on 2026-06-01)
 
 ### W53. Parallelize metadata extraction off the indexing critical path (indexing — src/main.rs:401)
 - Lens: scale-perf
@@ -321,7 +330,8 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - Why: Indexing stalls on per-image EXIF read + decode (I/O-bound); parallel extraction unblocks 5-10× throughput at 100+ images.
 - Blocked by: —
 - Notes: Overlaps W29 (batch metadata); could be designed together. Needs careful error handling + transaction management.
-- [ ] execute   [ ] skip
+- [x] execute   [ ] skip
+> in-flight (handed to /ship-it on 2026-06-01)
 
 ## Medium
 
