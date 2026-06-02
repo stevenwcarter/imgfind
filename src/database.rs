@@ -1275,6 +1275,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
     }
 
+    /// Regression test for the silent "Generated 0 thumbnails" bug.
+    ///
+    /// `index_directory` used to pass `usize::MAX` as the thumbnail batch `count`,
+    /// which flows into `get_images_without_thumbnails` as a SQL `LIMIT ?` bound
+    /// parameter. rusqlite binds usize via `i64::try_from`, so `usize::MAX` (2^64-1)
+    /// overflows i64 and the bind FAILS — the error was swallowed and zero thumbnails
+    /// were ever generated. The fix counts the missing images and passes that exact
+    /// number. This test pins both halves:
+    ///   1. `usize::MAX` as the LIMIT still errors (the trap is real).
+    ///   2. The count from `count_images_without_thumbnails` binds cleanly and the
+    ///      paired `get_images_without_thumbnails(size, count)` returns every missing
+    ///      image — i.e. the value `index_directory` now passes works end to end.
+    #[test]
+    fn missing_thumbnail_limit_bind_uses_real_count_not_usize_max() {
+        let db_path = temp_db_path();
+        let db = Database::new(&db_path).expect("create db");
+        let conn = db.pool.get().expect("get conn");
+
+        // Three images, none with a thumbnail of size 300.
+        for id in 1..=3i64 {
+            conn.execute(
+                "INSERT INTO images (id, path, hash) VALUES (?1, ?2, ?3)",
+                params![id, format!("img{id}.jpg"), format!("h{id}")],
+            )
+            .expect("insert image");
+        }
+        drop(conn);
+
+        // The bug: usize::MAX overflows the i64 LIMIT bind and errors out.
+        assert!(
+            db.get_images_without_thumbnails(300, usize::MAX).is_err(),
+            "usize::MAX must overflow the i64 LIMIT bind (this is the bug the fix avoids)"
+        );
+
+        // The fix: count the missing images, then pass that count.
+        let missing = db
+            .count_images_without_thumbnails(300)
+            .expect("count missing thumbnails must succeed");
+        assert_eq!(missing, 3, "all three images are missing a 300px thumbnail");
+
+        // That count binds cleanly as LIMIT and returns every missing image.
+        let rows = db
+            .get_images_without_thumbnails(300, missing)
+            .expect("real-count LIMIT bind must succeed");
+        assert_eq!(
+            rows.len(),
+            3,
+            "the count value index_directory now passes covers all missing images"
+        );
+
+        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+    }
+
     #[test]
     fn migrations_are_idempotent() {
         let db_path = temp_db_path();

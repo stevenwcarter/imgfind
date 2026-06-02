@@ -567,15 +567,23 @@ fn index_directory(
     info!("  Failed: {}", error_count);
 
     // Generate thumbnails for any images still missing a 300px thumbnail. `count`
-    // is a SQL LIMIT (see get_images_without_thumbnails), so usize::MAX makes it
-    // effectively unbounded and covers every missing thumbnail after this run.
+    // is bound as a SQL `LIMIT ?` parameter (see get_images_without_thumbnails),
+    // and rusqlite binds usize via i64::try_from — so usize::MAX overflows i64 and
+    // the bind fails. Instead, count the images actually missing a thumbnail and
+    // pass that exact number, which covers every one of them.
     if !no_thumbnails {
-        let made = generate_missing_thumbnails_batch(db, 300, usize::MAX).unwrap_or_else(|e| {
-            warn!("thumbnail generation failed (non-fatal): {e:#}");
+        let missing = db.count_images_without_thumbnails(300).unwrap_or_else(|e| {
+            warn!("counting images without thumbnails failed (non-fatal): {e:#}");
             0
         });
-        if !quiet {
-            info!("Generated {made} thumbnails");
+        if missing > 0 {
+            let made = generate_missing_thumbnails_batch(db, 300, missing).unwrap_or_else(|e| {
+                warn!("thumbnail generation failed (non-fatal): {e:#}");
+                0
+            });
+            if !quiet {
+                info!("Generated {made} thumbnails");
+            }
         }
     }
 
