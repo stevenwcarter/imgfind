@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
 use ratatui::{
     buffer::Buffer,
-    layout::{Constraint, Rect},
+    layout::{Alignment, Constraint, Rect},
     style::{Color, Style},
+    text::{Line, Span},
     widgets::{Block, BorderType, StatefulWidget, Widget},
 };
 use ratatui_image::{FilterType, Resize, StatefulImage};
@@ -34,6 +35,21 @@ pub fn render_image(
     );
     let image = StatefulImage::new().resize(Resize::Scale(Some(FilterType::CatmullRom)));
     image.render(center, buf, &mut image_entry.protocol);
+
+    // Overlay a compact, right-aligned similarity score on the bottom row of
+    // the cell (rendered after the image so it stays visible).
+    if area.height > 0 && area.width > 0 {
+        let label = format!("{:.3}", image_entry.score);
+        let label_area = Rect {
+            x: area.x,
+            y: area.bottom().saturating_sub(1),
+            width: area.width,
+            height: 1,
+        };
+        let line = Line::from(Span::styled(label, Style::default().fg(Color::DarkGray)))
+            .alignment(Alignment::Right);
+        line.render(label_area, buf);
+    }
 
     Ok(center)
 }
