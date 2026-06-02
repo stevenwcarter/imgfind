@@ -18,6 +18,7 @@ export const Images = () => {
   const [query, setQuery] = useState(search.get('query') || '');
   const [images, setImages] = useState<SearchResultItem[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hasSearched, setHasSearched] = useState(false);
   const [hasMore, setHasMore] = useState(false);
@@ -42,7 +43,9 @@ export const Images = () => {
   useBodyScrollLock(!!selectedImage);
 
   const getImages = async (q: string, offset = 0) => {
-    setLoading(true);
+    const firstPage = offset === 0;
+    if (firstPage) setLoading(true);
+    else setLoadingMore(true);
     setError(null);
     setHasSearched(true);
     try {
@@ -51,13 +54,14 @@ export const Images = () => {
         throw new Error(`Search failed (${response.status})`);
       }
       const data: SearchResponse = await response.json();
-      setImages((prev) => (offset === 0 ? data.results : [...prev, ...data.results]));
+      setImages((prev) => (firstPage ? data.results : [...prev, ...data.results]));
       setHasMore(data.hasMore);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Search failed');
-      if (offset === 0) setImages([]);
+      if (firstPage) setImages([]);
     } finally {
-      setLoading(false);
+      if (firstPage) setLoading(false);
+      else setLoadingMore(false);
     }
   };
 
@@ -159,13 +163,14 @@ export const Images = () => {
         <div className="flex justify-center p-4">
           <button
             type="button"
-            className="rounded bg-gray-700 px-4 py-2 text-white hover:bg-gray-600"
+            disabled={loadingMore}
+            className="rounded bg-gray-700 px-4 py-2 text-white hover:bg-gray-600 disabled:opacity-60"
             onClick={() => {
               const committed = search.get('query') ?? '';
               if (committed) getImages(committed, images.length);
             }}
           >
-            Load more
+            {loadingMore ? 'Loading…' : 'Load more'}
           </button>
         </div>
       )}
