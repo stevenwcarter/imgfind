@@ -441,6 +441,146 @@ impl Database {
             .collect::<Result<Vec<_>>>()
     }
 
+    /// Resolve the `images.id` for a stored relative path, erroring if the image
+    /// is not indexed. Used by the tag/collection write methods.
+    fn image_id_for(&self, relative_path: &RelativePath) -> Result<i64> {
+        let relative_path = relative_path.as_str();
+        let conn = self.pool.get().context("get connection")?;
+        conn.query_row(
+            "SELECT id FROM images WHERE path = ?1",
+            [relative_path.as_ref()],
+            |r| r.get(0),
+        )
+        .with_context(|| format!("no indexed image at {relative_path}"))
+    }
+
+    /// Ensure a tag exists, returning its id.
+    pub fn create_tag(&self, name: &str) -> Result<i64> {
+        let conn = self.pool.get().context("get connection")?;
+        conn.execute("INSERT OR IGNORE INTO tags (name) VALUES (?1)", [name])?;
+        Ok(conn.query_row("SELECT id FROM tags WHERE name = ?1", [name], |r| r.get(0))?)
+    }
+
+    /// Attach `tag` to the image at `relative_path` (creating the tag if needed).
+    pub fn tag_image(&self, relative_path: &RelativePath, tag: &str) -> Result<()> {
+        let image_id = self.image_id_for(relative_path)?;
+        let tag_id = self.create_tag(tag)?;
+        let conn = self.pool.get().context("get connection")?;
+        conn.execute(
+            "INSERT OR IGNORE INTO image_tags (image_id, tag_id) VALUES (?1, ?2)",
+            params![image_id, tag_id],
+        )?;
+        Ok(())
+    }
+
+    /// Remove `tag` from the image at `relative_path`.
+    pub fn untag_image(&self, relative_path: &RelativePath, tag: &str) -> Result<()> {
+        let image_id = self.image_id_for(relative_path)?;
+        let conn = self.pool.get().context("get connection")?;
+        conn.execute(
+            "DELETE FROM image_tags WHERE image_id = ?1 AND tag_id = (SELECT id FROM tags WHERE name = ?2)",
+            params![image_id, tag],
+        )?;
+        Ok(())
+    }
+
+    /// List the tags attached to the image at `relative_path`, alphabetically.
+    /// Unknown paths simply have no tags.
+    pub fn tags_for_image(&self, relative_path: &RelativePath) -> Result<Vec<String>> {
+        let relative_path = relative_path.as_str();
+        let conn = self.pool.get().context("get connection")?;
+        let id: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM images WHERE path = ?1",
+                [relative_path.as_ref()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(image_id) = id else {
+            return Ok(Vec::new());
+        };
+        let mut stmt = conn.prepare(
+            "SELECT t.name FROM image_tags it JOIN tags t ON t.id = it.tag_id WHERE it.image_id = ?1 ORDER BY t.name",
+        )?;
+        let rows = stmt.query_map([image_id], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// List all tag names, alphabetically.
+    pub fn list_tags(&self) -> Result<Vec<String>> {
+        let conn = self.pool.get().context("get connection")?;
+        let mut stmt = conn.prepare("SELECT name FROM tags ORDER BY name")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// List the relative paths of images carrying `name`, ordered by path.
+    pub fn images_by_tag(&self, name: &str) -> Result<Vec<RelativePath>> {
+        let conn = self.pool.get().context("get connection")?;
+        let mut stmt = conn.prepare(
+            "SELECT i.path FROM image_tags it JOIN tags t ON t.id = it.tag_id JOIN images i ON i.id = it.image_id WHERE t.name = ?1 ORDER BY i.path",
+        )?;
+        let rows = stmt.query_map([name], |r| r.get::<_, String>(0))?;
+        rows.map(|r| Ok(RelativePath(PathBuf::from(r?))))
+            .collect::<Result<Vec<_>>>()
+    }
+
+    /// Ensure a collection exists, returning its id.
+    pub fn create_collection(&self, name: &str) -> Result<i64> {
+        let conn = self.pool.get().context("get connection")?;
+        conn.execute(
+            "INSERT OR IGNORE INTO collections (name) VALUES (?1)",
+            [name],
+        )?;
+        Ok(
+            conn.query_row("SELECT id FROM collections WHERE name = ?1", [name], |r| {
+                r.get(0)
+            })?,
+        )
+    }
+
+    /// Add the image at `relative_path` to `name` (creating the collection if needed).
+    pub fn add_to_collection(&self, name: &str, relative_path: &RelativePath) -> Result<()> {
+        let collection_id = self.create_collection(name)?;
+        let image_id = self.image_id_for(relative_path)?;
+        let conn = self.pool.get().context("get connection")?;
+        conn.execute(
+            "INSERT OR IGNORE INTO collection_images (collection_id, image_id) VALUES (?1, ?2)",
+            params![collection_id, image_id],
+        )?;
+        Ok(())
+    }
+
+    /// Remove the image at `relative_path` from `name`.
+    pub fn remove_from_collection(&self, name: &str, relative_path: &RelativePath) -> Result<()> {
+        let image_id = self.image_id_for(relative_path)?;
+        let conn = self.pool.get().context("get connection")?;
+        conn.execute(
+            "DELETE FROM collection_images WHERE image_id = ?1 AND collection_id = (SELECT id FROM collections WHERE name = ?2)",
+            params![image_id, name],
+        )?;
+        Ok(())
+    }
+
+    /// List the relative paths of images in `name`, ordered by path.
+    pub fn collection_images(&self, name: &str) -> Result<Vec<RelativePath>> {
+        let conn = self.pool.get().context("get connection")?;
+        let mut stmt = conn.prepare(
+            "SELECT i.path FROM collection_images ci JOIN collections c ON c.id = ci.collection_id JOIN images i ON i.id = ci.image_id WHERE c.name = ?1 ORDER BY i.path",
+        )?;
+        let rows = stmt.query_map([name], |r| r.get::<_, String>(0))?;
+        rows.map(|r| Ok(RelativePath(PathBuf::from(r?))))
+            .collect::<Result<Vec<_>>>()
+    }
+
+    /// List all collection names, alphabetically.
+    pub fn list_collections(&self) -> Result<Vec<String>> {
+        let conn = self.pool.get().context("get connection")?;
+        let mut stmt = conn.prepare("SELECT name FROM collections ORDER BY name")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     /// Insert many (relative_path, hash, normalized_embedding) rows in one transaction.
     ///
     /// Paths are expected to already be relative to `parent_dir` (matching the
@@ -1312,6 +1452,35 @@ mod tests {
         assert_eq!(db.list_favorites().unwrap(), vec![p.clone()]);
         assert_eq!(db.toggle_favorite(&p).unwrap(), false);
         assert_eq!(db.is_favorite(&p).unwrap(), false);
+
+        // Remove the unique temp dir (grandparent of the .imgfind/imgfind.db path).
+        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn tag_and_collection_roundtrip() {
+        let db_path = temp_db_path();
+        let db = Database::new(&db_path).expect("create db");
+
+        // Insert an image directly so the stored path is a known relative value.
+        let conn = db.pool.get().expect("get conn");
+        conn.execute(
+            "INSERT INTO images (id, path, hash) VALUES (1, 'a.jpg', 'h')",
+            [],
+        )
+        .expect("insert image");
+        drop(conn);
+
+        let p = RelativePath(PathBuf::from("a.jpg"));
+        db.tag_image(&p, "cats").unwrap();
+        assert_eq!(db.tags_for_image(&p).unwrap(), vec!["cats".to_string()]);
+        assert_eq!(db.images_by_tag("cats").unwrap(), vec![p.clone()]);
+        db.untag_image(&p, "cats").unwrap();
+        assert!(db.tags_for_image(&p).unwrap().is_empty());
+        db.create_collection("trip").unwrap();
+        db.add_to_collection("trip", &p).unwrap();
+        assert_eq!(db.collection_images("trip").unwrap(), vec![p.clone()]);
+        assert_eq!(db.list_collections().unwrap(), vec!["trip".to_string()]);
 
         // Remove the unique temp dir (grandparent of the .imgfind/imgfind.db path).
         let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
