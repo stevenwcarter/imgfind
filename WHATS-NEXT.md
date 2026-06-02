@@ -33,16 +33,6 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - Notes: Distinct from W34 (reverse search by *uploaded* file) — this one searches by an already-indexed path.
 - [ ] execute   [ ] skip
 
-### W4. Pagination & result-limit params on the REST search endpoint (API — src/api/search.rs:80)
-- Lens: ux
-- Score: 4.00 (value 4 / effort S)
-- What: Accept `?limit=N&offset=M` on `GET /api/v1/search/{query}` (currently hardcoded to 80) and thread them through to the query layer.
-- Why: Web/API clients can't control result volume or implement "load more"; the SPA always pulls all 80 results, wasting bandwidth and slowing first paint.
-- Blocked by: —
-- Notes: `search_with_thumbnails_raw()` already supports limit+offset; merged with the unblock-debt finding on the same route (lower effort S kept). Pairs well with W41 (lazy thumbnail loading).
-- [x] execute   [ ] skip
-> in-flight (handed to /ship-it on 2026-06-01)
-
 ### W7. Persist the search query in the URL for shareable links and back/forward (React SPA — site/src/page/Images.tsx:28)
 - Lens: ux
 - Score: 4.00 (value 4 / effort S)
@@ -245,35 +235,6 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - Blocked by: —
 - Notes: Depends on W33 (backend metadata filters) being in place.
 - [ ] execute   [ ] skip
-
-### W41. Lazy thumbnail loading: metadata-first search responses (search/web serving — src/database.rs:248)
-- Lens: scale-perf
-- Score: 1.50 (value 3 / effort M)
-- What: Return `(path, distance)` for the first page metadata-only and have the client lazy-load thumbnails from the existing `/thumb` endpoint on scroll, instead of base64-encoding all 80 up front.
-- Why: Encoding/decoding 80 thumbnails per search is CPU-bound and base64 doubles payload size; deferring gives first results in ~50 ms — a large perceived-latency win.
-- Blocked by: —
-- Notes: DB query already supports OFFSET; pairs with W4 (pagination).
-- [x] execute   [ ] skip
-> in-flight (handed to /ship-it on 2026-06-01)
-
-### W42. Parallel thumbnail generation during indexing (thumbnails — src/main.rs:343)
-- Lens: scale-perf
-- Score: 1.50 (value 3 / effort M)
-- What: Generate thumbnails in a rayon pool as part of the indexing run (currently a separate `thumbnails` command), reusing the par_iter + channel-writer pattern already in thumbnail.rs.
-- Why: Thumbnail resize is CPU-bound and currently sequential; parallelizing gains 4-8× on multi-core machines and folds thumbnailing into one indexing pass.
-- Blocked by: —
-- [x] execute   [ ] skip
-> in-flight (handed to /ship-it on 2026-06-01)
-
-### W43. Versioned schema-migration system (database — src/database.rs:58)
-- Lens: unblock-debt
-- Score: 1.50 (value 3 / effort M)
-- What: Replace ad-hoc `CREATE TABLE IF NOT EXISTS` in `initialize_schema` with a versioned migration runner (a `schema_version` table, or wire up the already-present-but-unused diesel_migrations).
-- Why: Upcoming features (W36 user tables, W52 model_id column) need coordinated, safe schema evolution; without migrations, upgrades risk old code hitting new schema or vice versa.
-- Blocked by: —
-- Notes: A light hand-rolled runner is simpler than full diesel integration; the diesel deps are currently dead code.
-- [x] execute   [ ] skip
-> in-flight (handed to /ship-it on 2026-06-01)
 
 ### W44. Show similarity scores beside TUI thumbnails (TUI — src/tui/widget/image.rs)
 - Lens: ux
