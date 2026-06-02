@@ -12,6 +12,13 @@ pub struct ImageBoundsResult {
 }
 
 #[derive(GraphQLObject)]
+pub struct ImageResult {
+    pub path: String,
+    pub distance: f64,
+    pub file_size: Option<i32>,
+}
+
+#[derive(GraphQLObject)]
 pub struct ImageLocation {
     pub path: String,
     pub latitude: f64,
@@ -27,12 +34,66 @@ pub struct Query;
 #[juniper::graphql_object(Context = GraphQLContext)]
 impl Query {
     #[graphql(name = "search")]
-    pub fn search(_context: &GraphQLContext) -> FieldResult<Vec<String>> {
-        Ok(vec![
-            "Search result 1".to_string(),
-            "Search result 2".to_string(),
-            "Search result 3".to_string(),
-        ])
+    pub fn search(
+        context: &GraphQLContext,
+        query: String,
+        limit: Option<i32>,
+        offset: Option<i32>,
+    ) -> FieldResult<Vec<ImageResult>> {
+        let emb = context.embedder.get_text_embedding(&query)?;
+        let sc = crate::config::SearchConfig::default();
+        let rows = crate::search::SearchEngine::new(&context.db).search_meta(
+            emb,
+            limit.unwrap_or(80) as usize,
+            offset.unwrap_or(0) as usize,
+            sc.distance_threshold,
+            sc.max_k,
+        )?;
+        Ok(rows
+            .into_iter()
+            .map(|(path, distance, file_size)| ImageResult {
+                path,
+                distance: distance as f64,
+                file_size: file_size.map(|s| s as i32),
+            })
+            .collect())
+    }
+
+    #[graphql(name = "tags")]
+    pub fn tags(context: &GraphQLContext) -> FieldResult<Vec<String>> {
+        Ok(context.db.list_tags()?)
+    }
+
+    #[graphql(name = "tagsForImage")]
+    pub fn tags_for_image(context: &GraphQLContext, path: String) -> FieldResult<Vec<String>> {
+        Ok(context
+            .db
+            .tags_for_image(&RelativePath(std::path::PathBuf::from(path)))?)
+    }
+
+    #[graphql(name = "collections")]
+    pub fn collections(context: &GraphQLContext) -> FieldResult<Vec<String>> {
+        Ok(context.db.list_collections()?)
+    }
+
+    #[graphql(name = "collectionImages")]
+    pub fn collection_images(context: &GraphQLContext, name: String) -> FieldResult<Vec<String>> {
+        Ok(context
+            .db
+            .collection_images(&name)?
+            .into_iter()
+            .map(|p| p.as_str().to_string())
+            .collect())
+    }
+
+    #[graphql(name = "imagesByTag")]
+    pub fn images_by_tag(context: &GraphQLContext, name: String) -> FieldResult<Vec<String>> {
+        Ok(context
+            .db
+            .images_by_tag(&name)?
+            .into_iter()
+            .map(|p| p.as_str().to_string())
+            .collect())
     }
 
     #[graphql(name = "favorites")]
@@ -106,14 +167,62 @@ impl Mutation {
     pub fn toggle_favorite(context: &GraphQLContext, path: String) -> FieldResult<bool> {
         Ok(context.db.toggle_favorite(&RelativePath(path.into()))?)
     }
+
+    #[graphql(name = "createTag")]
+    pub fn create_tag(context: &GraphQLContext, name: String) -> FieldResult<bool> {
+        context.db.create_tag(&name)?;
+        Ok(true)
+    }
+
+    #[graphql(name = "tagImage")]
+    pub fn tag_image(context: &GraphQLContext, path: String, tag: String) -> FieldResult<bool> {
+        context
+            .db
+            .tag_image(&RelativePath(std::path::PathBuf::from(path)), &tag)?;
+        Ok(true)
+    }
+
+    #[graphql(name = "untagImage")]
+    pub fn untag_image(context: &GraphQLContext, path: String, tag: String) -> FieldResult<bool> {
+        context
+            .db
+            .untag_image(&RelativePath(std::path::PathBuf::from(path)), &tag)?;
+        Ok(true)
+    }
+
+    #[graphql(name = "createCollection")]
+    pub fn create_collection(context: &GraphQLContext, name: String) -> FieldResult<bool> {
+        context.db.create_collection(&name)?;
+        Ok(true)
+    }
+
+    #[graphql(name = "addToCollection")]
+    pub fn add_to_collection(
+        context: &GraphQLContext,
+        name: String,
+        path: String,
+    ) -> FieldResult<bool> {
+        context
+            .db
+            .add_to_collection(&name, &RelativePath(std::path::PathBuf::from(path)))?;
+        Ok(true)
+    }
+
+    #[graphql(name = "removeFromCollection")]
+    pub fn remove_from_collection(
+        context: &GraphQLContext,
+        name: String,
+        path: String,
+    ) -> FieldResult<bool> {
+        context
+            .db
+            .remove_from_collection(&name, &RelativePath(std::path::PathBuf::from(path)))?;
+        Ok(true)
+    }
 }
 
 pub type Schema = RootNode<Query, Mutation, EmptySubscription<GraphQLContext>>;
 
 pub fn create_schema() -> Schema {
-    Schema::new(
-        Query,
-        Mutation,
-        EmptySubscription::<GraphQLContext>::new(),
-    )
+    Schema::new(Query, Mutation, EmptySubscription::<GraphQLContext>::new())
 }
