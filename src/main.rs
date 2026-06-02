@@ -53,6 +53,9 @@ enum Commands {
         /// Skip generating thumbnails during indexing (generate later with `thumbnails`).
         #[arg(long)]
         no_thumbnails: bool,
+        /// Embedding model to use for this run (sets it active first).
+        #[arg(long)]
+        model: Option<String>,
     },
     Metadata {
         #[arg(short, long)]
@@ -90,6 +93,10 @@ enum Commands {
         /// Search all images in the database
         #[arg(short, long)]
         all: bool,
+
+        /// Embedding model to use for this run (sets it active first).
+        #[arg(long)]
+        model: Option<String>,
     },
     /// Clean up missing files from database
     Clean,
@@ -118,6 +125,19 @@ enum Commands {
         #[arg(short, long, default_value_t = 6060)]
         port: usize,
     },
+    /// Manage embedding models
+    Models {
+        #[command(subcommand)]
+        action: ModelsAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ModelsAction {
+    /// List registered models (active marked with *)
+    List,
+    /// Set the active model
+    Use { name: String },
 }
 
 #[derive(Subcommand)]
@@ -162,6 +182,7 @@ async fn main() -> Result<()> {
             root,
             batch_size,
             no_thumbnails,
+            model,
         } => {
             let db_path = if root {
                 get_local_db_path()?
@@ -169,6 +190,9 @@ async fn main() -> Result<()> {
                 get_db_path(None)?
             };
             let mut db = Database::new(&db_path)?;
+            if let Some(m) = model {
+                db.set_active_model(&m)?;
+            }
             index_directory(&mut db, &dir, recursive, quiet, batch_size, no_thumbnails)?;
         }
         Commands::Search {
@@ -179,9 +203,13 @@ async fn main() -> Result<()> {
             recursive,
             all,
             display,
+            model,
         } => {
             let db_path = get_db_path(None)?;
             let db = Database::new(&db_path)?;
+            if let Some(m) = model {
+                db.set_active_model(&m)?;
+            }
             let config = config::Config::load()?;
             let distance_threshold = threshold.unwrap_or(config.search.distance_threshold);
             let max_k = config.search.max_k;
@@ -219,6 +247,21 @@ async fn main() -> Result<()> {
             let db_path = get_db_path(dir.as_deref())?;
             let db = Database::new(&db_path)?;
             serve(db, dir.unwrap_or(".".to_owned()), host, port).await?;
+        }
+        Commands::Models { action } => {
+            let db_path = get_db_path(None)?;
+            let db = Database::new(&db_path)?;
+            match action {
+                ModelsAction::List => {
+                    for (name, dim, active) in db.list_models()? {
+                        println!("{} {} (dim {})", if active { "*" } else { " " }, name, dim);
+                    }
+                }
+                ModelsAction::Use { name } => {
+                    db.set_active_model(&name)?;
+                    println!("Active model: {name}");
+                }
+            }
         }
     }
 
