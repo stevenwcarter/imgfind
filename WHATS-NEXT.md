@@ -192,16 +192,6 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - Notes: Needs a clipboard crate (`arboard`) and the `open` crate for the viewer.
 - [ ] execute   [ ] skip
 
-### W36. Persistence schema for user-created metadata (tags, collections, favorites) (database — src/database.rs:112)
-- Lens: unblock-debt
-- Score: 2.00 (value 4 / effort M)
-- What: Add `user_tags`, `image_tags`, `collections`, `favorites` tables to store user annotations separately from EXIF, plus filtering by tag/collection.
-- Why: `image_metadata` holds only machine-extracted EXIF; any curation feature needs user-data tables. Foundation (with W32) for W55 (tagging) and W54 (albums).
-- Blocked by: —
-- Notes: Pairs with W32 (mutation root) and W43 (migrations) to evolve the schema safely.
-- [x] execute   [ ] skip
-> in-flight (handed to /ship-it on 2026-06-01)
-
 ### W37. Persistent embedding cache to skip re-computation on re-index (indexing — src/main.rs:254)
 - Lens: scale-perf
 - Score: 1.50 (value 3 / effort M)
@@ -210,15 +200,6 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - Blocked by: —
 - Notes: Invalidate only when the content hash changes.
 - [x] execute   [ ] skip
-
-### W38. Shell completion scripts (bash/zsh/fish) (CLI — src/main.rs:22)
-- Lens: ux
-- Score: 1.50 (value 3 / effort M)
-- What: Add an `imgfind completions {bash|zsh|fish}` command that emits a completion script (via `clap_complete`).
-- Why: Power users expect tab completion for subcommands and flags; without it they must memorize names or re-run `--help`.
-- Blocked by: —
-- [x] execute   [ ] skip
-> in-flight (handed to /ship-it on 2026-06-01)
 
 ### W39. Bulk export of search results as a zip (API/CLI — src/api/mod.rs)
 - Lens: feature-gap
@@ -237,35 +218,6 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - Blocked by: —
 - Notes: Depends on W33 (backend metadata filters) being in place.
 - [ ] execute   [ ] skip
-
-### W44. Show similarity scores beside TUI thumbnails (TUI — src/tui/widget/image.rs)
-- Lens: ux
-- Score: 1.50 (value 3 / effort M)
-- What: Render each result's similarity score as a small label/bar near its thumbnail in the 3×3 grid.
-- Why: Users can't judge result quality at a glance in the TUI; the CLI shows scores, so hiding them in the TUI is inconsistent.
-- Blocked by: —
-- [x] execute   [ ] skip
-> in-flight (handed to /ship-it on 2026-06-01)
-
-### W45. Implement (or remove) the GraphQL `Query::search` stub (graphql — src/graphql.rs:29)
-- Lens: unblock-debt
-- Score: 1.00 (value 1 / effort S)
-- What: `Query::search` returns hardcoded `"Search result 1/2/3"`; wire it to the real search engine returning image results, or remove it if REST is canonical.
-- Why: A GraphQL search client is impossible while the resolver is a stub; only `imagesByBounds` and REST search work.
-- Blocked by: —
-- Notes: Overlaps bughunt D4 (which frames it as dead-code cleanup); here the forward value is "enable a GraphQL search client".
-- USER NOTE: implement this feature
-- [x] execute (implement this feature)   [ ] skip
-> in-flight (handed to /ship-it on 2026-06-01)
-
-### W46. Async/lazy CLIP model initialization for fast server startup (embeddings — src/main.rs:203)
-- Lens: unblock-debt
-- Score: 1.00 (value 2 / effort M)
-- What: `ClipEmbedder::new()` blocks `serve()` until the model loads; lazy/async-init it in a background task cached in `Arc<OnceCell<_>>`.
-- Why: The server hangs (and health checks time out) until a 1GB+ model loads — a problem for containerized deploys and fast restart/failover.
-- Blocked by: —
-- [x] execute   [ ] skip
-> in-flight (handed to /ship-it on 2026-06-01)
 
 ### W47. Cache embeddings + results for hot repeat text queries (search — src/search.rs)
 - Lens: scale-perf
@@ -293,16 +245,6 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - Blocked by: —
 - [ ] execute   [ ] skip
 
-### W50. Enforce the relative-path invariant with a wrapper type (database — src/database.rs:146)
-- Lens: unblock-debt
-- Score: 1.00 (value 2 / effort M)
-- What: Replace manual `abs_to_relative_path`/`relative_to_abs_path` calls at boundaries with a `RelativePath`/`AbsolutePath` newtype so mixing is a compile error.
-- Why: As path-handling surface grows (tagging, filtering, collections), the risk of storing absolute paths or passing the wrong kind grows; a type makes the invariant unmissable.
-- Blocked by: —
-- Notes: More of a type-safety hardening; consider running it through the `typecheck` sibling instead if that file is created.
-- [x] execute   [ ] skip
-> in-flight (handed to /ship-it on 2026-06-01)
-
 ### W51. Metadata-aware result re-ranking (Search Engine — src/search.rs)
 - Lens: feature-gap
 - Score: 1.00 (value 2 / effort M)
@@ -311,26 +253,6 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - Blocked by: —
 - Notes: Strongest once W33 (metadata filters) exposes these fields to the query layer.
 - [ ] execute   [ ] skip
-
-### W52. Model versioning / multi-model embedding support (embeddings — src/database.rs:75)
-- Lens: unblock-debt
-- Score: 1.00 (value 4 / effort L)
-- What: Add a `model_id` column to `images`/`image_vectors`, make the embedding dimension configurable per model, and let `ClipEmbedder` init select a model (the table is hardcoded to `float[512]` today).
-- Why: Switching CLIP models (ViT-L vs ViT-H, or other vendors) currently requires a schema migration and full re-index; versioning unblocks fine-tuned/domain models and side-by-side quality comparison with gradual re-indexing.
-- Blocked by: —
-- Notes: Best done after W43 (migrations) so the schema change is safe.
-- [x] execute   [ ] skip
-> in-flight (handed to /ship-it on 2026-06-01)
-
-### W53. Parallelize metadata extraction off the indexing critical path (indexing — src/main.rs:401)
-- Lens: scale-perf
-- Score: 1.00 (value 4 / effort L)
-- What: Move inline `extract_image_metadata` into a parallel JoinSet/rayon pass — extract all images concurrently and merge after embedding inserts — instead of blocking per image.
-- Why: Indexing stalls on per-image EXIF read + decode (I/O-bound); parallel extraction unblocks 5-10× throughput at 100+ images.
-- Blocked by: —
-- Notes: Overlaps W29 (batch metadata); could be designed together. Needs careful error handling + transaction management.
-- [x] execute   [ ] skip
-> in-flight (handed to /ship-it on 2026-06-01)
 
 ## Medium
 
