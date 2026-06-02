@@ -480,8 +480,12 @@ impl Database {
         distance_threshold: f32,
         max_k: usize,
     ) -> Result<Vec<(String, f32, Option<i64>)>> {
-        // Use a reasonable k value that's at least the limit but not too large
-        let k = limit.clamp(1, max_k);
+        // vec0's `k` bounds the TOTAL neighbors the virtual table yields, and
+        // OFFSET is applied on top of that set. So `k` must cover the entire
+        // requested window (offset + limit), otherwise pages past the first
+        // get nothing (OFFSET skips all `k` rows). Capped at max_k, which
+        // bounds total reachable results across all pages.
+        let k = (offset + limit).clamp(1, max_k);
 
         // `k` and the distance threshold are interpolated as the vec0 MATCH/k
         // syntax requires literal values (not bound params). Both are trusted
@@ -493,7 +497,7 @@ impl Database {
               LEFT JOIN image_metadata m ON m.image_id = i.id
               WHERE v.embedding MATCH ?1 AND k = {k}
             AND v.distance <= {distance_threshold:.6}
-              ORDER BY v.distance LIMIT {k} OFFSET {offset}"
+              ORDER BY v.distance LIMIT {limit} OFFSET {offset}"
         );
 
         let conn = self
@@ -1212,6 +1216,61 @@ mod tests {
                 .unwrap();
             assert_eq!(n, 1, "table {t} should exist");
         }
+
+        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+    }
+
+    /// Regression test for the pagination bug: vec0's `k` bounds the TOTAL
+    /// neighbors returned, and OFFSET applies on top. If `k` only covers
+    /// `limit` (not `offset + limit`), page 2 gets zero rows. With the fix,
+    /// page 2 must return the next slice in distance order.
+    #[test]
+    fn search_meta_paginates_past_first_page() {
+        let db_path = temp_db_path();
+        let db = Database::new(&db_path).expect("create db");
+        let conn = db.pool.get().expect("get conn");
+
+        // Insert 10 images with embeddings whose first component decreases as
+        // the id grows. The query embedding is the unit vector along axis 0, so
+        // distance increases monotonically with id => a deterministic ordering.
+        for id in 1..=10i64 {
+            conn.execute(
+                "INSERT INTO images (id, path, hash) VALUES (?1, ?2, ?3)",
+                params![id, format!("img{id}.jpg"), format!("h{id}")],
+            )
+            .expect("insert image");
+
+            let mut emb = vec![0.0f32; 512];
+            // Larger id -> smaller axis-0 component -> larger cosine distance.
+            emb[0] = 1.0 - (id as f32) * 0.01;
+            emb[1] = (id as f32) * 0.01;
+            conn.execute(
+                "INSERT INTO image_vectors (rowid, embedding) VALUES (?1, ?2)",
+                params![id, emb.as_slice().as_bytes()],
+            )
+            .expect("insert vector");
+        }
+        drop(conn);
+
+        let mut query = vec![0.0f32; 512];
+        query[0] = 1.0;
+
+        // Page 1: first 4 (nearest) results.
+        let page1 = db
+            .search_similar_images_meta(&query, 4, 0, 2.0, 100)
+            .expect("page 1");
+        // Page 2: next 4 results. Pre-fix this returned ZERO rows.
+        let page2 = db
+            .search_similar_images_meta(&query, 4, 4, 2.0, 100)
+            .expect("page 2");
+
+        assert_eq!(page1.len(), 4, "page 1 should be full");
+        assert_eq!(page2.len(), 4, "page 2 should return the next slice");
+
+        let p1_paths: Vec<&str> = page1.iter().map(|(p, ..)| p.as_str()).collect();
+        let p2_paths: Vec<&str> = page2.iter().map(|(p, ..)| p.as_str()).collect();
+        assert_eq!(p1_paths, ["img1.jpg", "img2.jpg", "img3.jpg", "img4.jpg"]);
+        assert_eq!(p2_paths, ["img5.jpg", "img6.jpg", "img7.jpg", "img8.jpg"]);
 
         let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
     }
