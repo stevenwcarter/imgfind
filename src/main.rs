@@ -49,6 +49,9 @@ enum Commands {
         /// Number of images to embed per CLIP batch (default: [index].batch_size config, 32)
         #[arg(long)]
         batch_size: Option<usize>,
+        /// Skip generating thumbnails during indexing (generate later with `thumbnails`).
+        #[arg(long)]
+        no_thumbnails: bool,
     },
     Metadata {
         #[arg(short, long)]
@@ -157,6 +160,7 @@ async fn main() -> Result<()> {
             quiet,
             root,
             batch_size,
+            no_thumbnails,
         } => {
             let db_path = if root {
                 get_local_db_path()?
@@ -164,7 +168,7 @@ async fn main() -> Result<()> {
                 get_db_path(None)?
             };
             let mut db = Database::new(&db_path)?;
-            index_directory(&mut db, &dir, recursive, quiet, batch_size)?;
+            index_directory(&mut db, &dir, recursive, quiet, batch_size, no_thumbnails)?;
         }
         Commands::Search {
             prompt,
@@ -248,9 +252,7 @@ async fn serve(db: Database, directory: String, host: String, port: usize) -> Re
 /// negative inputs would render invalid or nonsensical SQL. Reject them up front
 /// with a clear message instead of failing opaquely at query time.
 fn parse_threshold(s: &str) -> Result<f32, String> {
-    let v: f32 = s
-        .parse()
-        .map_err(|_| format!("invalid number: {s}"))?;
+    let v: f32 = s.parse().map_err(|_| format!("invalid number: {s}"))?;
     if !v.is_finite() || v < 0.0 {
         return Err("threshold must be a finite, non-negative number".to_string());
     }
@@ -267,6 +269,7 @@ fn index_directory(
     recursive: bool,
     quiet: bool,
     batch_size_override: Option<usize>,
+    no_thumbnails: bool,
 ) -> Result<()> {
     if !quiet {
         println!("Indexing directory: {}", dir);
@@ -562,6 +565,19 @@ fn index_directory(
     info!("  Indexed: {}", indexed_count);
     info!("  Skipped: {}", skipped_count);
     info!("  Failed: {}", error_count);
+
+    // Generate thumbnails for any images still missing a 300px thumbnail. `count`
+    // is a SQL LIMIT (see get_images_without_thumbnails), so usize::MAX makes it
+    // effectively unbounded and covers every missing thumbnail after this run.
+    if !no_thumbnails {
+        let made = generate_missing_thumbnails_batch(db, 300, usize::MAX).unwrap_or_else(|e| {
+            warn!("thumbnail generation failed (non-fatal): {e:#}");
+            0
+        });
+        if !quiet {
+            info!("Generated {made} thumbnails");
+        }
+    }
 
     if let Err(e) = db.checkpoint_wal() {
         warn!("WAL checkpoint failed (non-fatal): {e:#}");
