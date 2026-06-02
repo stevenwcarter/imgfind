@@ -210,7 +210,6 @@ Last triage: 2026-05-31 against `whats-next-skill/2026-05-31` @ 75d77ca.
 - Blocked by: —
 - Notes: Invalidate only when the content hash changes.
 - [x] execute   [ ] skip
-> in-flight (handed to /ship-it on 2026-06-01)
 
 ### W38. Shell completion scripts (bash/zsh/fish) (CLI — src/main.rs:22)
 - Lens: ux
