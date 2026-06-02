@@ -35,17 +35,18 @@ pub fn extract_missing_metadata(db: &mut Database, quiet: bool, count: usize) ->
         let mut metadata_extracted = 0;
         let mut failed = 0;
         for (image_id, image_path, _hash) in images_without_metadata {
+            let image_path = image_path.as_str();
             if !quiet {
                 metadata_progress.set_message(format!(
                     "{}",
-                    std::path::Path::new(&image_path)
+                    std::path::Path::new(image_path.as_ref())
                         .file_name()
                         .unwrap_or_default()
                         .to_string_lossy()
                 ));
             }
 
-            match extract_image_metadata(&image_path) {
+            match extract_image_metadata(image_path.as_ref()) {
                 Ok(metadata) => {
                     if let Err(e) = db.insert_or_update_metadata(image_id, &metadata) {
                         warn!(

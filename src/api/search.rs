@@ -62,9 +62,10 @@ async fn thumb(
     let size = size.parse::<u32>().unwrap_or(300);
     let db = &context.db;
 
-    // Get the image hash from the database
+    // Get the image hash from the database. `filename` is the relative path the
+    // SPA requested; wrap it at the boundary.
     let hash = db
-        .get_image_hash(&filename)
+        .get_image_hash(&crate::RelativePath(std::path::PathBuf::from(&filename)))
         .with_context(|| format!("Failed to get hash for image: {}", filename))?;
 
     // Generate or retrieve thumbnail

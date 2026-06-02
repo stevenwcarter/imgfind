@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use walkdir::WalkDir;
 
+use imgfind::AbsolutePath;
 use imgfind::abs_to_relative_path;
 use imgfind::database::{Database, extract_image_metadata};
 use imgfind::indexing::chunk_pending;
@@ -421,7 +422,7 @@ fn index_directory(
         };
 
         // Check if already indexed with same hash
-        if db.is_image_indexed(&path_str, &hash)? {
+        if db.is_image_indexed(&AbsolutePath(abs_path.clone()), &hash)? {
             debug!("Skipping already indexed: {}", path_str);
             skipped_count += 1;
             progress_bar.inc(1);
@@ -514,7 +515,7 @@ fn index_directory(
         // extraction stays per-image and is non-critical.
         for (abs_path_str, _, _) in survivors.iter() {
             match extract_image_metadata(abs_path_str) {
-                Ok(metadata) => match db.get_image_id(abs_path_str) {
+                Ok(metadata) => match db.get_image_id(&AbsolutePath(PathBuf::from(abs_path_str))) {
                     Ok(image_id) => {
                         if let Err(e) = db.insert_or_update_metadata(image_id, &metadata) {
                             warn!("Failed to store metadata for {}: {}", abs_path_str, e);
@@ -768,7 +769,7 @@ fn show_status(db: &Database, db_path: &PathBuf) -> Result<()> {
         let sample_images = db.get_sample_images(5)?;
         println!("\nSample images:");
         for (i, path) in sample_images.iter().enumerate() {
-            println!("  {}. {}", i + 1, path);
+            println!("  {}. {}", i + 1, path.as_str());
         }
         if total_images > 5 {
             println!("  ... and {} more", total_images - 5);

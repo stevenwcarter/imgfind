@@ -2,6 +2,7 @@ use base64::{Engine, engine::general_purpose};
 use juniper::{EmptySubscription, FieldResult, GraphQLObject, RootNode};
 use tracing::info;
 
+use crate::RelativePath;
 use crate::context::GraphQLContext;
 
 #[derive(GraphQLObject)]
@@ -36,12 +37,18 @@ impl Query {
 
     #[graphql(name = "favorites")]
     pub fn favorites(context: &GraphQLContext) -> FieldResult<Vec<String>> {
-        Ok(context.db.list_favorites()?)
+        // Boundary: serialize stored relative paths back to plain strings.
+        Ok(context
+            .db
+            .list_favorites()?
+            .into_iter()
+            .map(|p| p.as_str().into_owned())
+            .collect())
     }
 
     #[graphql(name = "isFavorite")]
     pub fn is_favorite(context: &GraphQLContext, path: String) -> FieldResult<bool> {
-        Ok(context.db.is_favorite(&path)?)
+        Ok(context.db.is_favorite(&RelativePath(path.into()))?)
     }
 
     #[graphql(name = "imagesByBounds")]
@@ -97,7 +104,7 @@ pub struct Mutation;
 impl Mutation {
     #[graphql(name = "toggleFavorite")]
     pub fn toggle_favorite(context: &GraphQLContext, path: String) -> FieldResult<bool> {
-        Ok(context.db.toggle_favorite(&path)?)
+        Ok(context.db.toggle_favorite(&RelativePath(path.into()))?)
     }
 }
 

@@ -1,4 +1,4 @@
-use crate::{abs_to_relative_path, get_db_parent_dir, relative_to_abs_path};
+use crate::{AbsolutePath, RelativePath, get_db_parent_dir};
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose};
 use hashbrown::HashMap;
@@ -210,12 +210,17 @@ fn migration_001_baseline(conn: &Connection) -> Result<()> {
 }
 
 impl Database {
-    pub fn insert_image(&mut self, path: &str, hash: &str, embedding: &[f32]) -> Result<()> {
+    pub fn insert_image(
+        &mut self,
+        path: &AbsolutePath,
+        hash: &str,
+        embedding: &[f32],
+    ) -> Result<()> {
         // Convert absolute path to relative path for storage
-        let abs_path = Path::new(path);
-        let rel_path = abs_to_relative_path(abs_path, &self.parent_dir)
-            .with_context(|| format!("Failed to convert path {} to relative path", path))?;
-        let rel_path_str = rel_path.to_string_lossy();
+        let rel_path = path.to_relative(&self.parent_dir).with_context(|| {
+            format!("Failed to convert path {} to relative path", path.as_str())
+        })?;
+        let rel_path_str = rel_path.as_str();
 
         // Start a transaction for consistency
         {
@@ -258,12 +263,13 @@ impl Database {
 
     /// Toggle the favorite flag for the image at `relative_path`, returning the
     /// new state (`true` = now favorited, `false` = now un-favorited).
-    pub fn toggle_favorite(&self, relative_path: &str) -> Result<bool> {
+    pub fn toggle_favorite(&self, relative_path: &RelativePath) -> Result<bool> {
+        let relative_path = relative_path.as_str();
         let conn = self.pool.get().context("get connection")?;
         let image_id: i64 = conn
             .query_row(
                 "SELECT id FROM images WHERE path = ?1",
-                [relative_path],
+                [relative_path.as_ref()],
                 |r| r.get(0),
             )
             .with_context(|| format!("no indexed image at {relative_path}"))?;
@@ -286,12 +292,13 @@ impl Database {
 
     /// Return whether the image at `relative_path` is favorited. Unknown paths
     /// are not favorites.
-    pub fn is_favorite(&self, relative_path: &str) -> Result<bool> {
+    pub fn is_favorite(&self, relative_path: &RelativePath) -> Result<bool> {
+        let relative_path = relative_path.as_str();
         let conn = self.pool.get().context("get connection")?;
         let id: Option<i64> = conn
             .query_row(
                 "SELECT id FROM images WHERE path = ?1",
-                [relative_path],
+                [relative_path.as_ref()],
                 |r| r.get(0),
             )
             .optional()?;
@@ -310,13 +317,14 @@ impl Database {
 
     /// List the relative paths of all favorited images, most recently favorited
     /// first.
-    pub fn list_favorites(&self) -> Result<Vec<String>> {
+    pub fn list_favorites(&self) -> Result<Vec<RelativePath>> {
         let conn = self.pool.get().context("get connection")?;
         let mut stmt = conn.prepare(
             "SELECT i.path FROM favorites f JOIN images i ON i.id = f.image_id ORDER BY f.created_at DESC",
         )?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        rows.map(|r| Ok(RelativePath(PathBuf::from(r?))))
+            .collect::<Result<Vec<_>>>()
     }
 
     /// Insert many (relative_path, hash, normalized_embedding) rows in one transaction.
@@ -362,12 +370,12 @@ impl Database {
         Ok(())
     }
 
-    pub fn is_image_indexed(&self, path: &str, hash: &str) -> Result<bool> {
+    pub fn is_image_indexed(&self, path: &AbsolutePath, hash: &str) -> Result<bool> {
         // Convert absolute path to relative path for database lookup
-        let abs_path = Path::new(path);
-        let rel_path = abs_to_relative_path(abs_path, &self.parent_dir)
-            .with_context(|| format!("Failed to convert path {} to relative path", path))?;
-        let rel_path_str = rel_path.to_string_lossy();
+        let rel_path = path.to_relative(&self.parent_dir).with_context(|| {
+            format!("Failed to convert path {} to relative path", path.as_str())
+        })?;
+        let rel_path_str = rel_path.as_str();
 
         let conn = self
             .pool
@@ -563,9 +571,9 @@ impl Database {
             let (id, rel_path) = row?;
 
             // Convert relative path to absolute path for file existence check
-            let abs_path = relative_to_abs_path(Path::new(&rel_path), &self.parent_dir);
+            let abs_path = RelativePath(PathBuf::from(rel_path)).to_absolute(&self.parent_dir);
 
-            if !abs_path.exists() {
+            if !abs_path.as_path().exists() {
                 to_delete.push(id);
             }
         }
@@ -598,7 +606,7 @@ impl Database {
         Ok(count)
     }
 
-    pub fn get_sample_images(&self, limit: usize) -> Result<Vec<String>> {
+    pub fn get_sample_images(&self, limit: usize) -> Result<Vec<AbsolutePath>> {
         let conn = self
             .pool
             .get()
@@ -608,8 +616,7 @@ impl Database {
         let image_iter = stmt.query_map([limit], |row| {
             let rel_path: String = row.get(0)?;
             // Convert relative path back to absolute path
-            let abs_path = relative_to_abs_path(Path::new(&rel_path), &self.parent_dir);
-            Ok(abs_path.to_string_lossy().to_string())
+            Ok(RelativePath(PathBuf::from(rel_path)).to_absolute(&self.parent_dir))
         })?;
 
         let mut results = Vec::new();
@@ -654,13 +661,13 @@ impl Database {
     }
 
     /// Get the hash for an image by its path
-    pub fn get_image_hash(&self, path: &str) -> Result<String> {
+    pub fn get_image_hash(&self, path: &RelativePath) -> Result<String> {
         let conn = self
             .pool
             .get()
             .context("Failed to get DB connection to get image hash")?;
         let mut stmt = conn.prepare("SELECT hash FROM images WHERE path = ?1")?;
-        let hash: String = stmt.query_row(params![&path], |row| row.get(0))?;
+        let hash: String = stmt.query_row(params![path.as_str().as_ref()], |row| row.get(0))?;
         Ok(hash)
     }
 
@@ -670,7 +677,7 @@ impl Database {
         &self,
         size: u32,
         limit: usize,
-    ) -> Result<Vec<(String, String)>> {
+    ) -> Result<Vec<(AbsolutePath, String)>> {
         let query = "
             SELECT i.path, i.hash 
             FROM images i 
@@ -690,10 +697,9 @@ impl Database {
                 let hash: String = row.get(1)?;
 
                 // Convert relative path back to absolute path
-                let abs_path = relative_to_abs_path(Path::new(&rel_path), &self.parent_dir);
-                let abs_path_str = abs_path.to_string_lossy().to_string();
+                let abs_path = RelativePath(PathBuf::from(rel_path)).to_absolute(&self.parent_dir);
 
-                Ok((abs_path_str, hash))
+                Ok((abs_path, hash))
             })?;
 
             let mut images = Vec::new();
@@ -759,7 +765,10 @@ impl Database {
     }
 
     /// Get images without metadata
-    pub fn get_images_without_metadata(&self, limit: usize) -> Result<Vec<(i64, String, String)>> {
+    pub fn get_images_without_metadata(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<(i64, AbsolutePath, String)>> {
         let query = "
             SELECT i.id, i.path, i.hash 
             FROM images i 
@@ -779,10 +788,9 @@ impl Database {
             let hash: String = row.get(2)?;
 
             // Convert relative path back to absolute path
-            let abs_path = relative_to_abs_path(Path::new(&rel_path), &self.parent_dir);
-            let abs_path_str = abs_path.to_string_lossy().to_string();
+            let abs_path = RelativePath(PathBuf::from(rel_path)).to_absolute(&self.parent_dir);
 
-            Ok((id, abs_path_str, hash))
+            Ok((id, abs_path, hash))
         })?;
 
         let mut images = Vec::new();
@@ -832,12 +840,11 @@ impl Database {
             let datetime_taken: Option<String> = row.get(6)?;
 
             // Convert relative path back to absolute path for thumbnail generation
-            let abs_path = relative_to_abs_path(Path::new(&rel_path), &self.parent_dir);
-            let abs_path_str = abs_path.to_string_lossy().to_string();
+            let abs_path = RelativePath(PathBuf::from(&rel_path)).to_absolute(&self.parent_dir);
 
             Ok(ImageWithMetadata {
                 path: rel_path, // Use relative path for frontend
-                absolute_path: abs_path_str,
+                absolute_path: abs_path.as_str().into_owned(),
                 hash,
                 latitude,
                 longitude,
@@ -873,12 +880,12 @@ impl Database {
     }
 
     /// Get the image ID by path
-    pub fn get_image_id(&self, path: &str) -> Result<i64> {
+    pub fn get_image_id(&self, path: &AbsolutePath) -> Result<i64> {
         // Convert absolute path to relative path for database lookup
-        let abs_path = Path::new(path);
-        let rel_path = abs_to_relative_path(abs_path, &self.parent_dir)
-            .with_context(|| format!("Failed to convert path {} to relative path", path))?;
-        let rel_path_str = rel_path.to_string_lossy();
+        let rel_path = path.to_relative(&self.parent_dir).with_context(|| {
+            format!("Failed to convert path {} to relative path", path.as_str())
+        })?;
+        let rel_path_str = rel_path.as_str();
 
         let conn = self
             .pool
@@ -1179,13 +1186,13 @@ mod tests {
         .expect("insert image");
         drop(conn);
 
-        let p = "a.jpg";
-        assert_eq!(db.is_favorite(p).unwrap(), false);
-        assert_eq!(db.toggle_favorite(p).unwrap(), true);
-        assert_eq!(db.is_favorite(p).unwrap(), true);
-        assert_eq!(db.list_favorites().unwrap(), vec![p.to_string()]);
-        assert_eq!(db.toggle_favorite(p).unwrap(), false);
-        assert_eq!(db.is_favorite(p).unwrap(), false);
+        let p = RelativePath(PathBuf::from("a.jpg"));
+        assert_eq!(db.is_favorite(&p).unwrap(), false);
+        assert_eq!(db.toggle_favorite(&p).unwrap(), true);
+        assert_eq!(db.is_favorite(&p).unwrap(), true);
+        assert_eq!(db.list_favorites().unwrap(), vec![p.clone()]);
+        assert_eq!(db.toggle_favorite(&p).unwrap(), false);
+        assert_eq!(db.is_favorite(&p).unwrap(), false);
 
         // Remove the unique temp dir (grandparent of the .imgfind/imgfind.db path).
         let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());

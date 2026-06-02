@@ -142,7 +142,8 @@ pub fn generate_missing_thumbnails_batch(
     images_without_thumbnails
         .par_iter()
         .for_each(|(path, hash)| {
-            if let Err(e) = generate_and_store_thumbnail(path, hash, size, &tx) {
+            let path = path.as_str();
+            if let Err(e) = generate_and_store_thumbnail(path.as_ref(), hash, size, &tx) {
                 log::warn!("Failed to generate thumbnail for {}: {:?}", path, e);
             } else {
                 log::info!("Generated thumbnail for: {}", path);
