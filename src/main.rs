@@ -1,6 +1,6 @@
 #![allow(clippy::collapsible_if)]
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use clipper::ClipEmbedder;
 use imgfind::context::GraphQLContext;
 use imgfind::logging::init_tracing;
@@ -131,6 +131,8 @@ enum Commands {
         #[command(subcommand)]
         action: ModelsAction,
     },
+    /// Generate a shell completion script
+    Completions { shell: clap_complete::Shell },
 }
 
 #[derive(Subcommand)]
@@ -263,6 +265,14 @@ async fn main() -> Result<()> {
                     println!("Active model: {name}");
                 }
             }
+        }
+        Commands::Completions { shell } => {
+            clap_complete::generate(
+                shell,
+                &mut Cli::command(),
+                "imgfind",
+                &mut std::io::stdout(),
+            );
         }
     }
 
