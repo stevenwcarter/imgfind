@@ -468,6 +468,56 @@ impl Database {
 
         Ok(search_results)
     }
+
+    /// Metadata-first search: returns (relative path, distance, file_size) with
+    /// no thumbnail join. Joins `image_metadata` for `file_size`. Mirrors the
+    /// embedding-binding + execution idiom of `search_similar_images_with_raw_blob`.
+    pub fn search_similar_images_meta(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+        offset: usize,
+        distance_threshold: f32,
+        max_k: usize,
+    ) -> Result<Vec<(String, f32, Option<i64>)>> {
+        // Use a reasonable k value that's at least the limit but not too large
+        let k = limit.clamp(1, max_k);
+
+        // `k` and the distance threshold are interpolated as the vec0 MATCH/k
+        // syntax requires literal values (not bound params). Both are trusted
+        // numeric config values, never user free-text.
+        let query = format!(
+            "SELECT i.path, v.distance, m.file_size
+              FROM image_vectors v
+              JOIN images i ON i.id = v.rowid
+              LEFT JOIN image_metadata m ON m.image_id = i.id
+              WHERE v.embedding MATCH ?1 AND k = {k}
+            AND v.distance <= {distance_threshold:.6}
+              ORDER BY v.distance LIMIT {k} OFFSET {offset}"
+        );
+
+        let conn = self
+            .pool
+            .get()
+            .context("Failed to get DB connection for searching similar images")?;
+        let mut stmt = conn.prepare(&query)?;
+
+        let results = stmt.query_map(params![query_embedding.as_bytes()], |row| {
+            let rel_path: String = row.get(0)?;
+            let distance: f32 = row.get(1)?;
+            let file_size: Option<i64> = row.get(2)?;
+
+            Ok((rel_path, distance, file_size))
+        })?;
+
+        let mut search_results = Vec::new();
+        for result in results {
+            search_results.push(result?);
+        }
+
+        Ok(search_results)
+    }
+
     pub fn search_similar_images_with_blob(
         &self,
         query_embedding: &[f32],

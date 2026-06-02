@@ -31,9 +31,23 @@ impl<'a> SearchEngine<'a> {
     ) -> Result<Vec<(String, f32, Option<String>)>> {
         // Use sqlite-vec for efficient similarity search
         let query_embedding = normalize_vector(query_embedding);
-        self.db.search_similar_images_with_blob(
+        self.db
+            .search_similar_images_with_blob(&query_embedding, limit, distance_threshold, max_k)
+    }
+    pub fn search_meta(
+        &self,
+        query_embedding: Vec<f32>,
+        limit: usize,
+        offset: usize,
+        distance_threshold: f32,
+        max_k: usize,
+    ) -> Result<Vec<(String, f32, Option<i64>)>> {
+        // Use sqlite-vec for efficient similarity search
+        let query_embedding = normalize_vector(&query_embedding);
+        self.db.search_similar_images_meta(
             &query_embedding,
             limit,
+            offset,
             distance_threshold,
             max_k,
         )
