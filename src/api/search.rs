@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use axum::{
     Extension, Json, Router,
-    extract::Path,
+    extract::{Path, Query},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
@@ -10,11 +10,7 @@ use log::info;
 use tracing::{debug, error, warn};
 
 use super::{AppError, middleware};
-use crate::{
-    context::GraphQLContext,
-    search::SearchEngine,
-    thumbnail::get_or_generate_thumbnail,
-};
+use crate::{context::GraphQLContext, search::SearchEngine, thumbnail::get_or_generate_thumbnail};
 
 /// Join `filename` onto `base`, returning the path only if it stays within `base`.
 /// Rejects absolute paths and any `..` that would climb above `base`.
@@ -77,10 +73,35 @@ async fn thumb(
     Ok(thumbnail_bytes)
 }
 
+#[derive(serde::Deserialize)]
+struct SearchParams {
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchResultItem {
+    path: String,
+    distance: f32,
+    file_size: Option<i64>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchResponse {
+    results: Vec<SearchResultItem>,
+    has_more: bool,
+}
+
 async fn search(
     Extension(context): Extension<GraphQLContext>,
     Path(search): Path<String>,
+    Query(params): Query<SearchParams>,
 ) -> Result<impl IntoResponse, AppError> {
+    let limit = params.limit.unwrap_or(80);
+    let offset = params.offset.unwrap_or(0);
+
     // Generate embedding for query using the cached model.
     let query_embedding = context
         .embedder
@@ -90,12 +111,22 @@ async fn search(
     // TODO(W33): thread per-request SearchConfig overrides; defaults preserve
     // the prior hardcoded behavior (distance <= 1.3, k ceiling 100).
     let sc = crate::config::SearchConfig::default();
-    let search = SearchEngine::new(&context.db);
-    let result = search
-        .search_with_thumbnails(&query_embedding, 80, sc.distance_threshold, sc.max_k)
+    let engine = SearchEngine::new(&context.db);
+    let rows = engine
+        .search_meta(query_embedding, limit, offset, sc.distance_threshold, sc.max_k)
         .context("Failed to perform search")?;
 
-    Ok(Json(result))
+    let has_more = rows.len() == limit;
+    let results = rows
+        .into_iter()
+        .map(|(path, distance, file_size)| SearchResultItem {
+            path,
+            distance,
+            file_size,
+        })
+        .collect();
+
+    Ok(Json(SearchResponse { results, has_more }))
 }
 
 async fn file(
