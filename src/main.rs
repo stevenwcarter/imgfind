@@ -9,6 +9,7 @@ use imgfind::{config, get_db_path, get_local_db_path};
 use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, info, warn};
 use oshash::oshash;
+use rayon::prelude::*;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,7 +17,7 @@ use walkdir::WalkDir;
 
 use imgfind::AbsolutePath;
 use imgfind::abs_to_relative_path;
-use imgfind::database::{Database, extract_image_metadata};
+use imgfind::database::{Database, ImageMetadata, extract_image_metadata};
 use imgfind::indexing::chunk_pending;
 use imgfind::routes::app;
 use imgfind::search::{SearchEngine, normalize_vector};
@@ -565,24 +566,33 @@ fn index_directory(
         indexed_count += rows.len();
 
         // Extract and store metadata for the newly-indexed images. Metadata
-        // extraction stays per-image and is non-critical.
-        for (abs_path_str, _, _) in survivors.iter() {
-            match extract_image_metadata(abs_path_str) {
-                Ok(metadata) => match db.get_image_id(&AbsolutePath(PathBuf::from(abs_path_str))) {
-                    Ok(image_id) => {
-                        if let Err(e) = db.insert_or_update_metadata(image_id, &metadata) {
-                            warn!("Failed to store metadata for {}: {}", abs_path_str, e);
-                        } else {
-                            debug!("Stored metadata for: {}", abs_path_str);
+        // extraction is I/O-bound and pure, so run it in parallel (rayon),
+        // then do the DB writes serially (the pool/txn stays on one thread).
+        let extracted: Vec<(String, Result<ImageMetadata>)> = survivors
+            .par_iter()
+            .map(|(abs_path_str, _, _)| {
+                (abs_path_str.clone(), extract_image_metadata(abs_path_str))
+            })
+            .collect();
+        for (abs_path_str, res) in extracted {
+            match res {
+                Ok(metadata) => {
+                    match db.get_image_id(&AbsolutePath(PathBuf::from(&abs_path_str))) {
+                        Ok(image_id) => {
+                            if let Err(e) = db.insert_or_update_metadata(image_id, &metadata) {
+                                warn!("Failed to store metadata for {}: {}", abs_path_str, e);
+                            } else {
+                                debug!("Stored metadata for: {}", abs_path_str);
+                            }
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Failed to get image ID for metadata storage {}: {}",
+                                abs_path_str, e
+                            );
                         }
                     }
-                    Err(e) => {
-                        warn!(
-                            "Failed to get image ID for metadata storage {}: {}",
-                            abs_path_str, e
-                        );
-                    }
-                },
+                }
                 Err(e) => {
                     debug!("Failed to extract metadata for {}: {}", abs_path_str, e);
                     // This is not critical, so we don't increment error_count

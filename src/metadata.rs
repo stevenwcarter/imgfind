@@ -1,7 +1,8 @@
-use crate::database::{Database, extract_image_metadata};
+use crate::database::{Database, ImageMetadata, extract_image_metadata};
 
 use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle};
+use rayon::prelude::*;
 use tracing::{debug, info, warn};
 
 pub fn extract_missing_metadata(db: &mut Database, quiet: bool, count: usize) -> Result<()> {
@@ -34,19 +35,30 @@ pub fn extract_missing_metadata(db: &mut Database, quiet: bool, count: usize) ->
 
         let mut metadata_extracted = 0;
         let mut failed = 0;
-        for (image_id, image_path, _hash) in images_without_metadata {
-            let image_path = image_path.as_str();
+
+        // Extraction is I/O-bound and pure: run it in parallel (rayon), then
+        // perform the DB writes serially (the pool/txn stays single-threaded).
+        let extracted: Vec<(i64, String, Result<ImageMetadata>)> = images_without_metadata
+            .par_iter()
+            .map(|(image_id, image_path, _hash)| {
+                let path_str = image_path.as_str().into_owned();
+                let result = extract_image_metadata(&path_str);
+                (*image_id, path_str, result)
+            })
+            .collect();
+
+        for (image_id, image_path, result) in extracted {
             if !quiet {
                 metadata_progress.set_message(format!(
                     "{}",
-                    std::path::Path::new(image_path.as_ref())
+                    std::path::Path::new(&image_path)
                         .file_name()
                         .unwrap_or_default()
                         .to_string_lossy()
                 ));
             }
 
-            match extract_image_metadata(image_path.as_ref()) {
+            match result {
                 Ok(metadata) => {
                     if let Err(e) = db.insert_or_update_metadata(image_id, &metadata) {
                         warn!(
