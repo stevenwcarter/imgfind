@@ -160,7 +160,10 @@ export const Images = () => {
           <button
             type="button"
             className="rounded bg-gray-700 px-4 py-2 text-white hover:bg-gray-600"
-            onClick={() => getImages(query, images.length)}
+            onClick={() => {
+              const committed = search.get('query') ?? '';
+              if (committed) getImages(committed, images.length);
+            }}
           >
             Load more
           </button>
