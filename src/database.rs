@@ -228,7 +228,101 @@ fn migration_001_baseline(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Metadata for an embedding model registered in the `models` table: its name,
+/// embedding dimensionality, and the vec0 virtual table holding its vectors.
+#[derive(Debug, Clone)]
+pub struct ModelInfo {
+    pub name: String,
+    pub dim: usize,
+    pub table: String,
+}
+
+/// Derive a safe vec0 table name from a model name, lowercasing ASCII
+/// alphanumerics and replacing everything else with `_`.
+fn sanitize_model_table(name: &str) -> String {
+    let s: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("image_vectors_{s}")
+}
+
 impl Database {
+    /// The currently active embedding model (the single `models` row with
+    /// `is_active = 1`).
+    pub fn active_model(&self) -> Result<ModelInfo> {
+        let conn = self.pool.get().context("get connection")?;
+        let (name, dim, table): (String, i64, String) = conn
+            .query_row(
+                "SELECT name, dim, table_name FROM models WHERE is_active = 1 LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .context("no active model")?;
+        Ok(ModelInfo {
+            name,
+            dim: dim as usize,
+            table,
+        })
+    }
+
+    /// The active model's vec0 table name, validated as a safe SQL identifier
+    /// before it is interpolated into queries.
+    fn vectors_table(&self) -> Result<String> {
+        let t = self.active_model()?.table;
+        anyhow::ensure!(
+            t.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+            "invalid table name"
+        );
+        Ok(t)
+    }
+
+    /// Register a new embedding model and create its (inactive) vec0 table.
+    pub fn register_model(&self, name: &str, dim: usize) -> Result<()> {
+        let table = sanitize_model_table(name);
+        let conn = self.pool.get().context("get connection")?;
+        conn.execute(
+            "INSERT OR IGNORE INTO models (name, dim, table_name, is_active) VALUES (?1, ?2, ?3, 0)",
+            params![name, dim as i64, table],
+        )?;
+        conn.execute_batch(&format!(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS {table} USING vec0(embedding float[{dim}]);"
+        ))?;
+        Ok(())
+    }
+
+    /// Flip the active model to `name`, deactivating all others.
+    pub fn set_active_model(&self, name: &str) -> Result<()> {
+        let conn = self.pool.get().context("get connection")?;
+        let exists: bool = conn
+            .query_row("SELECT 1 FROM models WHERE name=?1", [name], |_| Ok(()))
+            .optional()?
+            .is_some();
+        anyhow::ensure!(exists, "unknown model: {name}");
+        conn.execute("UPDATE models SET is_active = (name = ?1)", [name])?;
+        Ok(())
+    }
+
+    /// List all registered models as `(name, dim, is_active)`, ordered by name.
+    pub fn list_models(&self) -> Result<Vec<(String, usize, bool)>> {
+        let conn = self.pool.get().context("get connection")?;
+        let mut stmt = conn.prepare("SELECT name, dim, is_active FROM models ORDER BY name")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)? as usize,
+                r.get::<_, i64>(2)? != 0,
+            ))
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     pub fn insert_image(
         &mut self,
         path: &AbsolutePath,
@@ -240,6 +334,7 @@ impl Database {
             format!("Failed to convert path {} to relative path", path.as_str())
         })?;
         let rel_path_str = rel_path.as_str();
+        let vt = self.vectors_table()?;
 
         // Start a transaction for consistency
         {
@@ -265,13 +360,13 @@ impl Database {
             // Insert into vector table using sqlite-vec
             // First delete any existing vector for this image
             tx.execute(
-                "DELETE FROM image_vectors WHERE rowid = ?1",
+                &format!("DELETE FROM {vt} WHERE rowid = ?1"),
                 params![image_id],
             )?;
 
             // Insert the new vector using zerocopy for efficiency
             tx.execute(
-                "INSERT INTO image_vectors (rowid, embedding) VALUES (?1, ?2)",
+                &format!("INSERT INTO {vt} (rowid, embedding) VALUES (?1, ?2)"),
                 params![image_id, embedding.as_bytes()],
             )?;
 
@@ -356,6 +451,7 @@ impl Database {
         if rows.is_empty() {
             return Ok(());
         }
+        let vt = self.vectors_table()?;
         let mut conn = self.pool.get().context("get connection for batch insert")?;
         let tx = conn.transaction()?;
         for (rel_path_str, hash, embedding) in rows {
@@ -375,13 +471,13 @@ impl Database {
             // Insert into vector table using sqlite-vec.
             // First delete any existing vector for this image.
             tx.execute(
-                "DELETE FROM image_vectors WHERE rowid = ?1",
+                &format!("DELETE FROM {vt} WHERE rowid = ?1"),
                 params![image_id],
             )?;
 
             // Insert the new vector using zerocopy for efficiency.
             tx.execute(
-                "INSERT INTO image_vectors (rowid, embedding) VALUES (?1, ?2)",
+                &format!("INSERT INTO {vt} (rowid, embedding) VALUES (?1, ?2)"),
                 params![image_id, embedding.as_slice().as_bytes()],
             )?;
         }
@@ -416,13 +512,14 @@ impl Database {
     ) -> Result<Vec<(String, f32)>> {
         // Use a reasonable k value that's at least the limit but not too large
         let k = limit.clamp(1, max_k);
+        let vt = self.vectors_table()?;
 
         // `k` and the distance threshold are interpolated as the vec0 MATCH/k
         // syntax requires literal values (not bound params). Both are trusted
         // numeric config values, never user free-text.
         let query = format!(
             "SELECT i.path, distance
-             FROM image_vectors v
+             FROM {vt} v
              JOIN images i ON i.id = v.rowid
              WHERE v.embedding MATCH ? AND k={k}
             AND distance <= {distance_threshold:.6}
@@ -460,13 +557,14 @@ impl Database {
     ) -> ImageSearchResult {
         // Use a reasonable k value that's at least the limit but not too large
         let k = limit.clamp(1, max_k);
+        let vt = self.vectors_table()?;
 
         // `k` and the distance threshold are interpolated as the vec0 MATCH/k
         // syntax requires literal values (not bound params). Both are trusted
         // numeric config values, never user free-text.
         let query = format!(
             "SELECT i.path, distance, t.thumbnail_data
-              FROM image_vectors v
+              FROM {vt} v
               JOIN images i ON i.id = v.rowid
               LEFT OUTER JOIN thumbnails t ON i.hash = t.image_hash AND t.size = 300
               WHERE v.embedding MATCH ? AND k={k}
@@ -513,13 +611,14 @@ impl Database {
         // get nothing (OFFSET skips all `k` rows). Capped at max_k, which
         // bounds total reachable results across all pages.
         let k = (offset + limit).clamp(1, max_k);
+        let vt = self.vectors_table()?;
 
         // `k` and the distance threshold are interpolated as the vec0 MATCH/k
         // syntax requires literal values (not bound params). Both are trusted
         // numeric config values, never user free-text.
         let query = format!(
             "SELECT i.path, v.distance, m.file_size
-              FROM image_vectors v
+              FROM {vt} v
               JOIN images i ON i.id = v.rowid
               LEFT JOIN image_metadata m ON m.image_id = i.id
               WHERE v.embedding MATCH ?1 AND k = {k}
@@ -575,6 +674,7 @@ impl Database {
     }
 
     pub fn clean_missing_files(&mut self) -> Result<usize> {
+        let vt = self.vectors_table()?;
         // Get all paths from database
         let conn = self
             .pool
@@ -606,7 +706,7 @@ impl Database {
         let removed_count = to_delete.len();
         for id in to_delete {
             // Delete from vector table first
-            tx.execute("DELETE FROM image_vectors WHERE rowid = ?1", params![id])?;
+            tx.execute(&format!("DELETE FROM {vt} WHERE rowid = ?1"), params![id])?;
             // Then delete from images table
             tx.execute("DELETE FROM images WHERE id = ?1", params![id])?;
         }
@@ -1388,6 +1488,40 @@ mod tests {
                 .unwrap();
             assert_eq!(n, 1, "table {t} exists");
         }
+
+        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn active_model_defaults_to_baseline_table() {
+        let db_path = temp_db_path();
+        let db = Database::new(&db_path).expect("create db");
+        let m = db.active_model().unwrap();
+        assert_eq!(m.dim, 512);
+        assert_eq!(m.table, "image_vectors");
+
+        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn register_and_switch_model_creates_table_and_flips_active() {
+        let db_path = temp_db_path();
+        let db = Database::new(&db_path).expect("create db");
+        db.register_model("test-model", 256).unwrap();
+        db.set_active_model("test-model").unwrap();
+        let m = db.active_model().unwrap();
+        assert_eq!((m.dim, m.table.as_str()), (256, "image_vectors_test_model"));
+        let n: i64 = db
+            .pool
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name='image_vectors_test_model'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
 
         let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
     }
