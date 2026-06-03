@@ -144,7 +144,12 @@ enum ModelsAction {
     /// List registered models (active marked with *)
     List,
     /// Set the active model
-    Use { name: String },
+    Use {
+        name: String,
+        /// Also save this model as the global default for new databases.
+        #[arg(long)]
+        default: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -163,6 +168,14 @@ enum ConfigCommands {
     },
     /// Reset configuration to defaults
     Reset,
+    /// Get, set, or clear the default embedding model for new databases
+    Model {
+        /// Model name to set as the default. Omit to show the current default.
+        name: Option<String>,
+        /// Clear the configured default (revert to the built-in baseline).
+        #[arg(long)]
+        clear: bool,
+    },
 }
 
 #[tokio::main]
@@ -197,7 +210,11 @@ async fn main() -> Result<()> {
             } else {
                 get_db_path(None)?
             };
-            let mut db = Database::new(&db_path)?;
+            // A brand-new database is seeded with the configured default model;
+            // an explicit --model (applied below) still wins over it.
+            let default_model = config::Config::load()?.default_model;
+            let mut db =
+                imgfind::models::open_db_seeding_default(&db_path, default_model.as_deref())?;
             if let Some(m) = model {
                 imgfind::models::ensure_and_activate_model(&db, &m)?;
             }
@@ -275,9 +292,15 @@ async fn main() -> Result<()> {
                         println!("{} {} (dim {}){}", mark, row.name, row.dim, tag);
                     }
                 }
-                ModelsAction::Use { name } => {
+                ModelsAction::Use { name, default } => {
                     imgfind::models::ensure_and_activate_model(&db, &name)?;
                     println!("Active model: {name}");
+                    if default {
+                        let mut cfg = config::Config::load()?;
+                        cfg.default_model = Some(name.clone());
+                        cfg.save()?;
+                        println!("Saved {name} as the global default model.");
+                    }
                 }
             }
         }
@@ -889,6 +912,12 @@ fn handle_config_command(config_command: ConfigCommands) -> Result<()> {
             let config_path = config::Config::get_config_path()?;
 
             println!("Configuration file: {}", config_path.display());
+            match &config.default_model {
+                Some(m) => println!("Default model: {m}"),
+                None => println!(
+                    "Default model: (built-in baseline) openai/clip-vit-base-patch32"
+                ),
+            }
             println!("Ignore patterns:");
             if config.ignore_patterns.is_empty() {
                 println!("  (none)");
@@ -925,6 +954,34 @@ fn handle_config_command(config_command: ConfigCommands) -> Result<()> {
             println!("Default ignore patterns:");
             for (i, pattern) in default_config.ignore_patterns.iter().enumerate() {
                 println!("  {}. {}", i + 1, pattern);
+            }
+        }
+        ConfigCommands::Model { name, clear } => {
+            let mut config = config::Config::load()?;
+            if clear {
+                config.default_model = None;
+                config.save()?;
+                println!("Cleared default model (reverting to the built-in baseline).");
+            } else if let Some(name) = name {
+                // Only allow models clipper actually knows how to load.
+                let supported: Vec<String> = clipper::supported_models()
+                    .into_iter()
+                    .map(|m| m.name)
+                    .collect();
+                anyhow::ensure!(
+                    supported.iter().any(|n| n == &name),
+                    "unknown model '{name}'; supported models: {supported:?}"
+                );
+                config.default_model = Some(name.clone());
+                config.save()?;
+                println!("Default model set to {name}");
+            } else {
+                match config.default_model {
+                    Some(m) => println!("Default model: {m}"),
+                    None => println!(
+                        "No default model set (using built-in baseline openai/clip-vit-base-patch32)"
+                    ),
+                }
             }
         }
     }

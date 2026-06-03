@@ -63,6 +63,10 @@ pub struct Config {
     /// Search tuning options
     #[serde(default)]
     pub search: SearchConfig,
+    /// Default embedding model used to seed a newly-created database. `None`
+    /// falls back to the built-in baseline model.
+    #[serde(default)]
+    pub default_model: Option<String>,
     /// Cached compiled regexes (not serialized)
     #[serde(skip)]
     compiled_regexes: OnceCell<Vec<Option<Regex>>>,
@@ -73,6 +77,7 @@ impl Default for Config {
         Self {
             index: IndexConfig::default(),
             search: SearchConfig::default(),
+            default_model: None,
             ignore_patterns: vec![
                 // Default patterns to ignore
                 "node_modules".to_string(),
@@ -204,6 +209,7 @@ mod tests {
             ],
             index: IndexConfig::default(),
             search: SearchConfig::default(),
+            default_model: None,
             compiled_regexes: OnceCell::new(),
         };
 
@@ -229,13 +235,31 @@ mod tests {
             ],
             index: IndexConfig::default(),
             search: SearchConfig::default(),
+            default_model: None,
             compiled_regexes: OnceCell::new(),
         };
 
         let toml_str = toml::to_string(&config).unwrap();
         let deserialized: Config = toml::from_str(&toml_str).unwrap();
-        
+
         assert_eq!(config.ignore_patterns, deserialized.ignore_patterns);
+    }
+
+    #[test]
+    fn default_model_defaults_to_none_and_roundtrips() {
+        // Absent from TOML -> None.
+        let cfg: Config = toml::from_str("").expect("empty toml parses");
+        assert_eq!(cfg.default_model, None);
+
+        // Set value survives a serialize/deserialize round-trip.
+        let mut cfg = Config::default();
+        cfg.default_model = Some("laion/CLIP-ViT-L-14-laion2B-s32B-b82K".to_string());
+        let s = toml::to_string(&cfg).unwrap();
+        let back: Config = toml::from_str(&s).unwrap();
+        assert_eq!(
+            back.default_model.as_deref(),
+            Some("laion/CLIP-ViT-L-14-laion2B-s32B-b82K")
+        );
     }
 
     #[test]

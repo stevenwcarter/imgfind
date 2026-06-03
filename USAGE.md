@@ -119,10 +119,28 @@ Vectors are stored in per-model tables, so multiple models can coexist. Two mode
 | `laion/CLIP-ViT-L-14-laion2B-s32B-b82K` | 768 | ~1.7 GB download on first use, slower indexing, higher search quality (LAION-2B trained). |
 
 ```bash
-imgfind models list        # active marked *; unindexed-but-supported models show [available, not indexed]
-imgfind models use <name>  # auto-registers a supported model (creates its vector table) and makes it active
+imgfind models list                 # active marked *; unindexed-but-supported models show [available, not indexed]
+imgfind models use <name>           # auto-registers a supported model (creates its vector table) and makes it active
+imgfind models use <name> --default # ...and also save it as the global default for new databases
 imgfind index  --model <name> ~/Pictures   # select the active model for this run
 imgfind search --model <name> "a cat"
+```
+
+The active-model choice is stored **per database** (in the DB's `models` table), so it persists across runs and each index can use a different model.
+
+**Global default model.** A new database is seeded with the model named in the global config (`~/.imgfind/config.toml`); if none is set, it falls back to the built-in baseline `openai/clip-vit-base-patch32`. The default only applies when a database is *created* — it never overrides an existing DB's active model or a later `models use`. Manage it with:
+
+```bash
+imgfind config model                  # show the current default
+imgfind config model <name>           # set the default (validated against supported models)
+imgfind config model --clear          # revert to the built-in baseline
+imgfind models use <name> --default   # set the active model AND save it as the default in one step
+```
+
+So to make a higher-quality model your default everywhere, set it once — every new index you create afterward starts on it:
+```bash
+imgfind config model laion/CLIP-ViT-L-14-laion2B-s32B-b82K
+cd ~/new-folder && imgfind index --root .   # new DB is seeded with the LAION model automatically
 ```
 
 **Each model has its own vector table.** Switching the active model does not migrate existing embeddings — images must be indexed under a model before they are searchable under it.

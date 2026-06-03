@@ -2,6 +2,22 @@
 
 use crate::database::Database;
 use anyhow::{Context, Result};
+use std::path::Path;
+
+/// Open the database at `db_path`, creating it if needed. If the database did
+/// **not** already exist and `default_model` is `Some`, seed that model as the
+/// active one (auto-registering it via [`ensure_and_activate_model`]). Existing
+/// databases are returned untouched — the default only applies to brand-new
+/// databases, so a per-database `models use` choice is never overridden.
+pub fn open_db_seeding_default(db_path: &Path, default_model: Option<&str>) -> Result<Database> {
+    let existed = db_path.exists();
+    let db = Database::new(db_path)?;
+    if let (false, Some(name)) = (existed, default_model) {
+        ensure_and_activate_model(&db, name)
+            .with_context(|| format!("seeding new database with default model '{name}'"))?;
+    }
+    Ok(db)
+}
 
 /// Resolve `name` to the active model, auto-registering it if clipper supports
 /// it but the DB has not seen it yet, and validating that an already-registered
@@ -122,6 +138,42 @@ mod tests {
         let err = ensure_and_activate_model(&db, "laion/CLIP-ViT-L-14-laion2B-s32B-b82K")
             .unwrap_err();
         assert!(err.to_string().contains("dim mismatch"), "got: {err}");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn open_db_seeds_default_only_on_creation() {
+        let path = temp_db_path();
+
+        // Brand-new DB + a default -> the default becomes active.
+        let db = open_db_seeding_default(&path, Some("laion/CLIP-ViT-L-14-laion2B-s32B-b82K"))
+            .expect("create + seed");
+        assert_eq!(
+            db.active_model().unwrap().name,
+            "laion/CLIP-ViT-L-14-laion2B-s32B-b82K"
+        );
+        drop(db);
+
+        // Re-opening an EXISTING DB must not reseed, even with a different default.
+        let db = open_db_seeding_default(&path, Some("openai/clip-vit-base-patch32"))
+            .expect("reopen existing");
+        assert_eq!(
+            db.active_model().unwrap().name,
+            "laion/CLIP-ViT-L-14-laion2B-s32B-b82K",
+            "existing DB's active model must be preserved"
+        );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn open_db_without_default_uses_baseline() {
+        let path = temp_db_path();
+        let db = open_db_seeding_default(&path, None).expect("create");
+        // Fresh DB with no default keeps the migration-seeded baseline.
+        assert_eq!(
+            db.active_model().unwrap().name,
+            "openai/clip-vit-base-patch32"
+        );
         cleanup(&path);
     }
 }
