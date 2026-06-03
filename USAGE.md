@@ -111,10 +111,28 @@ imgfind thumbnails --size 300 --count 50
 
 ### 6. Manage Embedding Models
 
-Vectors are stored in per-model tables, so multiple models can coexist (one CLIP model currently ships):
+Vectors are stored in per-model tables, so multiple models can coexist. Two models are available:
+
+| Model | Dim | Notes |
+| --- | --- | --- |
+| `openai/clip-vit-base-patch32` | 512 | Default. Fast indexing and search. |
+| `laion/CLIP-ViT-L-14-laion2B-s32B-b82K` | 768 | ~1.7 GB download on first use, slower indexing, higher search quality (LAION-2B trained). |
+
 ```bash
-imgfind models list        # active model marked with *
-imgfind models use <name>
+imgfind models list        # active marked *; unindexed-but-supported models show [available, not indexed]
+imgfind models use <name>  # auto-registers a supported model (creates its vector table) and makes it active
+imgfind index  --model <name> ~/Pictures   # select the active model for this run
+imgfind search --model <name> "a cat"
+```
+
+**Each model has its own vector table.** Images must be (re)indexed under a model before they are searchable under it — switching the active model does not migrate existing embeddings.
+
+A typical workflow for trying the higher-quality model:
+```bash
+imgfind models use laion/CLIP-ViT-L-14-laion2B-s32B-b82K   # auto-registers (dim 768), sets active
+imgfind index ~/Pictures                                   # embeds under L/14 (downloads ~1.7GB once)
+imgfind search "a dog on a beach"                          # searches the active model's table
+imgfind models use openai/clip-vit-base-patch32            # switch back to the fast default
 ```
 
 ### 7. Shell Completions
