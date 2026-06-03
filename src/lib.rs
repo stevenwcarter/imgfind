@@ -13,6 +13,7 @@ pub mod graphql;
 pub mod indexing;
 pub mod logging;
 pub mod metadata;
+pub mod models;
 pub mod routes;
 pub mod search;
 pub mod thumbnail;
