@@ -194,7 +194,7 @@ async fn main() -> Result<()> {
             };
             let mut db = Database::new(&db_path)?;
             if let Some(m) = model {
-                db.set_active_model(&m)?;
+                imgfind::models::ensure_and_activate_model(&db, &m)?;
             }
             index_directory(&mut db, &dir, recursive, quiet, batch_size, no_thumbnails)?;
         }
@@ -211,7 +211,7 @@ async fn main() -> Result<()> {
             let db_path = get_db_path(None)?;
             let db = Database::new(&db_path)?;
             if let Some(m) = model {
-                db.set_active_model(&m)?;
+                imgfind::models::ensure_and_activate_model(&db, &m)?;
             }
             let config = config::Config::load()?;
             let distance_threshold = threshold.unwrap_or(config.search.distance_threshold);
@@ -256,12 +256,14 @@ async fn main() -> Result<()> {
             let db = Database::new(&db_path)?;
             match action {
                 ModelsAction::List => {
-                    for (name, dim, active) in db.list_models()? {
-                        println!("{} {} (dim {})", if active { "*" } else { " " }, name, dim);
+                    for row in imgfind::models::list_rows(&db)? {
+                        let mark = if row.active { "*" } else { " " };
+                        let tag = if row.indexed { "" } else { " [available, not indexed]" };
+                        println!("{} {} (dim {}){}", mark, row.name, row.dim, tag);
                     }
                 }
                 ModelsAction::Use { name } => {
-                    db.set_active_model(&name)?;
+                    imgfind::models::ensure_and_activate_model(&db, &name)?;
                     println!("Active model: {name}");
                 }
             }
@@ -282,10 +284,12 @@ async fn main() -> Result<()> {
 async fn serve(db: Database, directory: String, host: String, port: usize) -> Result<()> {
     // Load the CLIP model in the background so the server starts accepting
     // connections immediately; search endpoints report 503 until it is ready.
+    let model_name = db.active_model()?.name;
     let cell: Arc<std::sync::OnceLock<ClipEmbedder>> = Arc::new(std::sync::OnceLock::new());
     {
         let cell = cell.clone();
-        tokio::task::spawn_blocking(move || match ClipEmbedder::new(None, None, false) {
+        let model_name = model_name.clone();
+        tokio::task::spawn_blocking(move || match ClipEmbedder::from_model(&model_name, false) {
             Ok(m) => {
                 let _ = cell.set(m);
                 info!("CLIP model loaded");
@@ -368,7 +372,9 @@ fn index_directory(
         pb.enable_steady_tick(std::time::Duration::from_millis(120));
         pb
     };
-    let model = ClipEmbedder::new(None, None, false).context("Failed to create ClipEmbedder")?;
+    let model_name = db.active_model()?.name;
+    let model = ClipEmbedder::from_model(&model_name, false)
+        .context("Failed to create ClipEmbedder")?;
     spinner.finish_and_clear();
     info!("CLIP model loaded successfully");
 
@@ -698,7 +704,9 @@ fn search_images(
     let spinner = ProgressBar::new_spinner();
     spinner.set_message("Loading CLIP model… (this may take a minute on first use)");
     spinner.enable_steady_tick(std::time::Duration::from_millis(120));
-    let model = ClipEmbedder::new(None, None, false).context("Failed to create ClipEmbedder")?;
+    let model_name = db.active_model()?.name;
+    let model = ClipEmbedder::from_model(&model_name, false)
+        .context("Failed to create ClipEmbedder")?;
     spinner.finish_and_clear();
 
     // Generate embedding for query

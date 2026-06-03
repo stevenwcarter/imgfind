@@ -145,7 +145,8 @@ impl App {
                 }
 
                 // Load CLIP model
-                let model = ClipEmbedder::new(None, None, false)
+                let model_name = db.active_model()?.name;
+                let model = ClipEmbedder::from_model(&model_name, false)
                     .context("Failed to create ClipEmbedder")?;
 
                 // Generate embedding for query
