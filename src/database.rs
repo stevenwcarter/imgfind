@@ -346,7 +346,13 @@ impl Database {
 
             // Insert into images table with relative path
             tx.execute(
-                "INSERT OR REPLACE INTO images (path, hash) VALUES (?1, ?2)",
+                // Upsert that PRESERVES the row id on a path conflict. `INSERT OR
+                // REPLACE` would delete+reinsert, allocating a new id and thereby
+                // orphaning this image's embeddings in *other* models' vector
+                // tables (which key on the id). `ON CONFLICT … DO UPDATE` keeps the
+                // id stable so per-model embeddings stay linked across re-indexing.
+                "INSERT INTO images (path, hash) VALUES (?1, ?2)
+                 ON CONFLICT(path) DO UPDATE SET hash = excluded.hash",
                 params![rel_path_str.as_ref(), hash],
             )?;
 
@@ -597,7 +603,13 @@ impl Database {
         for (rel_path_str, hash, embedding) in rows {
             // Insert into images table with relative path
             tx.execute(
-                "INSERT OR REPLACE INTO images (path, hash) VALUES (?1, ?2)",
+                // Upsert that PRESERVES the row id on a path conflict. `INSERT OR
+                // REPLACE` would delete+reinsert, allocating a new id and thereby
+                // orphaning this image's embeddings in *other* models' vector
+                // tables (which key on the id). `ON CONFLICT … DO UPDATE` keeps the
+                // id stable so per-model embeddings stay linked across re-indexing.
+                "INSERT INTO images (path, hash) VALUES (?1, ?2)
+                 ON CONFLICT(path) DO UPDATE SET hash = excluded.hash",
                 params![rel_path_str.as_str(), hash],
             )?;
 
@@ -625,20 +637,35 @@ impl Database {
         Ok(())
     }
 
+    /// Whether `path`/`hash` is indexed **for the active model**.
+    ///
+    /// Model-aware: an image counts as indexed only if it is present in the
+    /// shared `images` table *and* has an embedding row in the active model's
+    /// vector table. Because each model stores embeddings in its own `vec0`
+    /// table, switching the active model leaves existing `images` rows without a
+    /// vector in the new table — so they are reported as not-indexed and get
+    /// re-embedded on the next `index` run (backfilling the new model).
     pub fn is_image_indexed(&self, path: &AbsolutePath, hash: &str) -> Result<bool> {
         // Convert absolute path to relative path for database lookup
         let rel_path = path.to_relative(&self.parent_dir).with_context(|| {
             format!("Failed to convert path {} to relative path", path.as_str())
         })?;
         let rel_path_str = rel_path.as_str();
+        let vt = self.vectors_table()?;
 
         let conn = self
             .pool
             .get()
             .context("Failed to get DB connection to check if image is indexed")?;
-        let mut stmt = conn.prepare("SELECT COUNT(*) FROM images WHERE path = ?1 AND hash = ?2")?;
+        let sql = format!(
+            "SELECT COUNT(*) FROM images i \
+             WHERE i.path = ?1 AND i.hash = ?2 \
+               AND EXISTS (SELECT 1 FROM {vt} WHERE rowid = i.id)"
+        );
 
-        let count: i64 = stmt.query_row(params![rel_path_str.as_ref(), hash], |row| row.get(0))?;
+        let count: i64 = conn.query_row(&sql, params![rel_path_str.as_ref(), hash], |row| {
+            row.get(0)
+        })?;
         Ok(count > 0)
     }
 
@@ -1691,6 +1718,56 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 1);
+
+        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+    }
+
+    /// `is_image_indexed` is model-aware: an image indexed under one model is
+    /// reported as NOT indexed after switching to a different model (whose
+    /// vector table is empty), so a subsequent `index` run backfills the new
+    /// model's embeddings instead of skipping the file.
+    #[test]
+    fn is_image_indexed_is_model_aware() {
+        let db_path = temp_db_path();
+        let mut db = Database::new(&db_path).expect("create db");
+
+        let abs = RelativePath(PathBuf::from("photo.jpg")).to_absolute(&db.parent_dir);
+        let hash = "deadbeef";
+
+        // Nothing indexed yet.
+        assert!(!db.is_image_indexed(&abs, hash).unwrap());
+
+        // Index under the default model (dim 512, table image_vectors).
+        db.insert_images_batch(&[("photo.jpg".to_string(), hash.to_string(), vec![0.1f32; 512])])
+            .unwrap();
+        assert!(
+            db.is_image_indexed(&abs, hash).unwrap(),
+            "indexed under default model"
+        );
+
+        // Switch to a new model: its vector table is empty, so the same image
+        // is reported as NOT indexed and would be re-embedded on the next index.
+        db.register_model("other-model", 8).unwrap();
+        db.set_active_model("other-model").unwrap();
+        assert!(
+            !db.is_image_indexed(&abs, hash).unwrap(),
+            "not indexed under the freshly-switched model"
+        );
+
+        // Backfill under the new model -> now indexed for it too.
+        db.insert_images_batch(&[("photo.jpg".to_string(), hash.to_string(), vec![0.2f32; 8])])
+            .unwrap();
+        assert!(
+            db.is_image_indexed(&abs, hash).unwrap(),
+            "indexed under new model after backfill"
+        );
+
+        // The original model's embedding is still present after switching back.
+        db.set_active_model("openai/clip-vit-base-patch32").unwrap();
+        assert!(
+            db.is_image_indexed(&abs, hash).unwrap(),
+            "default model embedding still present"
+        );
 
         let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
     }

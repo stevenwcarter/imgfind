@@ -125,14 +125,17 @@ imgfind index  --model <name> ~/Pictures   # select the active model for this ru
 imgfind search --model <name> "a cat"
 ```
 
-**Each model has its own vector table.** Images must be (re)indexed under a model before they are searchable under it — switching the active model does not migrate existing embeddings.
+**Each model has its own vector table.** Switching the active model does not migrate existing embeddings — images must be indexed under a model before they are searchable under it.
+
+To populate the embeddings for a model you just switched to, **re-run `index` over the same files.** The already-indexed check is per-model: files that lack an embedding for the active model are (re)embedded, while files that already have one are skipped. So re-indexing after a switch only does the work needed to backfill the new model; embeddings for other models are left intact and remain valid when you switch back. Pass `--reindex` to force re-embedding even when an embedding already exists (e.g. after a model's weights change).
 
 A typical workflow for trying the higher-quality model:
 ```bash
 imgfind models use laion/CLIP-ViT-L-14-laion2B-s32B-b82K   # auto-registers (dim 768), sets active
-imgfind index ~/Pictures                                   # embeds under L/14 (downloads ~1.7GB once)
+imgfind index ~/Pictures                                   # backfills L/14 embeddings (downloads ~1.7GB once)
 imgfind search "a dog on a beach"                          # searches the active model's table
-imgfind models use openai/clip-vit-base-patch32            # switch back to the fast default
+imgfind models use openai/clip-vit-base-patch32            # switch back; its embeddings are still there
+imgfind index ~/Pictures --reindex                         # (optional) force re-embed everything for the active model
 ```
 
 ### 7. Shell Completions

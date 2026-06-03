@@ -57,6 +57,10 @@ enum Commands {
         /// Embedding model to use for this run (sets it active first).
         #[arg(long)]
         model: Option<String>,
+        /// Re-embed every image even if it already has an embedding for the
+        /// active model (otherwise already-indexed images are skipped).
+        #[arg(long)]
+        reindex: bool,
     },
     Metadata {
         #[arg(short, long)]
@@ -186,6 +190,7 @@ async fn main() -> Result<()> {
             batch_size,
             no_thumbnails,
             model,
+            reindex,
         } => {
             let db_path = if root {
                 get_local_db_path()?
@@ -196,7 +201,15 @@ async fn main() -> Result<()> {
             if let Some(m) = model {
                 imgfind::models::ensure_and_activate_model(&db, &m)?;
             }
-            index_directory(&mut db, &dir, recursive, quiet, batch_size, no_thumbnails)?;
+            index_directory(
+                &mut db,
+                &dir,
+                recursive,
+                quiet,
+                batch_size,
+                no_thumbnails,
+                reindex,
+            )?;
         }
         Commands::Search {
             prompt,
@@ -339,6 +352,7 @@ fn index_directory(
     quiet: bool,
     batch_size_override: Option<usize>,
     no_thumbnails: bool,
+    reindex: bool,
 ) -> Result<()> {
     if !quiet {
         println!("Indexing directory: {}", dir);
@@ -491,8 +505,9 @@ fn index_directory(
             }
         };
 
-        // Check if already indexed with same hash
-        if db.is_image_indexed(&AbsolutePath(abs_path.clone()), &hash)? {
+        // Check if already indexed with same hash for the active model.
+        // `--reindex` forces re-embedding even when a vector already exists.
+        if !reindex && db.is_image_indexed(&AbsolutePath(abs_path.clone()), &hash)? {
             debug!("Skipping already indexed: {}", path_str);
             skipped_count += 1;
             progress_bar.inc(1);
