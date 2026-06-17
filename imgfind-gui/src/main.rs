@@ -63,8 +63,7 @@ fn main() -> Result<()> {
 
     // Tracks whether the tile grid was populated by a text or similarity search,
     // so `on_load_more` knows which backend method to call.
-    let search_mode: Arc<Mutex<SearchMode>> =
-        Arc::new(Mutex::new(SearchMode::Text(String::new())));
+    let search_mode: Arc<Mutex<SearchMode>> = Arc::new(Mutex::new(SearchMode::Text(String::new())));
 
     // Poll for model readiness every 250 ms.  The timer performs exactly ONE
     // job: detect the loading→ready transition, enable the search box, and

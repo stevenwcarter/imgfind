@@ -207,10 +207,16 @@ mod tests {
         let (db, root) = temp_db();
         {
             let conn = db.pool.get().expect("conn");
-            conn.execute("INSERT INTO images (id, path, hash) VALUES (1, 'a.jpg', 'ha')", [])
-                .unwrap();
-            conn.execute("INSERT INTO images (id, path, hash) VALUES (2, 'b.jpg', 'hb')", [])
-                .unwrap();
+            conn.execute(
+                "INSERT INTO images (id, path, hash) VALUES (1, 'a.jpg', 'ha')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO images (id, path, hash) VALUES (2, 'b.jpg', 'hb')",
+                [],
+            )
+            .unwrap();
             // Use close vectors (not orthogonal) so both fall within the default
             // distance_threshold of 1.3. a is unit vector along dim 0; b is
             // normalized [1.0, 0.1, 0, ...] giving L2(a,b) ≈ 0.1 << 1.3.

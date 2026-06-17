@@ -1843,10 +1843,16 @@ mod tests {
 
         {
             let conn = db.pool.get().expect("conn");
-            conn.execute("INSERT INTO images (id, path, hash) VALUES (1, 'a.jpg', 'ha')", [])
-                .expect("img a");
-            conn.execute("INSERT INTO images (id, path, hash) VALUES (2, 'b.jpg', 'hb')", [])
-                .expect("img b");
+            conn.execute(
+                "INSERT INTO images (id, path, hash) VALUES (1, 'a.jpg', 'ha')",
+                [],
+            )
+            .expect("img a");
+            conn.execute(
+                "INSERT INTO images (id, path, hash) VALUES (2, 'b.jpg', 'hb')",
+                [],
+            )
+            .expect("img b");
             conn.execute(
                 "INSERT INTO image_vectors (rowid, embedding) VALUES (?1, ?2)",
                 params![1i64, a.as_bytes()],
@@ -1865,8 +1871,14 @@ mod tests {
             .find_similar_to_path(&RelativePath(PathBuf::from("a.jpg")), 10, 0, 2.0, 100)
             .expect("similar");
         let paths: Vec<&str> = rows.iter().map(|(p, _, _)| p.as_str()).collect();
-        assert!(paths.contains(&"a.jpg"), "seed should appear among neighbours");
-        assert!(paths.contains(&"b.jpg"), "other image should appear among neighbours");
+        assert!(
+            paths.contains(&"a.jpg"),
+            "seed should appear among neighbours"
+        );
+        assert!(
+            paths.contains(&"b.jpg"),
+            "other image should appear among neighbours"
+        );
         // a.jpg (the seed) is closest to itself.
         assert_eq!(rows[0].0, "a.jpg");
 
