@@ -814,6 +814,51 @@ impl Database {
         Ok(search_results)
     }
 
+    /// Find images similar to an already-indexed image, using its STORED
+    /// embedding from the active model's vec0 table (no re-embedding). The seed
+    /// itself is typically the nearest neighbour (distance ~0); callers may filter
+    /// it out. Returns `(relative_path, distance, file_size)` rows.
+    pub fn find_similar_to_path(
+        &self,
+        path: &RelativePath,
+        limit: usize,
+        offset: usize,
+        distance_threshold: f32,
+        max_k: usize,
+    ) -> Result<Vec<(String, f32, Option<i64>)>> {
+        let vt = self.vectors_table()?;
+        let rel = path.as_str();
+        let conn = self
+            .pool
+            .get()
+            .context("Failed to get DB connection for find_similar_to_path")?;
+
+        let id: i64 = conn
+            .query_row(
+                "SELECT id FROM images WHERE path = ?1",
+                params![rel.as_ref()],
+                |row| row.get(0),
+            )
+            .with_context(|| format!("No indexed image at path {rel}"))?;
+
+        let blob: Vec<u8> = conn
+            .query_row(
+                &format!("SELECT embedding FROM {vt} WHERE rowid = ?1"),
+                params![id],
+                |row| row.get(0),
+            )
+            .with_context(|| format!("No stored embedding for image id {id}"))?;
+
+        // Stored vectors are LE-f32 and already L2-normalized; decode as-is.
+        let embedding: Vec<f32> = blob
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect();
+
+        // Reuse the existing vec0 search path with the stored vector.
+        self.search_similar_images_meta(&embedding, limit, offset, distance_threshold, max_k)
+    }
+
     pub fn search_similar_images_with_blob(
         &self,
         query_embedding: &[f32],
@@ -1781,6 +1826,49 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(v, LATEST_MIGRATION_VERSION);
+
+        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn find_similar_to_path_returns_neighbors_from_stored_embedding() {
+        let db_path = temp_db_path();
+        let db = Database::new(&db_path).expect("create db");
+
+        // Two images with distinct 512-dim embeddings (default model dim).
+        let mut a = vec![0.0f32; 512];
+        a[0] = 1.0;
+        let mut b = vec![0.0f32; 512];
+        b[1] = 1.0;
+
+        {
+            let conn = db.pool.get().expect("conn");
+            conn.execute("INSERT INTO images (id, path, hash) VALUES (1, 'a.jpg', 'ha')", [])
+                .expect("img a");
+            conn.execute("INSERT INTO images (id, path, hash) VALUES (2, 'b.jpg', 'hb')", [])
+                .expect("img b");
+            conn.execute(
+                "INSERT INTO image_vectors (rowid, embedding) VALUES (?1, ?2)",
+                params![1i64, a.as_bytes()],
+            )
+            .expect("vec a");
+            conn.execute(
+                "INSERT INTO image_vectors (rowid, embedding) VALUES (?1, ?2)",
+                params![2i64, b.as_bytes()],
+            )
+            .expect("vec b");
+        }
+
+        // Seed = a.jpg. Its nearest neighbour is itself (distance ~0); b.jpg is
+        // orthogonal (L2 distance = sqrt(2) ≈ 1.414), so we use threshold 2.0.
+        let rows = db
+            .find_similar_to_path(&RelativePath(PathBuf::from("a.jpg")), 10, 0, 2.0, 100)
+            .expect("similar");
+        let paths: Vec<&str> = rows.iter().map(|(p, _, _)| p.as_str()).collect();
+        assert!(paths.contains(&"a.jpg"), "seed should appear among neighbours");
+        assert!(paths.contains(&"b.jpg"), "other image should appear among neighbours");
+        // a.jpg (the seed) is closest to itself.
+        assert_eq!(rows[0].0, "a.jpg");
 
         let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
     }
