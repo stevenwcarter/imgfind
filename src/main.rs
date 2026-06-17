@@ -2,7 +2,6 @@
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use clipper::ClipEmbedder;
-use imgfind::context::GraphQLContext;
 use imgfind::logging::init_tracing;
 use imgfind::metadata::extract_missing_metadata;
 use imgfind::{config, get_db_path, get_local_db_path};
@@ -12,14 +11,12 @@ use oshash::oshash;
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
 use walkdir::WalkDir;
 
 use imgfind::AbsolutePath;
 use imgfind::abs_to_relative_path;
 use imgfind::database::{Database, ImageMetadata, extract_image_metadata};
 use imgfind::indexing::chunk_pending;
-use imgfind::routes::app;
 use imgfind::search::{SearchEngine, normalize_vector};
 use imgfind::thumbnail::generate_missing_thumbnails_batch;
 
@@ -120,15 +117,6 @@ enum Commands {
         /// Number of thumbnails to generate in this batch (default: 50)
         #[arg(short, long, default_value_t = 50)]
         count: usize,
-    },
-    Serve {
-        #[arg(short, long)]
-        dir: Option<String>,
-        /// Address to bind. Use 0.0.0.0 to expose on all interfaces.
-        #[arg(long, default_value = "127.0.0.1")]
-        host: String,
-        #[arg(short, long, default_value_t = 6060)]
-        port: usize,
     },
     /// Manage embedding models
     Models {
@@ -276,11 +264,6 @@ async fn main() -> Result<()> {
             let mut db = Database::new(&db_path)?;
             generate_thumbnails_batch(&mut db, size, count)?;
         }
-        Commands::Serve { dir, host, port } => {
-            let db_path = get_db_path(dir.as_deref())?;
-            let db = Database::new(&db_path)?;
-            serve(db, dir.unwrap_or(".".to_owned()), host, port).await?;
-        }
         Commands::Models { action } => {
             let db_path = get_db_path(None)?;
             let db = Database::new(&db_path)?;
@@ -288,7 +271,11 @@ async fn main() -> Result<()> {
                 ModelsAction::List => {
                     for row in imgfind::models::list_rows(&db)? {
                         let mark = if row.active { "*" } else { " " };
-                        let tag = if row.indexed { "" } else { " [available, not indexed]" };
+                        let tag = if row.indexed {
+                            ""
+                        } else {
+                            " [available, not indexed]"
+                        };
                         println!("{} {} (dim {}){}", mark, row.name, row.dim, tag);
                     }
                 }
@@ -313,40 +300,6 @@ async fn main() -> Result<()> {
             );
         }
     }
-
-    Ok(())
-}
-
-async fn serve(db: Database, directory: String, host: String, port: usize) -> Result<()> {
-    // Load the CLIP model in the background so the server starts accepting
-    // connections immediately; search endpoints report 503 until it is ready.
-    let model_name = db.active_model()?.name;
-    let cell: Arc<std::sync::OnceLock<ClipEmbedder>> = Arc::new(std::sync::OnceLock::new());
-    {
-        let cell = cell.clone();
-        let model_name = model_name.clone();
-        tokio::task::spawn_blocking(move || match ClipEmbedder::from_model(&model_name, false) {
-            Ok(m) => {
-                let _ = cell.set(m);
-                info!("CLIP model loaded");
-            }
-            Err(e) => log::error!("CLIP model load failed: {e:#}"),
-        });
-    }
-    let context = GraphQLContext::new(db, directory, cell);
-    let app = app(context.clone());
-    let addr = format!("{host}:{port}");
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .with_context(|| format!("Failed to bind to {addr}"))?;
-    info!("Listening on http://{addr}");
-    let server = axum::serve(listener, app).with_graceful_shutdown(async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to install Ctrl+C handler");
-    });
-
-    server.await.context("Server error")?;
 
     Ok(())
 }
@@ -410,8 +363,8 @@ fn index_directory(
         pb
     };
     let model_name = db.active_model()?.name;
-    let model = ClipEmbedder::from_model(&model_name, false)
-        .context("Failed to create ClipEmbedder")?;
+    let model =
+        ClipEmbedder::from_model(&model_name, false).context("Failed to create ClipEmbedder")?;
     spinner.finish_and_clear();
     info!("CLIP model loaded successfully");
 
@@ -712,6 +665,8 @@ fn index_directory(
     Ok(())
 }
 
+// CLI dispatch fn; arg list mirrors the clap subcommand flags.
+#[allow(clippy::too_many_arguments)]
 fn search_images(
     db: &Database,
     prompt: &str,
@@ -743,8 +698,8 @@ fn search_images(
     spinner.set_message("Loading CLIP model… (this may take a minute on first use)");
     spinner.enable_steady_tick(std::time::Duration::from_millis(120));
     let model_name = db.active_model()?.name;
-    let model = ClipEmbedder::from_model(&model_name, false)
-        .context("Failed to create ClipEmbedder")?;
+    let model =
+        ClipEmbedder::from_model(&model_name, false).context("Failed to create ClipEmbedder")?;
     spinner.finish_and_clear();
 
     // Generate embedding for query
@@ -914,9 +869,7 @@ fn handle_config_command(config_command: ConfigCommands) -> Result<()> {
             println!("Configuration file: {}", config_path.display());
             match &config.default_model {
                 Some(m) => println!("Default model: {m}"),
-                None => println!(
-                    "Default model: (built-in baseline) openai/clip-vit-base-patch32"
-                ),
+                None => println!("Default model: (built-in baseline) openai/clip-vit-base-patch32"),
             }
             println!("Ignore patterns:");
             if config.ignore_patterns.is_empty() {

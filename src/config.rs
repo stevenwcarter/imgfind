@@ -100,7 +100,7 @@ impl Config {
     /// Load configuration from ~/.imgfind/config.toml
     pub fn load() -> Result<Self> {
         let config_path = Self::get_config_path()?;
-        
+
         if !config_path.exists() {
             // Create default config file if it doesn't exist
             let default_config = Self::default();
@@ -120,15 +120,16 @@ impl Config {
     /// Save configuration to ~/.imgfind/config.toml
     pub fn save(&self) -> Result<()> {
         let config_path = Self::get_config_path()?;
-        
+
         // Ensure the directory exists
         if let Some(parent) = config_path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create config directory: {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create config directory: {}", parent.display())
+            })?;
         }
 
-        let config_content = toml::to_string_pretty(self)
-            .context("Failed to serialize config to TOML")?;
+        let config_content =
+            toml::to_string_pretty(self).context("Failed to serialize config to TOML")?;
 
         fs::write(&config_path, config_content)
             .with_context(|| format!("Failed to write config file: {}", config_path.display()))?;
@@ -156,7 +157,7 @@ impl Config {
     pub fn should_ignore_path(&self, path: &Path) -> bool {
         let path_str = path.to_string_lossy();
         let compiled_regexes = self.get_compiled_regexes();
-        
+
         for (i, pattern) in self.ignore_patterns.iter().enumerate() {
             // Use compiled regex if available, otherwise fallback to string matching
             if let Some(regex) = &compiled_regexes[i] {
@@ -169,7 +170,7 @@ impl Config {
                     return true;
                 }
             }
-            
+
             // Also check individual path components
             for component in path.components() {
                 let component_str = component.as_os_str().to_string_lossy();
@@ -182,7 +183,7 @@ impl Config {
                 }
             }
         }
-        
+
         false
     }
 }
@@ -216,11 +217,11 @@ mod tests {
         // Test exact matches
         assert!(config.should_ignore_path(Path::new("/path/to/node_modules/file.jpg")));
         assert!(config.should_ignore_path(Path::new("/path/to/.git/file.jpg")));
-        
+
         // Test regex patterns
         assert!(config.should_ignore_path(Path::new("/path/to/generated_files/file.jpg")));
         assert!(config.should_ignore_path(Path::new("/path/to/auto-generated/file.jpg")));
-        
+
         // Test non-matching paths
         assert!(!config.should_ignore_path(Path::new("/path/to/images/file.jpg")));
         assert!(!config.should_ignore_path(Path::new("/path/to/photos/file.jpg")));
@@ -229,10 +230,7 @@ mod tests {
     #[test]
     fn test_serialization() {
         let config = Config {
-            ignore_patterns: vec![
-                "node_modules".to_string(),
-                r".*generated.*".to_string(),
-            ],
+            ignore_patterns: vec!["node_modules".to_string(), r".*generated.*".to_string()],
             index: IndexConfig::default(),
             search: SearchConfig::default(),
             default_model: None,
@@ -252,8 +250,10 @@ mod tests {
         assert_eq!(cfg.default_model, None);
 
         // Set value survives a serialize/deserialize round-trip.
-        let mut cfg = Config::default();
-        cfg.default_model = Some("laion/CLIP-ViT-L-14-laion2B-s32B-b82K".to_string());
+        let cfg = Config {
+            default_model: Some("laion/CLIP-ViT-L-14-laion2B-s32B-b82K".to_string()),
+            ..Default::default()
+        };
         let s = toml::to_string(&cfg).unwrap();
         let back: Config = toml::from_str(&s).unwrap();
         assert_eq!(

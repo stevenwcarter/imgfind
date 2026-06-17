@@ -93,18 +93,18 @@ pub fn list_rows(db: &Database) -> Result<Vec<ModelRow>> {
 mod tests {
     use super::*;
     use crate::database::Database;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU32, Ordering};
 
     fn temp_db_path() -> PathBuf {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir()
-            .join(format!("imgfind_models_test_{}_{n}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("imgfind_models_test_{}_{n}", std::process::id()));
         dir.join(".imgfind").join("imgfind.db")
     }
 
-    fn cleanup(p: &PathBuf) {
+    fn cleanup(p: &Path) {
         let _ = std::fs::remove_dir_all(p.parent().unwrap().parent().unwrap());
     }
 
@@ -135,8 +135,8 @@ mod tests {
         // Register the LAION name with the WRONG dim, then try to activate it.
         db.register_model("laion/CLIP-ViT-L-14-laion2B-s32B-b82K", 512)
             .unwrap();
-        let err = ensure_and_activate_model(&db, "laion/CLIP-ViT-L-14-laion2B-s32B-b82K")
-            .unwrap_err();
+        let err =
+            ensure_and_activate_model(&db, "laion/CLIP-ViT-L-14-laion2B-s32B-b82K").unwrap_err();
         assert!(err.to_string().contains("dim mismatch"), "got: {err}");
         cleanup(&path);
     }

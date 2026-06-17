@@ -5,16 +5,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub mod api;
 pub mod config;
-pub mod context;
 pub mod database;
-pub mod graphql;
 pub mod indexing;
 pub mod logging;
 pub mod metadata;
 pub mod models;
-pub mod routes;
 pub mod search;
 pub mod thumbnail;
 pub mod tui;

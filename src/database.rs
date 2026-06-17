@@ -663,9 +663,8 @@ impl Database {
                AND EXISTS (SELECT 1 FROM {vt} WHERE rowid = i.id)"
         );
 
-        let count: i64 = conn.query_row(&sql, params![rel_path_str.as_ref(), hash], |row| {
-            row.get(0)
-        })?;
+        let count: i64 =
+            conn.query_row(&sql, params![rel_path_str.as_ref(), hash], |row| row.get(0))?;
         Ok(count > 0)
     }
 
@@ -1196,7 +1195,7 @@ pub struct ImageMetadata {
     pub datetime_taken: Option<String>,
 }
 
-/// Image with metadata for GraphQL responses
+/// Image with associated metadata (path, hash, EXIF fields) returned from a joined query.
 #[derive(Debug, Clone)]
 pub struct ImageWithMetadata {
     pub path: String,
@@ -1473,12 +1472,12 @@ mod tests {
         drop(conn);
 
         let p = RelativePath(PathBuf::from("a.jpg"));
-        assert_eq!(db.is_favorite(&p).unwrap(), false);
-        assert_eq!(db.toggle_favorite(&p).unwrap(), true);
-        assert_eq!(db.is_favorite(&p).unwrap(), true);
+        assert!(!db.is_favorite(&p).unwrap());
+        assert!(db.toggle_favorite(&p).unwrap());
+        assert!(db.is_favorite(&p).unwrap());
         assert_eq!(db.list_favorites().unwrap(), vec![p.clone()]);
-        assert_eq!(db.toggle_favorite(&p).unwrap(), false);
-        assert_eq!(db.is_favorite(&p).unwrap(), false);
+        assert!(!db.toggle_favorite(&p).unwrap());
+        assert!(!db.is_favorite(&p).unwrap());
 
         // Remove the unique temp dir (grandparent of the .imgfind/imgfind.db path).
         let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());

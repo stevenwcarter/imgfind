@@ -1,0 +1,173 @@
+import { LineEdit, Button, ScrollView } from "std-widgets.slint";
+
+export struct Tile {
+    path: string,
+    image: image,
+    size-kb: int,
+}
+
+export component MainWindow inherits Window {
+    title: "imgfind";
+    preferred-width: 1100px;
+    preferred-height: 800px;
+    background: #1f2430;
+
+    // Properties set from Rust.
+    in property <[Tile]> tiles;
+    in property <string> status;
+    in property <bool> show-load-more;
+    in property <bool> can-search: false;
+
+    // Lightbox state set from Rust.
+    in property <bool> lightbox-open: false;
+    in property <image> lightbox-image;
+
+    callback search(string);
+    callback load-more();
+    callback tile-clicked(int);
+    callback tile-open-external(int);
+    callback lightbox-close();
+    callback lightbox-prev();
+    callback lightbox-next();
+
+    // Grid geometry constants.
+    // tile-size + gap determines the stride; cols is derived from window width.
+    private property <length> tile-size: 200px;
+    private property <length> tile-gap: 8px;
+    private property <length> tile-stride: tile-size + tile-gap;
+    // Number of columns that fit in the available width (approx window width minus padding).
+    private property <int> cols: max(1, floor((root.width - 32px) / tile-stride));
+    // Total grid height: enough rows * stride, plus trailing gap.
+    private property <int> row-count: ceil(tiles.length / cols);
+    private property <length> grid-height: row-count * tile-stride;
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 12px;
+
+        HorizontalLayout {
+            spacing: 8px;
+            LineEdit {
+                placeholder-text: root.can-search ? "Search images..." : "Loading model...";
+                enabled: root.can-search;
+                accepted(text) => { root.search(text); }
+            }
+        }
+
+        Text {
+            text: root.status;
+            color: #9aa4b2;
+            visible: root.status != "";
+        }
+
+        ScrollView {
+            // Give the scroll view all remaining vertical space.
+            vertical-stretch: 1;
+
+            // Explicitly size the viewport so the ScrollView knows how tall the content is.
+            viewport-height: root.grid-height + (root.show-load-more ? 60px : 0px);
+            viewport-width: root.cols * root.tile-stride;
+
+            // Tiles rendered with absolute x/y derived from index arithmetic.
+            for tile[i] in root.tiles: Rectangle {
+                x: mod(i, root.cols) * root.tile-stride;
+                y: floor(i / root.cols) * root.tile-stride;
+                width: root.tile-size;
+                height: root.tile-size;
+                border-radius: 6px;
+                clip: true;
+                background: #2d3446;
+
+                Image {
+                    source: tile.image;
+                    image-fit: cover;
+                    width: 100%;
+                    height: 100%;
+                }
+
+                TouchArea {
+                    width: 100%;
+                    height: 100%;
+                    clicked => { root.tile-clicked(i); }
+                    pointer-event(e) => {
+                        if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                            root.tile-open-external(i);
+                        }
+                    }
+                }
+            }
+
+            // "Load more" button sits below the grid inside the same viewport.
+            if root.show-load-more: Button {
+                x: 0px;
+                y: root.grid-height + 8px;
+                text: "Load more";
+                clicked => { root.load-more(); }
+            }
+        }
+    }
+
+    // --- Lightbox overlay ---
+    // Rendered on top of everything when lightbox-open is true.
+    if root.lightbox-open: Rectangle {
+        width: root.width;
+        height: root.height;
+        background: #000000dd;
+
+        // Backdrop click closes the lightbox.
+        TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => { root.lightbox-close(); }
+        }
+
+        // Full image centered, fit to window. Sits above the backdrop TouchArea
+        // so it receives events independently; the backdrop click-through is
+        // intentional (clicking the image area also closes — acceptable UX since
+        // we have explicit ‹/› buttons for navigation).
+        Image {
+            source: root.lightbox-image;
+            image-fit: contain;
+            width: 90%;
+            height: 90%;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+        }
+
+        // Navigation buttons anchored to the left and right edges.
+        HorizontalLayout {
+            width: 100%;
+            height: 100%;
+            alignment: space-between;
+
+            Button {
+                text: "‹";
+                clicked => { root.lightbox-prev(); }
+            }
+
+            Button {
+                text: "›";
+                clicked => { root.lightbox-next(); }
+            }
+        }
+
+        // Keyboard navigation: Esc closes, Left/Right navigate.
+        forward-focus: lb-keys;
+        lb-keys := FocusScope {
+            key-pressed(event) => {
+                if (event.text == Key.Escape) {
+                    root.lightbox-close();
+                    accept
+                } else if (event.text == Key.LeftArrow) {
+                    root.lightbox-prev();
+                    accept
+                } else if (event.text == Key.RightArrow) {
+                    root.lightbox-next();
+                    accept
+                } else {
+                    reject
+                }
+            }
+        }
+    }
+}

@@ -176,7 +176,12 @@ mod tests {
     use ratatui::layout::Rect;
 
     fn rect() -> Rect {
-        Rect { x: 10, y: 5, width: 100, height: 50 }
+        Rect {
+            x: 10,
+            y: 5,
+            width: 100,
+            height: 50,
+        }
     }
 
     fn approx(a: f32, b: f32) {
@@ -220,7 +225,12 @@ mod tests {
 
     #[test]
     fn zero_width_rect_uses_center_axis() {
-        let r = Rect { x: 0, y: 0, width: 0, height: 50 };
+        let r = Rect {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 50,
+        };
         let (fx, _fy) = focal_for_zoom_at_cursor(r, 5, 25, 1, (0.5, 0.5), 2);
         approx(fx, 0.5);
     }

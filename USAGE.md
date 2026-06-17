@@ -2,13 +2,13 @@
 
 ## Installation
 
-Build the project from source:
+Build both binaries from source:
 
 ```bash
-cargo build --release
+cargo build --release --workspace
 ```
 
-The binary will be available at `target/release/imgfind`.
+The CLI binary is at `target/release/imgfind`; the native GUI binary is at `target/release/imgfind-gui`.
 
 ## Usage
 
@@ -81,26 +81,15 @@ Keybindings:
 
 Each thumbnail shows a similarity score label, and the zoom view shows a control hint along the bottom.
 
-### 4. Run the Web Server
+### 4. Open the Native GUI
 
-Serve the React SPA, REST API, and GraphQL endpoint:
+Launch the Slint desktop GUI:
 ```bash
-imgfind serve                      # 127.0.0.1:6060
-imgfind serve --host 0.0.0.0 --port 8080
+imgfind-gui                   # uses the database found by walking up from cwd
+imgfind-gui --dir ~/Pictures  # target a specific directory's database
 ```
 
-The server starts immediately and loads the CLIP model in the background; search endpoints return `503` until it is ready.
-
-Endpoints:
-- `GET /healthz` — readiness probe, returns `{ "model": "loading" }` or `{ "model": "ready" }`
-- `GET /api/v1/search/{query}?limit=N&offset=M` — metadata-first JSON:
-  `{ "results": [{ "path", "distance", "fileSize" }], "hasMore": bool }` (defaults: `limit=80`, `offset=0`)
-- `GET /api/v1/search/thumb:300/{path}` — thumbnail bytes; `GET /api/v1/search/file/{path}` — full file
-- `POST /graphql` (plus `/graphql/graphiql` and `/graphql/playground`):
-  - `search(query, limit, offset)`, `imagesByBounds(north, south, east, west)`
-  - favorites: `favorites`, `isFavorite(path)`, `toggleFavorite(path)`
-  - tags: `tags`, `tagsForImage(path)`, `imagesByTag(name)`, `createTag(name)`, `tagImage(path, tag)`, `untagImage(path, tag)`
-  - collections: `collections`, `collectionImages(name)`, `createCollection(name)`, `addToCollection(name, path)`, `removeFromCollection(name, path)`
+The GUI shows a search box; press Enter to run a query. Results appear as a scrollable thumbnail grid. Click a thumbnail to open a lightbox (prev/next navigation, Esc to close); right-click a thumbnail to open the original file in the OS viewer. Use "Load more" to page through additional results. Note: the map view is not yet ported to the GUI.
 
 ### 5. Generate Thumbnails
 

@@ -15,7 +15,7 @@ BINARY_PATH="$PROJECT_DIR/target/release/imgfind"
 # Check if release binary exists
 if [ ! -f "$BINARY_PATH" ]; then
     echo "❌ Release binary not found at $BINARY_PATH"
-    echo "Please run 'cargo build --release' first."
+    echo "Please run 'cargo build --release --workspace' first."
     exit 1
 fi
 
@@ -23,10 +23,18 @@ fi
 LOCAL_BIN="$HOME/.local/bin"
 mkdir -p "$LOCAL_BIN"
 
-# Copy binary to local bin
+# Copy CLI binary to local bin
 echo "📦 Installing imgfind to $LOCAL_BIN..."
 cp "$BINARY_PATH" "$LOCAL_BIN/imgfind"
 chmod +x "$LOCAL_BIN/imgfind"
+
+# Copy GUI binary if present
+GUI_BINARY="$PROJECT_DIR/target/release/imgfind-gui"
+if [ -f "$GUI_BINARY" ]; then
+    echo "📦 Installing imgfind-gui to $LOCAL_BIN..."
+    cp "$GUI_BINARY" "$LOCAL_BIN/imgfind-gui"
+    chmod +x "$LOCAL_BIN/imgfind-gui"
+fi
 
 echo "✅ Installation complete!"
 echo ""
@@ -37,6 +45,7 @@ echo ""
 echo "🚀 Quick start:"
 echo "    imgfind index --dir ~/Pictures"
 echo "    imgfind search \"a beautiful sunset\""
+echo "    imgfind-gui --dir ~/Pictures"
 echo "    imgfind status"
 echo ""
 echo "📚 For more information, see USAGE.md"

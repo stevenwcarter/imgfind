@@ -40,11 +40,7 @@ impl App {
         let inner_width = lines.iter().map(|l| l.len()).max().unwrap_or(0) as u16;
         let width = (inner_width + 4).min(area.width);
         let height = (lines.len() as u16 + 2).min(area.height);
-        let popup = center(
-            area,
-            Constraint::Length(width),
-            Constraint::Length(height),
-        );
+        let popup = center(area, Constraint::Length(width), Constraint::Length(height));
         Clear.render(popup, buf);
         let help = Paragraph::new(lines.join("\n")).block(
             Block::bordered()
@@ -145,14 +141,11 @@ fn build_layout(area: Rect) -> Rc<[Rect]> {
     Layout::default()
         .direction(Direction::Vertical)
         .margin(2)
-        .constraints(
-            [
-                Constraint::Fill(1),
-                Constraint::Length(1),
-                Constraint::Length(3),
-            ]
-            .as_ref(),
-        )
+        .constraints([
+            Constraint::Fill(1),
+            Constraint::Length(1),
+            Constraint::Length(3),
+        ])
         .split(area)
 }
 

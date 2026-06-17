@@ -1,0 +1,18 @@
+[package]
+name = "imgfind-gui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+imgfind = { path = ".." }
+clipper = { version = "0.1.0", path = "../../clipper" }
+slint = "1.16"
+image = "0.25"
+open = "5"
+clap = { version = "4.0", features = ["derive"] }
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[build-dependencies]
+slint-build = "1.16"
