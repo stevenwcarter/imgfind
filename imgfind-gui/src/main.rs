@@ -304,6 +304,8 @@ fn main() -> Result<()> {
     {
         let weak = window.as_weak();
         let detail_ref = Arc::clone(&detail);
+        let state_ref = Arc::clone(&state);
+        let lb_ref = Arc::clone(&lb_index);
         let backend_vf = backend.clone();
         window.on_detail_view_full(move || {
             let seed_path = {
@@ -311,6 +313,18 @@ fn main() -> Result<()> {
                 d.as_ref().map(|ds| ds.path.clone())
             };
             let Some(rel) = seed_path else { return };
+
+            // Resolve the seed's position in the current grid so that lightbox
+            // prev/next navigation starts from the correct slot.  If the seed
+            // is absent from the current results (e.g. after a search-similar
+            // that filtered the seed out of its own result set), lb_index is
+            // None and prev/next will start from slot 0 — that is intentional.
+            let idx = {
+                let st = state_ref.lock().unwrap();
+                st.results.iter().position(|r| r.path == rel)
+            };
+            *lb_ref.lock().unwrap() = idx;
+
             load_lightbox_image(weak.clone(), backend_vf.clone(), rel);
         });
     }
@@ -337,6 +351,10 @@ fn main() -> Result<()> {
 
             // `start_search` records the seed path as the "committed query" so
             // `apply_page` / `apply_error` work correctly for offset tracking.
+            // NOTE: `committed_query` holds a file path here, NOT a text query.
+            // load-more reads `search_mode` (not this field) to dispatch the
+            // next page, and `committed_query` is never displayed — do NOT rely
+            // on it being a real text query during a similarity search.
             state_ref.lock().unwrap().start_search(seed_path.clone());
             if let Some(w) = weak.upgrade() {
                 w.set_status(format!("Similar to {filename}").into());
