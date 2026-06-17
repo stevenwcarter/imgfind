@@ -68,6 +68,7 @@ fn main() -> Result<()> {
     {
         let weak = window.as_weak();
         let state_ref = Arc::clone(&state);
+        let lb_ref = Arc::clone(&lb_index);
         let backend_search = backend.clone();
         window.on_search(move |query| {
             let query = query.trim().to_string();
@@ -79,6 +80,13 @@ fn main() -> Result<()> {
                     w.set_tiles(ModelRc::default());
                 }
                 return;
+            }
+
+            // Dismiss any open lightbox before showing new results — the stored
+            // index would otherwise be stale relative to a different result set.
+            *lb_ref.lock().unwrap() = None;
+            if let Some(w) = weak.upgrade() {
+                w.set_lightbox_open(false);
             }
 
             state_ref.lock().unwrap().start_search(query.clone());
@@ -182,8 +190,7 @@ fn main() -> Result<()> {
             let new_idx = {
                 let mut guard = lb_ref.lock().unwrap();
                 let current = guard.unwrap_or(0);
-                // Clamp to [0, len): no wrap, no panic at the start.
-                let next = current.saturating_sub(1);
+                let next = clamp_prev(current);
                 *guard = Some(next);
                 next
             };
@@ -207,8 +214,7 @@ fn main() -> Result<()> {
                 let len = s.results.len();
                 let mut guard = lb_ref.lock().unwrap();
                 let current = guard.unwrap_or(0);
-                // Clamp to [0, len): no wrap, no panic at the end.
-                let next = if len == 0 { 0 } else { (current + 1).min(len - 1) };
+                let next = clamp_next(current, len);
                 *guard = Some(next);
                 (next, len)
             };
@@ -310,6 +316,20 @@ fn spawn_search(
     });
 }
 
+/// Previous lightbox index, clamped at 0 (no wrap).
+fn clamp_prev(current: usize) -> usize {
+    current.saturating_sub(1)
+}
+
+/// Next lightbox index, clamped to the last valid index (no wrap).
+/// Returns `current` unchanged when there are no results.
+fn clamp_next(current: usize, len: usize) -> usize {
+    if len == 0 {
+        return current;
+    }
+    (current + 1).min(len - 1)
+}
+
 /// Load the full-size image for `rel_path` on a background thread, then set the
 /// lightbox image and open the overlay on the UI thread.
 ///
@@ -346,31 +366,30 @@ fn load_lightbox_image(weak: Weak<MainWindow>, backend: Backend, rel_path: Strin
 
 #[cfg(test)]
 mod tests {
-    /// Lightbox index-clamp logic: saturating_sub never goes below 0,
-    /// min(len-1) never exceeds the last valid index.
+    use super::{clamp_next, clamp_prev};
+
     #[test]
-    fn lightbox_index_clamp_prev_at_zero_stays_zero() {
-        let current: usize = 0;
-        assert_eq!(current.saturating_sub(1), 0);
+    fn clamp_prev_at_zero_stays_zero() {
+        assert_eq!(clamp_prev(0), 0);
     }
 
     #[test]
-    fn lightbox_index_clamp_prev_advances_backward() {
-        let current: usize = 5;
-        assert_eq!(current.saturating_sub(1), 4);
+    fn clamp_prev_advances_backward() {
+        assert_eq!(clamp_prev(5), 4);
     }
 
     #[test]
-    fn lightbox_index_clamp_next_at_last_stays_last() {
-        let len: usize = 10;
-        let current: usize = 9;
-        assert_eq!((current + 1).min(len - 1), 9);
+    fn clamp_next_at_last_stays_last() {
+        assert_eq!(clamp_next(9, 10), 9);
     }
 
     #[test]
-    fn lightbox_index_clamp_next_advances_forward() {
-        let len: usize = 10;
-        let current: usize = 3;
-        assert_eq!((current + 1).min(len - 1), 4);
+    fn clamp_next_advances_forward() {
+        assert_eq!(clamp_next(3, 10), 4);
+    }
+
+    #[test]
+    fn clamp_next_empty_len_returns_current() {
+        assert_eq!(clamp_next(5, 0), 5);
     }
 }
