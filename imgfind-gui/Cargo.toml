@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 imgfind = { path = ".." }
+clipper = { version = "0.1.0", path = "../../clipper" }
 slint = "1.16"
 image = "0.25"
 open = "5"
