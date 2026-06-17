@@ -62,3 +62,6 @@ dotenvy = "0.15.7"
 tracing-appender = "0.2.3"
 kamadak-exif = "0.6.1"
 hashbrown = "0.16.0"
+
+[dev-dependencies]
+insta = "1.48"

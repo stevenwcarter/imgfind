@@ -69,6 +69,17 @@ impl Default for EventHandler {
     }
 }
 
+#[cfg(test)]
+impl EventHandler {
+    /// Test-only constructor: builds the channel pair WITHOUT spawning the
+    /// crossterm reader task, so render tests need no tokio runtime and never
+    /// touch stdin.
+    pub(crate) fn inert() -> Self {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        Self { sender, receiver }
+    }
+}
+
 impl EventHandler {
     /// Receives an event from the sender.
     ///

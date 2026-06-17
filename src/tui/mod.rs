@@ -14,6 +14,9 @@ mod event;
 mod ui;
 mod widget;
 
+#[cfg(test)]
+mod render_tests;
+
 pub async fn tui(db: Database) -> Result<()> {
     let terminal = ratatui::init();
     let mut stdout = stdout();
