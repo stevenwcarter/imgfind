@@ -106,8 +106,6 @@ impl Backend {
 
     /// EXIF/metadata for an indexed image, read fresh from the file (same fields
     /// stored at index time).
-    // Not yet wired into the UI; allow until the detail panel calls it.
-    #[allow(dead_code)]
     pub fn metadata(&self, rel_path: &str) -> Result<ImageMetadata> {
         let abs = self.abs_path(rel_path);
         extract_image_metadata(&abs.to_string_lossy())

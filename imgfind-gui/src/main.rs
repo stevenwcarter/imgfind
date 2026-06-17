@@ -1,7 +1,6 @@
 slint::include_modules!();
 
 mod backend;
-#[allow(dead_code)] // Task 4 wires detail into the UI and removes this allow.
 mod detail;
 mod image_util;
 mod state;
@@ -15,6 +14,7 @@ use clap::Parser;
 use slint::{ModelRc, Timer, TimerMode, VecModel, Weak};
 
 use backend::Backend;
+use detail::{DetailState, format_metadata, select};
 use state::{SearchResult, SearchState, ViewState};
 
 #[derive(Parser)]
@@ -40,12 +40,16 @@ fn main() -> Result<()> {
     window.set_show_load_more(false);
     window.set_tiles(ModelRc::default());
     window.set_lightbox_open(false);
+    window.set_detail_open(false);
 
     // State shared with background threads via Arc<Mutex<_>>.
     let state: Arc<Mutex<SearchState>> = Arc::new(Mutex::new(SearchState::new()));
 
     // Current lightbox index. None when the lightbox is closed.
     let lb_index: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
+
+    // Currently selected detail image. None when the panel is closed.
+    let detail: Arc<Mutex<Option<DetailState>>> = Arc::new(Mutex::new(None));
 
     // Poll for model readiness every 250 ms.  The timer performs exactly ONE
     // job: detect the loading→ready transition, enable the search box, and
@@ -78,6 +82,7 @@ fn main() -> Result<()> {
         let weak = window.as_weak();
         let state_ref = Arc::clone(&state);
         let lb_ref = Arc::clone(&lb_index);
+        let detail_ref = Arc::clone(&detail);
         let backend_search = backend.clone();
         window.on_search(move |query| {
             let query = query.trim().to_string();
@@ -91,11 +96,13 @@ fn main() -> Result<()> {
                 return;
             }
 
-            // Dismiss any open lightbox before showing new results — the stored
-            // index would otherwise be stale relative to a different result set.
+            // Dismiss any open lightbox and detail panel before showing new
+            // results — stored indices would otherwise be stale.
             *lb_ref.lock().unwrap() = None;
+            *detail_ref.lock().unwrap() = None;
             if let Some(w) = weak.upgrade() {
                 w.set_lightbox_open(false);
+                w.set_detail_open(false);
             }
 
             state_ref.lock().unwrap().start_search(query.clone());
@@ -144,13 +151,68 @@ fn main() -> Result<()> {
         });
     }
 
-    // --- tile-clicked callback: open lightbox at the clicked index ---
+    // --- tile-selected callback: show detail panel for the clicked tile ---
+    {
+        let weak = window.as_weak();
+        let state_ref = Arc::clone(&state);
+        let detail_ref = Arc::clone(&detail);
+        let backend_detail = backend.clone();
+        window.on_tile_selected(move |index| {
+            let idx = index as usize;
+            let path = {
+                let s = state_ref.lock().unwrap();
+                s.results.get(idx).map(|r| r.path.clone())
+            };
+            let Some(path) = path else { return };
+
+            // Compute detail identity synchronously (just string ops).
+            let ds = select(path.clone());
+            *detail_ref.lock().unwrap() = Some(ds.clone());
+
+            // Open the panel immediately with a placeholder while the worker loads.
+            if let Some(w) = weak.upgrade() {
+                w.set_detail_open(true);
+                w.set_detail_filename(ds.filename.into());
+                w.set_detail_image(Default::default());
+                w.set_detail_meta("Loading\u{2026}".into());
+            }
+
+            // Load thumbnail + metadata on a background thread.
+            let weak2 = weak.clone();
+            let backend2 = backend_detail.clone();
+            std::thread::spawn(move || {
+                let meta_result = backend2.metadata(&path);
+                let thumb_result = backend2.thumbnail(&path, 512);
+
+                slint::invoke_from_event_loop(move || {
+                    let Some(w) = weak2.upgrade() else { return };
+                    match thumb_result {
+                        Ok(bytes) => match image_util::jpeg_to_slint_image(&bytes) {
+                            Ok(img) => w.set_detail_image(img),
+                            Err(e) => tracing::warn!("detail thumb decode failed: {e}"),
+                        },
+                        Err(e) => tracing::warn!("detail thumbnail failed: {e}"),
+                    }
+                    match meta_result {
+                        Ok(meta) => w.set_detail_meta(format_metadata(&meta).into()),
+                        Err(e) => {
+                            tracing::warn!("detail metadata failed: {e}");
+                            w.set_detail_meta("".into());
+                        }
+                    }
+                })
+                .ok();
+            });
+        });
+    }
+
+    // --- tile-activated callback: open lightbox at the activated index ---
     {
         let weak = window.as_weak();
         let state_ref = Arc::clone(&state);
         let lb_ref = Arc::clone(&lb_index);
         let backend_lb = backend.clone();
-        window.on_tile_clicked(move |index| {
+        window.on_tile_activated(move |index| {
             let idx = index as usize;
             let path = state_ref
                 .lock()
@@ -181,6 +243,23 @@ fn main() -> Result<()> {
             }
         });
     }
+
+    // --- detail-close callback ---
+    {
+        let weak = window.as_weak();
+        let detail_ref = Arc::clone(&detail);
+        window.on_detail_close(move || {
+            *detail_ref.lock().unwrap() = None;
+            if let Some(w) = weak.upgrade() {
+                w.set_detail_open(false);
+            }
+        });
+    }
+
+    // --- search-similar callback (Task 5 will implement the full behaviour) ---
+    window.on_search_similar(|| {
+        tracing::debug!("search-similar: not yet implemented (Task 5)");
+    });
 
     // --- lightbox-close callback ---
     {
