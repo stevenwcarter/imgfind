@@ -76,7 +76,11 @@ mod tests {
 
     #[test]
     fn size_both_bounds() {
-        let f = Filters { size_min: Some(100), size_max: Some(5000), ..Default::default() };
+        let f = Filters {
+            size_min: Some(100),
+            size_max: Some(5000),
+            ..Default::default()
+        };
         let (sql, params) = build_filter_clause(&f);
         assert_eq!(sql, " AND m.file_size >= ? AND m.file_size <= ?");
         assert_eq!(params, vec![Value::Integer(100), Value::Integer(5000)]);
@@ -84,7 +88,10 @@ mod tests {
 
     #[test]
     fn size_one_sided() {
-        let f = Filters { size_min: Some(100), ..Default::default() };
+        let f = Filters {
+            size_min: Some(100),
+            ..Default::default()
+        };
         let (sql, params) = build_filter_clause(&f);
         assert_eq!(sql, " AND m.file_size >= ?");
         assert_eq!(params, vec![Value::Integer(100)]);
@@ -92,17 +99,34 @@ mod tests {
 
     #[test]
     fn extensions_become_lowercased_like_params() {
-        let f = Filters { extensions: vec!["JPG".into(), "png".into()], ..Default::default() };
+        let f = Filters {
+            extensions: vec!["JPG".into(), "png".into()],
+            ..Default::default()
+        };
         let (sql, params) = build_filter_clause(&f);
         assert_eq!(sql, " AND (lower(i.path) LIKE ? OR lower(i.path) LIKE ?)");
-        assert_eq!(params, vec![Value::Text("%.jpg".into()), Value::Text("%.png".into())]);
+        assert_eq!(
+            params,
+            vec![Value::Text("%.jpg".into()), Value::Text("%.png".into())]
+        );
     }
 
     #[test]
     fn gps_has_and_no() {
-        let has = build_filter_clause(&Filters { gps: GpsFilter::HasGps, ..Default::default() }).0;
-        assert_eq!(has, " AND (m.latitude IS NOT NULL AND m.longitude IS NOT NULL)");
-        let no = build_filter_clause(&Filters { gps: GpsFilter::NoGps, ..Default::default() }).0;
+        let has = build_filter_clause(&Filters {
+            gps: GpsFilter::HasGps,
+            ..Default::default()
+        })
+        .0;
+        assert_eq!(
+            has,
+            " AND (m.latitude IS NOT NULL AND m.longitude IS NOT NULL)"
+        );
+        let no = build_filter_clause(&Filters {
+            gps: GpsFilter::NoGps,
+            ..Default::default()
+        })
+        .0;
         assert_eq!(no, " AND (m.latitude IS NULL OR m.longitude IS NULL)");
     }
 
@@ -119,6 +143,9 @@ mod tests {
             sql,
             " AND m.file_size >= ? AND (lower(i.path) LIKE ?) AND (m.latitude IS NOT NULL AND m.longitude IS NOT NULL)"
         );
-        assert_eq!(params, vec![Value::Integer(10), Value::Text("%.nef".into())]);
+        assert_eq!(
+            params,
+            vec![Value::Integer(10), Value::Text("%.nef".into())]
+        );
     }
 }

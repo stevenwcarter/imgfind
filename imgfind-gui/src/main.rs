@@ -89,7 +89,12 @@ fn build_filters(
         2 => GpsFilter::NoGps,
         _ => GpsFilter::Any,
     };
-    Filters { size_min, size_max, extensions, gps }
+    Filters {
+        size_min,
+        size_max,
+        extensions,
+        gps,
+    }
 }
 
 /// Rebuild the `type-chips` model from the available extensions, marking
@@ -730,9 +735,19 @@ fn start_debounce(
     backend: Backend,
     filters: Filters,
 ) {
-    timer.start(TimerMode::SingleShot, Duration::from_millis(250), move || {
-        fire_debounced_query(weak.clone(), Arc::clone(&state_ref), Arc::clone(&mode_ref), backend.clone(), filters.clone());
-    });
+    timer.start(
+        TimerMode::SingleShot,
+        Duration::from_millis(250),
+        move || {
+            fire_debounced_query(
+                weak.clone(),
+                Arc::clone(&state_ref),
+                Arc::clone(&mode_ref),
+                backend.clone(),
+                filters.clone(),
+            );
+        },
+    );
 }
 
 /// Called from all three debounce closures after rebuilding `Filters`.
@@ -1029,9 +1044,7 @@ fn load_lightbox_image(weak: Weak<MainWindow>, backend: Backend, rel_path: Strin
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        build_size_label, clamp_next, clamp_prev, format_bytes, fraction_to_bytes,
-    };
+    use super::{build_size_label, clamp_next, clamp_prev, format_bytes, fraction_to_bytes};
 
     #[test]
     fn clamp_prev_at_zero_stays_zero() {

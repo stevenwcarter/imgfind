@@ -1,3 +1,4 @@
+use crate::filters::{Filters, build_filter_clause};
 use crate::{AbsolutePath, RelativePath, get_db_parent_dir};
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose};
@@ -6,8 +7,9 @@ use image::GenericImageView;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::types::Value;
-use rusqlite::{Connection, OptionalExtension, ffi::sqlite3_auto_extension, params, params_from_iter};
-use crate::filters::{Filters, build_filter_clause};
+use rusqlite::{
+    Connection, OptionalExtension, ffi::sqlite3_auto_extension, params, params_from_iter,
+};
 use sqlite_vec::sqlite3_vec_init;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -802,11 +804,16 @@ impl Database {
         // Anonymous `?` is used for MATCH (not `?1`) so it composes with the
         // appended filter `?`s under params_from_iter (positional + anonymous
         // cannot be mixed in rusqlite).
-        let mut values: Vec<rusqlite::types::Value> =
-            vec![rusqlite::types::Value::Blob(query_embedding.as_bytes().to_vec())];
+        let mut values: Vec<rusqlite::types::Value> = vec![rusqlite::types::Value::Blob(
+            query_embedding.as_bytes().to_vec(),
+        )];
         values.extend(fvalues);
         let results = stmt.query_map(params_from_iter(values), |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, f32>(1)?, row.get::<_, Option<i64>>(2)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, f32>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+            ))
         })?;
 
         let mut search_results = Vec::new();
@@ -1224,7 +1231,12 @@ impl Database {
     ///
     /// Images without a metadata row still appear when filters are permissive,
     /// because the join is a LEFT JOIN. Returns `(relative_path, file_size)` rows.
-    pub fn browse(&self, f: &Filters, limit: usize, offset: usize) -> Result<Vec<(String, Option<i64>)>> {
+    pub fn browse(
+        &self,
+        f: &Filters,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<(String, Option<i64>)>> {
         let (clause, mut values) = build_filter_clause(f);
         let sql = format!(
             "SELECT i.path, m.file_size
@@ -1252,7 +1264,10 @@ impl Database {
     /// `lower()` is applied in SQL, so both `a.JPG` and `b.jpg` yield `"jpg"`.
     /// Deduplication is handled by a `BTreeSet` (also giving alphabetical order).
     pub fn distinct_extensions(&self) -> Result<Vec<String>> {
-        let conn = self.pool.get().context("DB connection for distinct_extensions")?;
+        let conn = self
+            .pool
+            .get()
+            .context("DB connection for distinct_extensions")?;
         let mut stmt = conn.prepare("SELECT DISTINCT lower(path) FROM images")?;
         let paths = stmt
             .query_map([], |row| row.get::<_, String>(0))?
@@ -1271,7 +1286,10 @@ impl Database {
 
     /// `(min, max)` of non-null `file_size` values; `(0, 0)` when no rows have a size.
     pub fn file_size_bounds(&self) -> Result<(i64, i64)> {
-        let conn = self.pool.get().context("DB connection for file_size_bounds")?;
+        let conn = self
+            .pool
+            .get()
+            .context("DB connection for file_size_bounds")?;
         let (min, max): (Option<i64>, Option<i64>) = conn.query_row(
             "SELECT MIN(file_size), MAX(file_size) FROM image_metadata WHERE file_size IS NOT NULL",
             [],
@@ -1997,7 +2015,10 @@ mod tests {
         // jpg only
         let jpg = db
             .browse(
-                &Filters { extensions: vec!["jpg".into()], ..Default::default() },
+                &Filters {
+                    extensions: vec!["jpg".into()],
+                    ..Default::default()
+                },
                 100,
                 0,
             )
@@ -2009,7 +2030,11 @@ mod tests {
         // size 500..6000
         let sized = db
             .browse(
-                &Filters { size_min: Some(500), size_max: Some(6000), ..Default::default() },
+                &Filters {
+                    size_min: Some(500),
+                    size_max: Some(6000),
+                    ..Default::default()
+                },
                 100,
                 0,
             )
@@ -2025,7 +2050,10 @@ mod tests {
         // has GPS
         let gps = db
             .browse(
-                &Filters { gps: GpsFilter::HasGps, ..Default::default() },
+                &Filters {
+                    gps: GpsFilter::HasGps,
+                    ..Default::default()
+                },
                 100,
                 0,
             )
@@ -2096,13 +2124,19 @@ mod tests {
         // Query close to both, filter to jpg only → only a.jpg.
         let mut q = vec![0.0f32; 512];
         q[0] = 1.0;
-        let jpg_only = Filters { extensions: vec!["jpg".into()], ..Default::default() };
+        let jpg_only = Filters {
+            extensions: vec!["jpg".into()],
+            ..Default::default()
+        };
         let rows = db
             .search_similar_images_meta(&q, 80, 0, 1.3, 100, &jpg_only)
             .unwrap();
         let paths: Vec<&str> = rows.iter().map(|(p, _, _)| p.as_str()).collect();
         assert!(paths.contains(&"a.jpg"));
-        assert!(!paths.contains(&"b.png"), "png filtered out of vector results");
+        assert!(
+            !paths.contains(&"b.png"),
+            "png filtered out of vector results"
+        );
         // No filter → both present.
         let both = db
             .search_similar_images_meta(&q, 80, 0, 1.3, 100, &Filters::default())
