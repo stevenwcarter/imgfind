@@ -18,10 +18,17 @@ export component MainWindow inherits Window {
     in property <bool> show-load-more;
     in property <bool> can-search: false;
 
+    // Lightbox state set from Rust.
+    in property <bool> lightbox-open: false;
+    in property <image> lightbox-image;
+
     callback search(string);
     callback load-more();
     callback tile-clicked(int);
     callback tile-open-external(int);
+    callback lightbox-close();
+    callback lightbox-prev();
+    callback lightbox-next();
 
     // Grid geometry constants.
     // tile-size + gap determines the stride; cols is derived from window width.
@@ -96,6 +103,70 @@ export component MainWindow inherits Window {
                 y: root.grid-height + 8px;
                 text: "Load more";
                 clicked => { root.load-more(); }
+            }
+        }
+    }
+
+    // --- Lightbox overlay ---
+    // Rendered on top of everything when lightbox-open is true.
+    if root.lightbox-open: Rectangle {
+        width: root.width;
+        height: root.height;
+        background: #000000dd;
+
+        // Backdrop click closes the lightbox.
+        TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => { root.lightbox-close(); }
+        }
+
+        // Full image centered, fit to window. Sits above the backdrop TouchArea
+        // so it receives events independently; the backdrop click-through is
+        // intentional (clicking the image area also closes — acceptable UX since
+        // we have explicit ‹/› buttons for navigation).
+        Image {
+            source: root.lightbox-image;
+            image-fit: contain;
+            width: 90%;
+            height: 90%;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+        }
+
+        // Navigation buttons anchored to the left and right edges.
+        HorizontalLayout {
+            width: 100%;
+            height: 100%;
+            alignment: space-between;
+
+            Button {
+                text: "‹";
+                clicked => { root.lightbox-prev(); }
+            }
+
+            Button {
+                text: "›";
+                clicked => { root.lightbox-next(); }
+            }
+        }
+
+        // Keyboard navigation: Esc closes, Left/Right navigate.
+        forward-focus: lb-keys;
+        lb-keys := FocusScope {
+            key-pressed(event) => {
+                if (event.text == Key.Escape) {
+                    root.lightbox-close();
+                    accept
+                } else if (event.text == Key.LeftArrow) {
+                    root.lightbox-prev();
+                    accept
+                } else if (event.text == Key.RightArrow) {
+                    root.lightbox-next();
+                    accept
+                } else {
+                    reject
+                }
             }
         }
     }

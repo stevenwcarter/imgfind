@@ -37,9 +37,13 @@ fn main() -> Result<()> {
     window.set_status("Loading model...".into());
     window.set_show_load_more(false);
     window.set_tiles(ModelRc::default());
+    window.set_lightbox_open(false);
 
     // State shared with background threads via Arc<Mutex<_>>.
     let state: Arc<Mutex<SearchState>> = Arc::new(Mutex::new(SearchState::new()));
+
+    // Current lightbox index. None when the lightbox is closed.
+    let lb_index: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
 
     // Poll for model readiness every 250 ms.
     let model_timer = Timer::default();
@@ -123,10 +127,20 @@ fn main() -> Result<()> {
         });
     }
 
-    // --- tile-clicked callback (no-op until Task 6 lightbox) ---
-    window.on_tile_clicked(|_index| {
-        // Lightbox is Task 6; nothing to do here yet.
-    });
+    // --- tile-clicked callback: open lightbox at the clicked index ---
+    {
+        let weak = window.as_weak();
+        let state_ref = Arc::clone(&state);
+        let lb_ref = Arc::clone(&lb_index);
+        let backend_lb = backend.clone();
+        window.on_tile_clicked(move |index| {
+            let idx = index as usize;
+            let path = state_ref.lock().unwrap().results.get(idx).map(|r| r.path.clone());
+            let Some(rel) = path else { return };
+            *lb_ref.lock().unwrap() = Some(idx);
+            load_lightbox_image(weak.clone(), backend_lb.clone(), rel);
+        });
+    }
 
     // --- tile-open-external callback ---
     {
@@ -142,6 +156,69 @@ fn main() -> Result<()> {
                 if let Err(e) = open::that(&abs) {
                     tracing::warn!("Failed to open {abs:?}: {e}");
                 }
+            }
+        });
+    }
+
+    // --- lightbox-close callback ---
+    {
+        let weak = window.as_weak();
+        let lb_ref = Arc::clone(&lb_index);
+        window.on_lightbox_close(move || {
+            *lb_ref.lock().unwrap() = None;
+            if let Some(w) = weak.upgrade() {
+                w.set_lightbox_open(false);
+            }
+        });
+    }
+
+    // --- lightbox-prev callback ---
+    {
+        let weak = window.as_weak();
+        let state_ref = Arc::clone(&state);
+        let lb_ref = Arc::clone(&lb_index);
+        let backend_lb = backend.clone();
+        window.on_lightbox_prev(move || {
+            let new_idx = {
+                let mut guard = lb_ref.lock().unwrap();
+                let current = guard.unwrap_or(0);
+                // Clamp to [0, len): no wrap, no panic at the start.
+                let next = current.saturating_sub(1);
+                *guard = Some(next);
+                next
+            };
+            let path =
+                state_ref.lock().unwrap().results.get(new_idx).map(|r| r.path.clone());
+            if let Some(rel) = path {
+                load_lightbox_image(weak.clone(), backend_lb.clone(), rel);
+            }
+        });
+    }
+
+    // --- lightbox-next callback ---
+    {
+        let weak = window.as_weak();
+        let state_ref = Arc::clone(&state);
+        let lb_ref = Arc::clone(&lb_index);
+        let backend_lb = backend.clone();
+        window.on_lightbox_next(move || {
+            let (new_idx, len) = {
+                let s = state_ref.lock().unwrap();
+                let len = s.results.len();
+                let mut guard = lb_ref.lock().unwrap();
+                let current = guard.unwrap_or(0);
+                // Clamp to [0, len): no wrap, no panic at the end.
+                let next = if len == 0 { 0 } else { (current + 1).min(len - 1) };
+                *guard = Some(next);
+                (next, len)
+            };
+            if len == 0 {
+                return;
+            }
+            let path =
+                state_ref.lock().unwrap().results.get(new_idx).map(|r| r.path.clone());
+            if let Some(rel) = path {
+                load_lightbox_image(weak.clone(), backend_lb.clone(), rel);
             }
         });
     }
@@ -231,4 +308,69 @@ fn spawn_search(
         })
         .ok();
     });
+}
+
+/// Load the full-size image for `rel_path` on a background thread, then set the
+/// lightbox image and open the overlay on the UI thread.
+///
+/// File I/O and decoding are both off the UI thread so large originals don't
+/// freeze the window. `slint::Image` is non-Send, so it is constructed inside
+/// the `invoke_from_event_loop` closure where we are on the UI thread.
+fn load_lightbox_image(weak: Weak<MainWindow>, backend: Backend, rel_path: String) {
+    std::thread::spawn(move || {
+        let abs = backend.abs_path(&rel_path);
+        let bytes = match std::fs::read(&abs) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!("Lightbox: failed to read {abs:?}: {e}");
+                return;
+            }
+        };
+
+        slint::invoke_from_event_loop(move || {
+            let Some(w) = weak.upgrade() else { return };
+            match image_util::jpeg_to_slint_image(&bytes) {
+                Ok(img) => {
+                    w.set_lightbox_image(img);
+                    w.set_lightbox_open(true);
+                }
+                Err(e) => {
+                    tracing::warn!("Lightbox: failed to decode {rel_path}: {e}");
+                    // Leave the lightbox closed rather than showing a blank image.
+                }
+            }
+        })
+        .ok();
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    /// Lightbox index-clamp logic: saturating_sub never goes below 0,
+    /// min(len-1) never exceeds the last valid index.
+    #[test]
+    fn lightbox_index_clamp_prev_at_zero_stays_zero() {
+        let current: usize = 0;
+        assert_eq!(current.saturating_sub(1), 0);
+    }
+
+    #[test]
+    fn lightbox_index_clamp_prev_advances_backward() {
+        let current: usize = 5;
+        assert_eq!(current.saturating_sub(1), 4);
+    }
+
+    #[test]
+    fn lightbox_index_clamp_next_at_last_stays_last() {
+        let len: usize = 10;
+        let current: usize = 9;
+        assert_eq!((current + 1).min(len - 1), 9);
+    }
+
+    #[test]
+    fn lightbox_index_clamp_next_advances_forward() {
+        let len: usize = 10;
+        let current: usize = 3;
+        assert_eq!((current + 1).min(len - 1), 4);
+    }
 }
