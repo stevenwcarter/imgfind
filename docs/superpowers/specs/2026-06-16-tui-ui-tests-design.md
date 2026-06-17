@@ -117,6 +117,11 @@ Snapshots are text-only and miss color; these pin the styles/specific text:
 
 ## Determinism
 
+- **Implementation note:** the test-builder uses `Picker::halfblocks()` (not
+  `Picker::from_fontsize`, which is deprecated since ratatui-image 9.0.0 and
+  reads env to maybe select a non-halfblocks protocol). `halfblocks()` forces
+  `ProtocolType::Halfblocks` for guaranteed-deterministic, env-independent
+  output.
 - Fixed `Picker::from_fontsize` value (e.g. `(8, 16)`), fixed `80×24` area, and
   fixed solid-color test images → stable halfblock cell output across runs.
 - No reliance on the real terminal, env, time, or RNG.
