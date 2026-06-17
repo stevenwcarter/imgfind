@@ -1,9 +1,102 @@
+import { LineEdit, Button, ScrollView } from "std-widgets.slint";
+
+export struct Tile {
+    path: string,
+    image: image,
+    size-kb: int,
+}
+
 export component MainWindow inherits Window {
     title: "imgfind";
     preferred-width: 1100px;
     preferred-height: 800px;
-    Text {
-        text: "imgfind";
-        font-size: 24px;
+    background: #1f2430;
+
+    // Properties set from Rust.
+    in property <[Tile]> tiles;
+    in property <string> status;
+    in property <bool> show-load-more;
+    in property <bool> can-search: false;
+
+    callback search(string);
+    callback load-more();
+    callback tile-clicked(int);
+    callback tile-open-external(int);
+
+    // Grid geometry constants.
+    // tile-size + gap determines the stride; cols is derived from window width.
+    private property <length> tile-size: 200px;
+    private property <length> tile-gap: 8px;
+    private property <length> tile-stride: tile-size + tile-gap;
+    // Number of columns that fit in the available width (approx window width minus padding).
+    private property <int> cols: max(1, floor((root.width - 32px) / tile-stride));
+    // Total grid height: enough rows * stride, plus trailing gap.
+    private property <int> row-count: max(1, ceil(tiles.length / cols));
+    private property <length> grid-height: row-count * tile-stride;
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 12px;
+
+        HorizontalLayout {
+            spacing: 8px;
+            LineEdit {
+                placeholder-text: root.can-search ? "Search images..." : "Loading model...";
+                enabled: root.can-search;
+                accepted(text) => { root.search(text); }
+            }
+        }
+
+        Text {
+            text: root.status;
+            color: #9aa4b2;
+            visible: root.status != "";
+        }
+
+        ScrollView {
+            // Give the scroll view all remaining vertical space.
+            vertical-stretch: 1;
+
+            // Explicitly size the viewport so the ScrollView knows how tall the content is.
+            viewport-height: root.grid-height + (root.show-load-more ? 60px : 0px);
+            viewport-width: root.cols * root.tile-stride;
+
+            // Tiles rendered with absolute x/y derived from index arithmetic.
+            for tile[i] in root.tiles: Rectangle {
+                x: mod(i, root.cols) * root.tile-stride;
+                y: floor(i / root.cols) * root.tile-stride;
+                width: root.tile-size;
+                height: root.tile-size;
+                border-radius: 6px;
+                clip: true;
+                background: #2d3446;
+
+                Image {
+                    source: tile.image;
+                    image-fit: cover;
+                    width: 100%;
+                    height: 100%;
+                }
+
+                TouchArea {
+                    width: 100%;
+                    height: 100%;
+                    clicked => { root.tile-clicked(i); }
+                    pointer-event(e) => {
+                        if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                            root.tile-open-external(i);
+                        }
+                    }
+                }
+            }
+
+            // "Load more" button sits below the grid inside the same viewport.
+            if root.show-load-more: Button {
+                x: 0px;
+                y: root.grid-height + 8px;
+                text: "Load more";
+                clicked => { root.load-more(); }
+            }
+        }
     }
 }
