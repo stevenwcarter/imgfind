@@ -5,7 +5,9 @@ use hashbrown::HashMap;
 use image::GenericImageView;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{Connection, OptionalExtension, ffi::sqlite3_auto_extension, params};
+use rusqlite::types::Value;
+use rusqlite::{Connection, OptionalExtension, ffi::sqlite3_auto_extension, params, params_from_iter};
+use crate::filters::{Filters, build_filter_clause};
 use sqlite_vec::sqlite3_vec_init;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -1209,6 +1211,66 @@ impl Database {
         Ok((clustered, original_count))
     }
 
+    /// Browse all indexed images matching `f` (no vector search), most-recent first.
+    ///
+    /// Images without a metadata row still appear when filters are permissive,
+    /// because the join is a LEFT JOIN. Returns `(relative_path, file_size)` rows.
+    pub fn browse(&self, f: &Filters, limit: usize, offset: usize) -> Result<Vec<(String, Option<i64>)>> {
+        let (clause, mut values) = build_filter_clause(f);
+        let sql = format!(
+            "SELECT i.path, m.file_size
+               FROM images i
+               LEFT JOIN image_metadata m ON m.image_id = i.id
+              WHERE 1=1{clause}
+              ORDER BY m.datetime_taken DESC, i.id DESC
+              LIMIT ? OFFSET ?"
+        );
+        values.push(Value::Integer(limit as i64));
+        values.push(Value::Integer(offset as i64));
+        let conn = self.pool.get().context("DB connection for browse")?;
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(params_from_iter(values), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Distinct lowercased file extensions present across all indexed image paths.
+    ///
+    /// The extension is extracted Rust-side (via `rsplit_once('.')`) after
+    /// `lower()` is applied in SQL, so both `a.JPG` and `b.jpg` yield `"jpg"`.
+    /// Deduplication is handled by a `BTreeSet` (also giving alphabetical order).
+    pub fn distinct_extensions(&self) -> Result<Vec<String>> {
+        let conn = self.pool.get().context("DB connection for distinct_extensions")?;
+        let mut stmt = conn.prepare("SELECT DISTINCT lower(path) FROM images")?;
+        let paths = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut set = std::collections::BTreeSet::new();
+        for p in paths {
+            if let Some((_, ext)) = p.rsplit_once('.')
+                && !ext.is_empty()
+                && !ext.contains('/')
+            {
+                set.insert(ext.to_string());
+            }
+        }
+        Ok(set.into_iter().collect())
+    }
+
+    /// `(min, max)` of non-null `file_size` values; `(0, 0)` when no rows have a size.
+    pub fn file_size_bounds(&self) -> Result<(i64, i64)> {
+        let conn = self.pool.get().context("DB connection for file_size_bounds")?;
+        let (min, max): (Option<i64>, Option<i64>) = conn.query_row(
+            "SELECT MIN(file_size), MAX(file_size) FROM image_metadata WHERE file_size IS NOT NULL",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok((min.unwrap_or(0), max.unwrap_or(0)))
+    }
+
     /// Get the image ID by path
     pub fn get_image_id(&self, path: &AbsolutePath) -> Result<i64> {
         // Convert absolute path to relative path for database lookup
@@ -1882,6 +1944,106 @@ mod tests {
         // a.jpg (the seed) is closest to itself.
         assert_eq!(rows[0].0, "a.jpg");
 
+        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn browse_filters_by_size_type_and_gps() {
+        use crate::filters::{Filters, GpsFilter};
+        let db_path = temp_db_path();
+        let db = Database::new(&db_path).expect("db");
+        {
+            let conn = db.pool.get().expect("conn");
+            // (id, path, size, lat, lon)
+            let rows = [
+                (1, "a.jpg", 1000i64, Some(1.0f64), Some(2.0f64)),
+                (2, "b.png", 5000, None, None),
+                (3, "c.jpg", 9000, Some(3.0), Some(4.0)),
+                (4, "d.nef", 200, None, None),
+            ];
+            for (id, path, size, lat, lon) in rows {
+                conn.execute(
+                    "INSERT INTO images (id, path, hash) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![id, path, format!("h{id}")],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO image_metadata (image_id, file_size, latitude, longitude) VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![id, size, lat, lon],
+                )
+                .unwrap();
+            }
+        }
+
+        let all = db.browse(&Filters::default(), 100, 0).unwrap();
+        assert_eq!(all.len(), 4);
+
+        // jpg only
+        let jpg = db
+            .browse(
+                &Filters { extensions: vec!["jpg".into()], ..Default::default() },
+                100,
+                0,
+            )
+            .unwrap();
+        let p: Vec<&str> = jpg.iter().map(|(x, _)| x.as_str()).collect();
+        assert_eq!(p.len(), 2);
+        assert!(p.contains(&"a.jpg") && p.contains(&"c.jpg"));
+
+        // size 500..6000
+        let sized = db
+            .browse(
+                &Filters { size_min: Some(500), size_max: Some(6000), ..Default::default() },
+                100,
+                0,
+            )
+            .unwrap();
+        let p: Vec<&str> = sized.iter().map(|(x, _)| x.as_str()).collect();
+        assert!(
+            p.contains(&"a.jpg")
+                && p.contains(&"b.png")
+                && !p.contains(&"c.jpg")
+                && !p.contains(&"d.nef")
+        );
+
+        // has GPS
+        let gps = db
+            .browse(
+                &Filters { gps: GpsFilter::HasGps, ..Default::default() },
+                100,
+                0,
+            )
+            .unwrap();
+        let p: Vec<&str> = gps.iter().map(|(x, _)| x.as_str()).collect();
+        assert_eq!(p.len(), 2);
+        assert!(p.contains(&"a.jpg") && p.contains(&"c.jpg"));
+
+        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn distinct_extensions_and_size_bounds() {
+        let db_path = temp_db_path();
+        let db = Database::new(&db_path).expect("db");
+        {
+            let conn = db.pool.get().expect("conn");
+            for (id, path, size) in [(1, "a.JPG", 10i64), (2, "b.png", 50), (3, "c.jpg", 30)] {
+                conn.execute(
+                    "INSERT INTO images (id, path, hash) VALUES (?1,?2,?3)",
+                    rusqlite::params![id, path, format!("h{id}")],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO image_metadata (image_id, file_size) VALUES (?1,?2)",
+                    rusqlite::params![id, size],
+                )
+                .unwrap();
+            }
+        }
+        let mut exts = db.distinct_extensions().unwrap();
+        exts.sort();
+        assert_eq!(exts, vec!["jpg".to_string(), "png".to_string()]); // lowercased, deduped
+        assert_eq!(db.file_size_bounds().unwrap(), (10, 50));
         let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
     }
 }
