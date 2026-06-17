@@ -663,9 +663,8 @@ impl Database {
                AND EXISTS (SELECT 1 FROM {vt} WHERE rowid = i.id)"
         );
 
-        let count: i64 = conn.query_row(&sql, params![rel_path_str.as_ref(), hash], |row| {
-            row.get(0)
-        })?;
+        let count: i64 =
+            conn.query_row(&sql, params![rel_path_str.as_ref(), hash], |row| row.get(0))?;
         Ok(count > 0)
     }
 

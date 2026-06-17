@@ -27,7 +27,11 @@ impl Backend {
         let db_path = get_db_path(dir).context("Failed to resolve image database")?;
         let db = Database::new(&db_path).context("Failed to open database")?;
         let parent_dir = db.parent_dir.clone();
-        Ok(Backend { db, embedder: Arc::new(OnceLock::new()), parent_dir })
+        Ok(Backend {
+            db,
+            embedder: Arc::new(OnceLock::new()),
+            parent_dir,
+        })
     }
 
     /// Build the CLIP embedder on a background thread (it can take seconds and
@@ -37,9 +41,11 @@ impl Backend {
         let db = self.db.clone();
         std::thread::spawn(move || {
             let result = (|| -> Result<ClipEmbedder> {
-                let model_name = db.active_model().context("Failed to resolve active model")?.name;
-                ClipEmbedder::from_model(&model_name, false)
-                    .context("Failed to load CLIP model")
+                let model_name = db
+                    .active_model()
+                    .context("Failed to resolve active model")?
+                    .name;
+                ClipEmbedder::from_model(&model_name, false).context("Failed to load CLIP model")
             })();
             match result {
                 Ok(e) => {
@@ -65,11 +71,21 @@ impl Backend {
         let sc = SearchConfig::default();
         let engine = SearchEngine::new(&self.db);
         let rows = engine
-            .search_meta(embedding, PAGE_SIZE, offset, sc.distance_threshold, sc.max_k)
+            .search_meta(
+                embedding,
+                PAGE_SIZE,
+                offset,
+                sc.distance_threshold,
+                sc.max_k,
+            )
             .context("Search failed")?;
         Ok(rows
             .into_iter()
-            .map(|(path, distance, file_size)| SearchResult { path, distance, file_size })
+            .map(|(path, distance, file_size)| SearchResult {
+                path,
+                distance,
+                file_size,
+            })
             .collect())
     }
 
@@ -106,7 +122,11 @@ mod tests {
 
     fn backend_with(db: Database) -> Backend {
         let parent_dir = db.parent_dir.clone();
-        Backend { db, embedder: Arc::new(OnceLock::new()), parent_dir }
+        Backend {
+            db,
+            embedder: Arc::new(OnceLock::new()),
+            parent_dir,
+        }
     }
 
     #[test]
@@ -130,7 +150,8 @@ mod tests {
             )
             .expect("insert image");
         }
-        db.insert_thumbnail("h", 300, &[1, 2, 3, 4]).expect("insert thumb");
+        db.insert_thumbnail("h", 300, &[1, 2, 3, 4])
+            .expect("insert thumb");
 
         let backend = backend_with(db);
         let bytes = backend.thumbnail("a.jpg", 300).expect("thumb");
@@ -174,8 +195,13 @@ mod tests {
         }
 
         let backend = backend_with(db);
-        let bytes = backend.thumbnail("pic.png", 64).expect("thumbnail from abs path");
-        assert!(!bytes.is_empty(), "thumbnail bytes must be non-empty on cache miss");
+        let bytes = backend
+            .thumbnail("pic.png", 64)
+            .expect("thumbnail from abs path");
+        assert!(
+            !bytes.is_empty(),
+            "thumbnail bytes must be non-empty on cache miss"
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

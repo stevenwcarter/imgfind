@@ -271,7 +271,11 @@ async fn main() -> Result<()> {
                 ModelsAction::List => {
                     for row in imgfind::models::list_rows(&db)? {
                         let mark = if row.active { "*" } else { " " };
-                        let tag = if row.indexed { "" } else { " [available, not indexed]" };
+                        let tag = if row.indexed {
+                            ""
+                        } else {
+                            " [available, not indexed]"
+                        };
                         println!("{} {} (dim {}){}", mark, row.name, row.dim, tag);
                     }
                 }
@@ -359,8 +363,8 @@ fn index_directory(
         pb
     };
     let model_name = db.active_model()?.name;
-    let model = ClipEmbedder::from_model(&model_name, false)
-        .context("Failed to create ClipEmbedder")?;
+    let model =
+        ClipEmbedder::from_model(&model_name, false).context("Failed to create ClipEmbedder")?;
     spinner.finish_and_clear();
     info!("CLIP model loaded successfully");
 
@@ -694,8 +698,8 @@ fn search_images(
     spinner.set_message("Loading CLIP model… (this may take a minute on first use)");
     spinner.enable_steady_tick(std::time::Duration::from_millis(120));
     let model_name = db.active_model()?.name;
-    let model = ClipEmbedder::from_model(&model_name, false)
-        .context("Failed to create ClipEmbedder")?;
+    let model =
+        ClipEmbedder::from_model(&model_name, false).context("Failed to create ClipEmbedder")?;
     spinner.finish_and_clear();
 
     // Generate embedding for query
@@ -865,9 +869,7 @@ fn handle_config_command(config_command: ConfigCommands) -> Result<()> {
             println!("Configuration file: {}", config_path.display());
             match &config.default_model {
                 Some(m) => println!("Default model: {m}"),
-                None => println!(
-                    "Default model: (built-in baseline) openai/clip-vit-base-patch32"
-                ),
+                None => println!("Default model: (built-in baseline) openai/clip-vit-base-patch32"),
             }
             println!("Ignore patterns:");
             if config.ignore_patterns.is_empty() {

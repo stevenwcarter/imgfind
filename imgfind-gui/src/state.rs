@@ -88,7 +88,11 @@ mod tests {
     use super::*;
 
     fn r(path: &str) -> SearchResult {
-        SearchResult { path: path.into(), distance: 0.1, file_size: Some(1024) }
+        SearchResult {
+            path: path.into(),
+            distance: 0.1,
+            file_size: Some(1024),
+        }
     }
 
     #[test]

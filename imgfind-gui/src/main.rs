@@ -26,8 +26,7 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt().init();
 
     let args = Args::parse();
-    let backend =
-        Backend::open(args.dir.as_deref()).context("Failed to open imgfind database")?;
+    let backend = Backend::open(args.dir.as_deref()).context("Failed to open imgfind database")?;
     backend.start_loading_model();
 
     let window = MainWindow::new().context("Failed to create window")?;
@@ -143,7 +142,12 @@ fn main() -> Result<()> {
         let backend_lb = backend.clone();
         window.on_tile_clicked(move |index| {
             let idx = index as usize;
-            let path = state_ref.lock().unwrap().results.get(idx).map(|r| r.path.clone());
+            let path = state_ref
+                .lock()
+                .unwrap()
+                .results
+                .get(idx)
+                .map(|r| r.path.clone());
             let Some(rel) = path else { return };
             *lb_ref.lock().unwrap() = Some(idx);
             load_lightbox_image(weak.clone(), backend_lb.clone(), rel);
@@ -194,8 +198,12 @@ fn main() -> Result<()> {
                 *guard = Some(next);
                 next
             };
-            let path =
-                state_ref.lock().unwrap().results.get(new_idx).map(|r| r.path.clone());
+            let path = state_ref
+                .lock()
+                .unwrap()
+                .results
+                .get(new_idx)
+                .map(|r| r.path.clone());
             if let Some(rel) = path {
                 load_lightbox_image(weak.clone(), backend_lb.clone(), rel);
             }
@@ -221,8 +229,12 @@ fn main() -> Result<()> {
             if len == 0 {
                 return;
             }
-            let path =
-                state_ref.lock().unwrap().results.get(new_idx).map(|r| r.path.clone());
+            let path = state_ref
+                .lock()
+                .unwrap()
+                .results
+                .get(new_idx)
+                .map(|r| r.path.clone());
             if let Some(rel) = path {
                 load_lightbox_image(weak.clone(), backend_lb.clone(), rel);
             }
@@ -246,7 +258,11 @@ fn build_tiles_model(results: &[SearchResult], raw_thumbs: Vec<Option<Vec<u8>>>)
                 .and_then(|bytes| image_util::jpeg_to_slint_image(&bytes).ok())
                 .unwrap_or_default();
             let size_kb = r.file_size.unwrap_or(0) / 1024;
-            Tile { path: r.path.clone().into(), image: img, size_kb: size_kb as i32 }
+            Tile {
+                path: r.path.clone().into(),
+                image: img,
+                size_kb: size_kb as i32,
+            }
         })
         .collect();
     ModelRc::from(std::rc::Rc::new(VecModel::from(tiles)))
