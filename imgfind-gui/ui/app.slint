@@ -31,7 +31,7 @@ export component MainWindow inherits Window {
     // Number of columns that fit in the available width (approx window width minus padding).
     private property <int> cols: max(1, floor((root.width - 32px) / tile-stride));
     // Total grid height: enough rows * stride, plus trailing gap.
-    private property <int> row-count: max(1, ceil(tiles.length / cols));
+    private property <int> row-count: ceil(tiles.length / cols);
     private property <length> grid-height: row-count * tile-stride;
 
     VerticalLayout {

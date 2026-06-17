@@ -153,14 +153,13 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Build a `ModelRc<Tile>` from the current state, decoding thumbnails via the backend.
-fn build_tiles_model(results: &[SearchResult], backend: &Backend) -> ModelRc<Tile> {
+/// Decode raw JPEG bytes (already on the UI thread) into Slint `Image` tiles.
+fn build_tiles_model(results: &[SearchResult], raw_thumbs: Vec<Option<Vec<u8>>>) -> ModelRc<Tile> {
     let tiles: Vec<Tile> = results
         .iter()
-        .map(|r| {
-            let img = backend
-                .thumbnail(&r.path, 300)
-                .ok()
+        .zip(raw_thumbs)
+        .map(|(r, maybe_bytes)| {
+            let img = maybe_bytes
                 .and_then(|bytes| image_util::jpeg_to_slint_image(&bytes).ok())
                 .unwrap_or_default();
             let size_kb = r.file_size.unwrap_or(0) / 1024;
@@ -170,17 +169,20 @@ fn build_tiles_model(results: &[SearchResult], backend: &Backend) -> ModelRc<Til
     ModelRc::from(std::rc::Rc::new(VecModel::from(tiles)))
 }
 
-fn status_text_for(vs: ViewState) -> &'static str {
+fn status_text_for(vs: ViewState, error_msg: Option<&str>) -> slint::SharedString {
     match vs {
-        ViewState::Idle => "Enter a search query to find images.",
-        ViewState::Loading => "Searching\u{2026}",
-        ViewState::Error => "",
-        ViewState::Empty => "No images found.",
-        ViewState::Results => "",
+        ViewState::Idle => "Enter a search query to find images.".into(),
+        ViewState::Loading => "Searching\u{2026}".into(),
+        ViewState::Error => error_msg.unwrap_or("Unknown error").into(),
+        ViewState::Empty => "No images found.".into(),
+        ViewState::Results => "".into(),
     }
 }
 
 /// Spawn a background search thread and marshal results back to the UI thread.
+///
+/// DB and disk I/O (thumbnail fetches) happen on the worker thread; only the
+/// non-`Send` `slint::Image` decode runs inside `invoke_from_event_loop`.
 fn spawn_search(
     weak: Weak<MainWindow>,
     state_ref: Arc<Mutex<SearchState>>,
@@ -190,10 +192,21 @@ fn spawn_search(
 ) {
     std::thread::spawn(move || {
         let res = backend.search(&query, offset);
+
+        // Fetch raw thumbnail bytes on the worker thread (DB/disk I/O).
+        // `Vec<Option<Vec<u8>>>` is Send; `slint::Image` is not.
+        let raw_thumbs: Vec<Option<Vec<u8>>> = match &res {
+            Ok(results) => results
+                .iter()
+                .map(|r| backend.thumbnail(&r.path, 300).ok())
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+
         slint::invoke_from_event_loop(move || {
             let Some(w) = weak.upgrade() else { return };
 
-            let results_snapshot = {
+            let (vs, has_more, error_msg, results) = {
                 let mut s = state_ref.lock().unwrap();
                 match res {
                     Ok(page) => s.apply_page(page, offset),
@@ -205,19 +218,14 @@ fn spawn_search(
                 let results = s.results.clone();
                 (vs, has_more, error_msg, results)
             };
-            let (vs, has_more, error_msg, results) = results_snapshot;
 
-            // Rebuild tiles on success.
+            // Only the (non-Send) JPEG→slint::Image decode runs here on the UI thread.
             if matches!(vs, ViewState::Results | ViewState::Empty) {
-                let model = build_tiles_model(&results, &backend);
+                let model = build_tiles_model(&results, raw_thumbs);
                 w.set_tiles(model);
             }
 
-            let status_text: slint::SharedString = match vs {
-                ViewState::Error => error_msg.as_deref().unwrap_or("Unknown error").into(),
-                other => status_text_for(other).into(),
-            };
-            w.set_status(status_text);
+            w.set_status(status_text_for(vs, error_msg.as_deref()));
             w.set_show_load_more(has_more && vs == ViewState::Results);
             w.set_can_search(true);
         })
