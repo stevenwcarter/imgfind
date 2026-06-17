@@ -5,17 +5,19 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use image::{DynamicImage, RgbImage};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::style::Color;
 use ratatui_image::picker::Picker;
+use ratatui_image::thread::ThreadProtocol;
 use tokio::sync::mpsc::unbounded_channel;
 use tui_input::Input;
 
 use super::app::{App, InputMode};
 use super::event::EventHandler;
 use crate::database::Database;
-use crate::tui::app::SearchResult;
+use crate::tui::app::{ImageEntry, SearchResult};
 
 /// Fixed terminal size for all render tests.
 const W: u16 = 80;
@@ -138,8 +140,9 @@ fn renders_help_overlay_with_keybindings() {
         out.contains("Keybindings"),
         "help overlay title should render"
     );
-    // A known key from keybindings_help() (the `e` edit-search entry).
-    assert!(out.contains('e'), "help overlay should list keybindings");
+    // A multi-char keybinding token from keybindings_help() that does not
+    // appear in the frame title or border chrome.
+    assert!(out.contains("h/j/k/l"), "help overlay should list the focus keys");
     insta::assert_snapshot!("help_overlay", out);
     let _ = std::fs::remove_dir_all(root);
 }
@@ -178,5 +181,96 @@ fn pagination_reports_multiple_pages() {
         out.contains("Page 1/3 (20 results)"),
         "multi-page pagination"
     );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Build an `ImageEntry` from a tiny solid-color image, mirroring the
+/// production construction in `app/search.rs`: a `ThreadProtocol` wrapping a
+/// `new_resize_protocol`, with the paired resize-request receiver stored.
+fn test_image_entry(picker: &mut Picker, path: &str, score: f32, rgb: [u8; 3]) -> ImageEntry {
+    let img = DynamicImage::ImageRgb8(RgbImage::from_pixel(16, 16, image::Rgb(rgb)));
+    let protocol = picker.new_resize_protocol(img.clone());
+    let (image_tx, image_rx) = unbounded_channel();
+    ImageEntry {
+        path: path.to_string(),
+        score,
+        rx: image_rx,
+        current_zoom: 1,
+        image: Some(img),
+        protocol: ThreadProtocol::new(image_tx, Some(protocol)),
+    }
+}
+
+/// Verifies that the results grid renders score labels, pagination, and the
+/// yellow focus border for the focused cell, all from a single draw call
+/// (no resize dance needed — `render_image` draws the border around the image
+/// area regardless of whether pixels have been resized yet).
+#[test]
+fn results_grid_shows_score_label_and_focus_border() {
+    let (db, root) = temp_db();
+    let mut app = test_app(db);
+
+    // Build entries using the app's own picker (Picker: Clone).
+    let mut picker = app.picker.clone();
+    app.images = vec![
+        test_image_entry(&mut picker, "a.jpg", 0.123, [200, 30, 30]),
+        test_image_entry(&mut picker, "b.jpg", 0.456, [30, 200, 30]),
+    ];
+    app.search_result = Some(SearchResult {
+        images: vec![
+            (
+                "a.jpg".into(),
+                0.123,
+                DynamicImage::ImageRgb8(RgbImage::new(1, 1)),
+            ),
+            (
+                "b.jpg".into(),
+                0.456,
+                DynamicImage::ImageRgb8(RgbImage::new(1, 1)),
+            ),
+        ],
+        result_count: 2,
+        query: "things".to_string(),
+    });
+    app.focused_image_index = 0;
+
+    let backend = TestBackend::new(W, H);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|frame| frame.render_widget(&mut app, frame.area()))
+        .expect("draw");
+    let text = format!("{}", terminal.backend());
+    let buf = terminal.backend().buffer().clone();
+
+    // Score labels render overlaid on each cell regardless of resize state.
+    assert!(text.contains("0.123"), "focused score label should render");
+    assert!(text.contains("0.456"), "second score label should render");
+
+    // Pagination reflects the 2 results (full string also contains "[H prev | L next]").
+    assert!(
+        text.contains("Page 1/1 (2 results)"),
+        "grid pagination should reflect result count"
+    );
+
+    // The focused cell (index 0) has a yellow border. `render_image` draws a
+    // Block::bordered with fg(Color::Yellow) only when index == focused_image_index,
+    // so at least one cell in the grid area must carry Yellow foreground.
+    let grid_has_yellow = (0..W).any(|x| (0..H).any(|y| buf[(x, y)].fg == Color::Yellow));
+    if !grid_has_yellow {
+        eprintln!("--- buffer text ---\n{text}");
+        for y in 0..H {
+            for x in 0..W {
+                let cell = &buf[(x, y)];
+                if cell.fg != Color::Reset {
+                    eprintln!("fg={:?} at ({x},{y}): {:?}", cell.fg, cell.symbol());
+                }
+            }
+        }
+    }
+    assert!(
+        grid_has_yellow,
+        "focused image cell should have a yellow border"
+    );
+
     let _ = std::fs::remove_dir_all(root);
 }
