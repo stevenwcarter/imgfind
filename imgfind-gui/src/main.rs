@@ -14,8 +14,18 @@ use clap::Parser;
 use slint::{ModelRc, Timer, TimerMode, VecModel, Weak};
 
 use backend::Backend;
-use detail::{DetailState, format_metadata, select};
+use detail::{DetailState, filename_of, format_metadata, select};
 use state::{SearchResult, SearchState, ViewState};
+
+/// Whether the current tile grid was populated by a text search or a
+/// vector-similarity search.  Stored in an `Arc<Mutex<_>>` so both the
+/// `on_search` / `on_search_similar` closures (which set it) and
+/// `on_load_more` (which reads it) share the same value across threads.
+#[derive(Clone)]
+enum SearchMode {
+    Text(String),
+    Similar(String),
+}
 
 #[derive(Parser)]
 #[command(name = "imgfind-gui", about = "CLIP image search — native GUI")]
@@ -51,6 +61,11 @@ fn main() -> Result<()> {
     // Currently selected detail image. None when the panel is closed.
     let detail: Arc<Mutex<Option<DetailState>>> = Arc::new(Mutex::new(None));
 
+    // Tracks whether the tile grid was populated by a text or similarity search,
+    // so `on_load_more` knows which backend method to call.
+    let search_mode: Arc<Mutex<SearchMode>> =
+        Arc::new(Mutex::new(SearchMode::Text(String::new())));
+
     // Poll for model readiness every 250 ms.  The timer performs exactly ONE
     // job: detect the loading→ready transition, enable the search box, and
     // stop itself.  After that point, search-start (false) and
@@ -83,15 +98,22 @@ fn main() -> Result<()> {
         let state_ref = Arc::clone(&state);
         let lb_ref = Arc::clone(&lb_index);
         let detail_ref = Arc::clone(&detail);
+        let mode_ref = Arc::clone(&search_mode);
         let backend_search = backend.clone();
         window.on_search(move |query| {
             let query = query.trim().to_string();
             if query.is_empty() {
+                // Clearing the search box resets everything, including the
+                // detail panel and lightbox (both could hold stale state).
                 *state_ref.lock().unwrap() = SearchState::new();
+                *detail_ref.lock().unwrap() = None;
+                *lb_ref.lock().unwrap() = None;
                 if let Some(w) = weak.upgrade() {
                     w.set_status("Enter a search query to find images.".into());
                     w.set_show_load_more(false);
                     w.set_tiles(ModelRc::default());
+                    w.set_detail_open(false);
+                    w.set_lightbox_open(false);
                 }
                 return;
             }
@@ -100,6 +122,7 @@ fn main() -> Result<()> {
             // results — stored indices would otherwise be stale.
             *lb_ref.lock().unwrap() = None;
             *detail_ref.lock().unwrap() = None;
+            *mode_ref.lock().unwrap() = SearchMode::Text(query.clone());
             if let Some(w) = weak.upgrade() {
                 w.set_lightbox_open(false);
                 w.set_detail_open(false);
@@ -126,28 +149,45 @@ fn main() -> Result<()> {
     {
         let weak = window.as_weak();
         let state_ref = Arc::clone(&state);
+        let mode_ref = Arc::clone(&search_mode);
         let backend_more = backend.clone();
         window.on_load_more(move || {
-            let (query, offset) = {
-                let s = state_ref.lock().unwrap();
-                (s.committed_query.clone(), s.next_offset())
-            };
-            if query.is_empty() {
-                return;
-            }
+            let offset = state_ref.lock().unwrap().next_offset();
+            let mode = mode_ref.lock().unwrap().clone();
+
             if let Some(w) = weak.upgrade() {
                 w.set_status("Searching\u{2026}".into());
                 w.set_show_load_more(false);
                 w.set_can_search(false);
             }
 
-            spawn_search(
-                weak.clone(),
-                Arc::clone(&state_ref),
-                backend_more.clone(),
-                query,
-                offset,
-            );
+            match mode {
+                SearchMode::Text(query) if !query.is_empty() => {
+                    spawn_search(
+                        weak.clone(),
+                        Arc::clone(&state_ref),
+                        backend_more.clone(),
+                        query,
+                        offset,
+                    );
+                }
+                SearchMode::Similar(seed) if !seed.is_empty() => {
+                    spawn_similar(
+                        weak.clone(),
+                        Arc::clone(&state_ref),
+                        backend_more.clone(),
+                        seed,
+                        offset,
+                    );
+                }
+                _ => {
+                    // No active search — restore UI to idle.
+                    if let Some(w) = weak.upgrade() {
+                        w.set_can_search(true);
+                        w.set_show_load_more(false);
+                    }
+                }
+            }
         });
     }
 
@@ -256,10 +296,64 @@ fn main() -> Result<()> {
         });
     }
 
-    // --- search-similar callback (Task 5 will implement the full behaviour) ---
-    window.on_search_similar(|| {
-        tracing::debug!("search-similar: not yet implemented (Task 5)");
-    });
+    // --- detail-view-full callback: open the lightbox showing the seed image ---
+    //
+    // Uses the seed's path directly from the `detail` holder rather than a
+    // grid index, so it stays valid after `search-similar` replaces the tile
+    // grid while the panel remains open on the seed.
+    {
+        let weak = window.as_weak();
+        let detail_ref = Arc::clone(&detail);
+        let backend_vf = backend.clone();
+        window.on_detail_view_full(move || {
+            let seed_path = {
+                let d = detail_ref.lock().unwrap();
+                d.as_ref().map(|ds| ds.path.clone())
+            };
+            let Some(rel) = seed_path else { return };
+            load_lightbox_image(weak.clone(), backend_vf.clone(), rel);
+        });
+    }
+
+    // --- search-similar callback ---
+    //
+    // Replaces the tile grid with images similar to the currently open seed,
+    // while keeping the detail panel open on the seed.
+    {
+        let weak = window.as_weak();
+        let state_ref = Arc::clone(&state);
+        let detail_ref = Arc::clone(&detail);
+        let mode_ref = Arc::clone(&search_mode);
+        let backend_sim = backend.clone();
+        window.on_search_similar(move || {
+            let seed_path = {
+                let d = detail_ref.lock().unwrap();
+                d.as_ref().map(|ds| ds.path.clone())
+            };
+            let Some(seed_path) = seed_path else { return };
+
+            let filename = filename_of(&seed_path);
+            *mode_ref.lock().unwrap() = SearchMode::Similar(seed_path.clone());
+
+            // `start_search` records the seed path as the "committed query" so
+            // `apply_page` / `apply_error` work correctly for offset tracking.
+            state_ref.lock().unwrap().start_search(seed_path.clone());
+            if let Some(w) = weak.upgrade() {
+                w.set_status(format!("Similar to {filename}").into());
+                w.set_show_load_more(false);
+                w.set_can_search(false);
+                // detail-open stays TRUE — panel remains on the seed.
+            }
+
+            spawn_similar(
+                weak.clone(),
+                Arc::clone(&state_ref),
+                backend_sim.clone(),
+                seed_path,
+                0,
+            );
+        });
+    }
 
     // --- lightbox-close callback ---
     {
@@ -408,6 +502,58 @@ fn spawn_search(
             };
 
             // Only the (non-Send) JPEG→slint::Image decode runs here on the UI thread.
+            if matches!(vs, ViewState::Results | ViewState::Empty) {
+                let model = build_tiles_model(&results, raw_thumbs);
+                w.set_tiles(model);
+            }
+
+            w.set_status(status_text_for(vs, error_msg.as_deref()));
+            w.set_show_load_more(has_more && vs == ViewState::Results);
+            w.set_can_search(true);
+        })
+        .ok();
+    });
+}
+
+/// Like `spawn_search` but calls the vector-similarity backend.
+///
+/// The detail panel stays open (callers keep `detail-open` true); this
+/// function only updates the tile grid.  Closures are `Send + 'static`
+/// for the same reasons as `spawn_search`.
+fn spawn_similar(
+    weak: Weak<MainWindow>,
+    state_ref: Arc<Mutex<SearchState>>,
+    backend: Backend,
+    seed_path: String,
+    offset: usize,
+) {
+    std::thread::spawn(move || {
+        let res = backend.search_similar(&seed_path, offset);
+
+        let raw_thumbs: Vec<Option<Vec<u8>>> = match &res {
+            Ok(results) => results
+                .iter()
+                .map(|r| backend.thumbnail(&r.path, 300).ok())
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+
+        slint::invoke_from_event_loop(move || {
+            let Some(w) = weak.upgrade() else { return };
+
+            let (vs, has_more, error_msg, results) = {
+                let mut s = state_ref.lock().unwrap();
+                match res {
+                    Ok(page) => s.apply_page(page, offset),
+                    Err(e) => s.apply_error(e.to_string(), offset),
+                }
+                let vs = s.view_state();
+                let has_more = s.has_more;
+                let error_msg = s.error.clone();
+                let results = s.results.clone();
+                (vs, has_more, error_msg, results)
+            };
+
             if matches!(vs, ViewState::Results | ViewState::Empty) {
                 let model = build_tiles_model(&results, raw_thumbs);
                 w.set_tiles(model);

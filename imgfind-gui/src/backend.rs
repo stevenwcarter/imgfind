@@ -114,8 +114,6 @@ impl Backend {
 
     /// Images similar to `rel_path`, using its stored embedding. The seed itself
     /// is filtered out of the results.
-    // Not yet wired into the UI; allow until the "similar images" panel calls it.
-    #[allow(dead_code)]
     pub fn search_similar(&self, rel_path: &str, offset: usize) -> Result<Vec<SearchResult>> {
         let sc = SearchConfig::default();
         let rows = self
