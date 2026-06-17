@@ -144,7 +144,9 @@ export component MainWindow inherits Window {
                     HorizontalLayout {
                         alignment: end;
                         Button {
-                            text: "✕";
+                            // U+00D7 (×, Latin-1) renders in Slint's default font;
+                            // the previous ✕ (U+2715) had no glyph and showed as tofu.
+                            text: "×";
                             clicked => { root.detail-close(); }
                         }
                     }
@@ -213,12 +215,14 @@ export component MainWindow inherits Window {
             alignment: space-between;
 
             Button {
-                text: "‹";
+                // ASCII < / > render in Slint's default font; the previous
+                // ‹ › (U+2039/203A) risk showing as tofu like the close button did.
+                text: "<";
                 clicked => { root.lightbox-prev(); }
             }
 
             Button {
-                text: "›";
+                text: ">";
                 clicked => { root.lightbox-next(); }
             }
         }
