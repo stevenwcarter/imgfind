@@ -19,7 +19,7 @@ pub fn render_image(
 ) -> Result<Rect> {
     let image_area = image_entry
         .protocol
-        .size_for(Resize::Scale(None), area)
+        .size_for(Resize::Scale(None), area.into())
         .context("could not find size for image")?;
     let block = Block::bordered()
         .border_type(BorderType::Rounded)

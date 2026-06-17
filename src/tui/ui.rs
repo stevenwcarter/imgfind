@@ -145,14 +145,11 @@ fn build_layout(area: Rect) -> Rc<[Rect]> {
     Layout::default()
         .direction(Direction::Vertical)
         .margin(2)
-        .constraints(
-            [
-                Constraint::Fill(1),
-                Constraint::Length(1),
-                Constraint::Length(3),
-            ]
-            .as_ref(),
-        )
+        .constraints([
+            Constraint::Fill(1),
+            Constraint::Length(1),
+            Constraint::Length(3),
+        ])
         .split(area)
 }
 
