@@ -661,6 +661,8 @@ fn index_directory(
     Ok(())
 }
 
+// CLI dispatch fn; arg list mirrors the clap subcommand flags.
+#[allow(clippy::too_many_arguments)]
 fn search_images(
     db: &Database,
     prompt: &str,

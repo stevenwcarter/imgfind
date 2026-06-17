@@ -93,7 +93,7 @@ pub fn list_rows(db: &Database) -> Result<Vec<ModelRow>> {
 mod tests {
     use super::*;
     use crate::database::Database;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU32, Ordering};
 
     fn temp_db_path() -> PathBuf {
@@ -104,7 +104,7 @@ mod tests {
         dir.join(".imgfind").join("imgfind.db")
     }
 
-    fn cleanup(p: &PathBuf) {
+    fn cleanup(p: &Path) {
         let _ = std::fs::remove_dir_all(p.parent().unwrap().parent().unwrap());
     }
 

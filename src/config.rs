@@ -252,8 +252,10 @@ mod tests {
         assert_eq!(cfg.default_model, None);
 
         // Set value survives a serialize/deserialize round-trip.
-        let mut cfg = Config::default();
-        cfg.default_model = Some("laion/CLIP-ViT-L-14-laion2B-s32B-b82K".to_string());
+        let cfg = Config {
+            default_model: Some("laion/CLIP-ViT-L-14-laion2B-s32B-b82K".to_string()),
+            ..Default::default()
+        };
         let s = toml::to_string(&cfg).unwrap();
         let back: Config = toml::from_str(&s).unwrap();
         assert_eq!(

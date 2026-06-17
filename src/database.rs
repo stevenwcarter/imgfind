@@ -1473,12 +1473,12 @@ mod tests {
         drop(conn);
 
         let p = RelativePath(PathBuf::from("a.jpg"));
-        assert_eq!(db.is_favorite(&p).unwrap(), false);
-        assert_eq!(db.toggle_favorite(&p).unwrap(), true);
-        assert_eq!(db.is_favorite(&p).unwrap(), true);
+        assert!(!db.is_favorite(&p).unwrap());
+        assert!(db.toggle_favorite(&p).unwrap());
+        assert!(db.is_favorite(&p).unwrap());
         assert_eq!(db.list_favorites().unwrap(), vec![p.clone()]);
-        assert_eq!(db.toggle_favorite(&p).unwrap(), false);
-        assert_eq!(db.is_favorite(&p).unwrap(), false);
+        assert!(!db.toggle_favorite(&p).unwrap());
+        assert!(!db.is_favorite(&p).unwrap());
 
         // Remove the unique temp dir (grandparent of the .imgfind/imgfind.db path).
         let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
