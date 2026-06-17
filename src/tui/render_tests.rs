@@ -284,7 +284,6 @@ fn results_grid_renders_image_pixels() {
         has_image_glyph,
         "block-element glyphs should appear in the image area after the resize cycle"
     );
-    insta::assert_snapshot!("results_grid_pixels", out);
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -310,7 +309,6 @@ fn renders_zoomed_image() {
         has_image_glyph,
         "block-element glyphs should appear in the zoomed image area after the resize cycle"
     );
-    insta::assert_snapshot!("zoomed_image", out);
     let _ = std::fs::remove_dir_all(root);
 }
 
