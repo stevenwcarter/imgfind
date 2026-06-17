@@ -142,7 +142,10 @@ fn renders_help_overlay_with_keybindings() {
     );
     // A multi-char keybinding token from keybindings_help() that does not
     // appear in the frame title or border chrome.
-    assert!(out.contains("h/j/k/l"), "help overlay should list the focus keys");
+    assert!(
+        out.contains("h/j/k/l"),
+        "help overlay should list the focus keys"
+    );
     insta::assert_snapshot!("help_overlay", out);
     let _ = std::fs::remove_dir_all(root);
 }
@@ -199,6 +202,116 @@ fn test_image_entry(picker: &mut Picker, path: &str, score: f32, rgb: [u8; 3]) -
         image: Some(img),
         protocol: ThreadProtocol::new(image_tx, Some(protocol)),
     }
+}
+
+/// Build an `ImageEntry` from a two-tone image whose top half is `top_rgb` and
+/// bottom half is `bot_rgb`. The contrast between the two halves ensures that
+/// the primitive halfblocks encoder picks `▀`/`▄` glyphs (not spaces), so the
+/// second render after the resize cycle actually produces visible image cells.
+fn test_image_entry_twotone(
+    picker: &mut Picker,
+    path: &str,
+    score: f32,
+    top_rgb: [u8; 3],
+    bot_rgb: [u8; 3],
+) -> ImageEntry {
+    let img = DynamicImage::ImageRgb8(RgbImage::from_fn(32, 32, |_x, y| {
+        if y < 16 {
+            image::Rgb(top_rgb)
+        } else {
+            image::Rgb(bot_rgb)
+        }
+    }));
+    let protocol = picker.new_resize_protocol(img.clone());
+    let (image_tx, image_rx) = unbounded_channel();
+    ImageEntry {
+        path: path.to_string(),
+        score,
+        rx: image_rx,
+        current_zoom: 1,
+        image: Some(img),
+        protocol: ThreadProtocol::new(image_tx, Some(protocol)),
+    }
+}
+
+/// Render once (queues resize requests on each entry's rx), process the
+/// resize requests (encode the halfblock protocol), then render again so the
+/// image cells contain stable halfblock glyphs.
+fn render_grid_with_pixels_to_string(app: &mut App) -> String {
+    let backend = TestBackend::new(W, H);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|frame| frame.render_widget(&mut *app, frame.area()))
+        .expect("first draw queues resize");
+    app.handle_image_resize_requests();
+    terminal
+        .draw(|frame| frame.render_widget(&mut *app, frame.area()))
+        .expect("second draw renders pixels");
+    format!("{}", terminal.backend())
+}
+
+#[test]
+fn results_grid_renders_image_pixels() {
+    let (db, root) = temp_db();
+    let mut app = test_app(db);
+    let mut picker = app.picker.clone();
+    // Two-tone image: top half red, bottom half blue. The contrast guarantees
+    // the primitive halfblocks encoder emits `▀`/`▄` glyphs, not spaces.
+    app.images = vec![test_image_entry_twotone(
+        &mut picker,
+        "a.jpg",
+        0.123,
+        [200, 30, 30],
+        [30, 30, 200],
+    )];
+    app.search_result = Some(SearchResult {
+        images: vec![(
+            "a.jpg".into(),
+            0.123,
+            DynamicImage::ImageRgb8(RgbImage::new(1, 1)),
+        )],
+        result_count: 1,
+        query: "red".to_string(),
+    });
+    let out = render_grid_with_pixels_to_string(&mut app);
+    // The score label still renders regardless of resize state.
+    assert!(out.contains("0.123"), "score label present");
+    // Confirm the resize cycle produced image glyphs — any Unicode block element
+    // (U+2580–U+259F) counts: primitive halfblocks uses ▀/▄, chafa uses ▁/▔ and
+    // other characters from that range.
+    let has_image_glyph = out.chars().any(|c| ('\u{2580}'..='\u{259f}').contains(&c));
+    assert!(
+        has_image_glyph,
+        "block-element glyphs should appear in the image area after the resize cycle"
+    );
+    insta::assert_snapshot!("results_grid_pixels", out);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn renders_zoomed_image() {
+    let (db, root) = temp_db();
+    let mut app = test_app(db);
+    let mut picker = app.picker.clone();
+    app.zoomed_image_index = Some(0);
+    // Two-tone: top half green, bottom half magenta.
+    app.zoomed_image = Some(test_image_entry_twotone(
+        &mut picker,
+        "z.jpg",
+        0.999,
+        [30, 200, 30],
+        [200, 30, 200],
+    ));
+    let out = render_grid_with_pixels_to_string(&mut app);
+    // Confirm the resize cycle produced image glyphs (see results_grid_renders_image_pixels
+    // for the rationale on the U+2580–U+259F range check).
+    let has_image_glyph = out.chars().any(|c| ('\u{2580}'..='\u{259f}').contains(&c));
+    assert!(
+        has_image_glyph,
+        "block-element glyphs should appear in the zoomed image area after the resize cycle"
+    );
+    insta::assert_snapshot!("zoomed_image", out);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 /// Verifies that the results grid renders score labels, pagination, and the
