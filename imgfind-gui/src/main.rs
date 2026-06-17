@@ -4,6 +4,7 @@ mod backend;
 mod image_util;
 mod state;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -44,21 +45,28 @@ fn main() -> Result<()> {
     // Current lightbox index. None when the lightbox is closed.
     let lb_index: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
 
-    // Poll for model readiness every 250 ms.
+    // Poll for model readiness every 250 ms.  The timer performs exactly ONE
+    // job: detect the loading→ready transition, enable the search box, and
+    // stop itself.  After that point, search-start (false) and
+    // search-completion (true) are the sole owners of `can_search`.
+    let model_ready_handled = Arc::new(AtomicBool::new(false));
     let model_timer = Timer::default();
     {
         let weak = window.as_weak();
         let backend_poll = backend.clone();
+        let handled = Arc::clone(&model_ready_handled);
         model_timer.start(TimerMode::Repeated, Duration::from_millis(250), move || {
-            if backend_poll.model_ready()
-                && let Some(w) = weak.upgrade()
-                && !w.get_can_search()
-            {
-                w.set_can_search(true);
-                // Clear loading status only when no search is in progress.
-                if w.get_status() == "Loading model..." {
+            if handled.load(Ordering::Relaxed) {
+                return;
+            }
+            if backend_poll.model_ready() {
+                if let Some(w) = weak.upgrade() {
+                    w.set_can_search(true);
                     w.set_status("Enter a search query to find images.".into());
                 }
+                // Mark handled *before* stopping so a hypothetical reentrant
+                // tick that fires during stop() is also a no-op.
+                handled.store(true, Ordering::Relaxed);
             }
         });
     }

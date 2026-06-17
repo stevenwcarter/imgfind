@@ -1195,7 +1195,7 @@ pub struct ImageMetadata {
     pub datetime_taken: Option<String>,
 }
 
-/// Image with metadata for GraphQL responses
+/// Image with associated metadata (path, hash, EXIF fields) returned from a joined query.
 #[derive(Debug, Clone)]
 pub struct ImageWithMetadata {
     pub path: String,

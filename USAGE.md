@@ -89,7 +89,7 @@ imgfind-gui                   # uses the database found by walking up from cwd
 imgfind-gui --dir ~/Pictures  # target a specific directory's database
 ```
 
-The GUI shows a search box; press Enter (or click Search) to run a query. Results appear as a scrollable thumbnail grid. Click a thumbnail to open a lightbox (prev/next navigation, Esc to close); right-click or Ctrl-click to open the original file in the OS viewer. Use "Load more" to page through additional results. Note: the map view is not yet ported to the GUI.
+The GUI shows a search box; press Enter to run a query. Results appear as a scrollable thumbnail grid. Click a thumbnail to open a lightbox (prev/next navigation, Esc to close); right-click a thumbnail to open the original file in the OS viewer. Use "Load more" to page through additional results. Note: the map view is not yet ported to the GUI.
 
 ### 5. Generate Thumbnails
 

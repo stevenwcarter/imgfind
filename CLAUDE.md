@@ -55,7 +55,7 @@ Library code lives in `src/` and is exposed via `src/lib.rs`; `src/main.rs` is t
 
 - **Indexing flow (`index_directory` in main.rs)** — walk dir (honoring `Config` ignore regexes), hash each image with `oshash` (content hash for change detection — skip if path+hash already indexed), embed, normalize, insert, then extract EXIF metadata. Backfills missing metadata at the end.
 
-- **Native GUI (`imgfind-gui/`)** — Slint desktop app. Search page: text query → wrapping thumbnail grid → click opens a lightbox (prev/next, keyboard nav, Esc to close); right/ctrl-click opens the original in the OS viewer; "Load more" pagination. The map view is not yet ported to the GUI. DB is resolved via the same walk-up/global logic as the CLI; pass `--dir DIR` to target a specific directory's DB.
+- **Native GUI (`imgfind-gui/`)** — Slint desktop app. Search page: text query → wrapping thumbnail grid → click opens a lightbox (prev/next, keyboard nav, Esc to close); right-click opens the original in the OS viewer; "Load more" pagination. The map view is not yet ported to the GUI. DB is resolved via the same walk-up/global logic as the CLI; pass `--dir DIR` to target a specific directory's DB.
 
 - **TUI (`src/tui/`)** — ratatui + `ratatui-image`, gated behind the `tui` feature. `app.rs` holds the event loop (`tokio::select!` over crossterm events, async search results, and async image-decode results via unbounded channels). Vim-style keys: `e` edit search, `h/j/k/l` focus, `H/L` page (9 images/page), `1-9` or `Enter` zoom, scroll/right-click zoom, `q`/`Ctrl-C` quit. Submodules under `app/` (focus, input, search, zoom) and `widget/` (image, center, nine_block grid).
 

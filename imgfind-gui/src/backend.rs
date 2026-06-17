@@ -34,8 +34,8 @@ impl Backend {
         })
     }
 
-    /// Build the CLIP embedder on a background thread (it can take seconds and
-    /// must not block the UI). Mirrors `serve`'s lazy init pattern.
+    /// Loads the CLIP model lazily on a background thread so the UI stays
+    /// responsive; the embedder is stored in a `OnceLock` once ready.
     pub fn start_loading_model(&self) {
         let embedder = Arc::clone(&self.embedder);
         let db = self.db.clone();
