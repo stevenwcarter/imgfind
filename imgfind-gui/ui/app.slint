@@ -1,4 +1,5 @@
 import { LineEdit, Button, ScrollView } from "std-widgets.slint";
+import { RangeSlider } from "range_slider.slint";
 
 export struct Tile {
     path: string,
@@ -28,6 +29,16 @@ export component MainWindow inherits Window {
     in property <string> detail-filename;
     in property <string> detail-meta;
 
+    // Filter-bar properties (set from Rust; UI emits changes via callbacks below).
+    in-out property <float> size-lo: 0.0;
+    in-out property <float> size-hi: 1.0;
+    in property <string> size-label;
+    // Struct model: each chip carries its name and selected state.  Rust pushes
+    // the full list; the UI calls ext-toggled(name) on click so Rust can toggle.
+    in property <[{name: string, on: bool}]> type-chips;
+    // 0 = Any, 1 = Has GPS, 2 = No GPS.
+    in property <int> gps-mode: 0;
+
     callback search(string);
     callback load-more();
     callback tile-selected(int);
@@ -39,6 +50,10 @@ export component MainWindow inherits Window {
     callback lightbox-close();
     callback lightbox-prev();
     callback lightbox-next();
+    // Filter-bar callbacks (no-op stubs in main.rs; wired in Task 6).
+    callback filters-changed();
+    callback ext-toggled(string);
+    callback gps-mode-changed(int);
 
     // Grid geometry constants.
     private property <length> tile-size: 200px;
@@ -61,6 +76,129 @@ export component MainWindow inherits Window {
                 placeholder-text: root.can-search ? "Search images..." : "Loading model...";
                 enabled: root.can-search;
                 accepted(text) => { root.search(text); }
+            }
+        }
+
+        // --- Filter bar ---
+        HorizontalLayout {
+            spacing: 12px;
+            alignment: start;
+
+            // Size range slider + label.
+            RangeSlider {
+                width: 180px;
+                lo <=> root.size-lo;
+                hi <=> root.size-hi;
+                range-changed(lo, hi) => {
+                    root.size-lo = lo;
+                    root.size-hi = hi;
+                    root.filters-changed();
+                }
+            }
+            Text {
+                text: root.size-label;
+                color: #9aa4b2;
+                vertical-alignment: center;
+            }
+
+            // File-type toggle chips (struct model: [{name, on}]).
+            for chip in root.type-chips: Rectangle {
+                width: chip-label.preferred-width + 16px;
+                height: 24px;
+                border-radius: 4px;
+                background: chip.on ? #3a6 : #2d3446;
+                border-width: 1px;
+                border-color: chip.on ? #3a6 : #3a4255;
+
+                chip-label := Text {
+                    text: chip.name;
+                    color: chip.on ? #fff : #9aa4b2;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    width: 100%;
+                    height: 100%;
+                }
+
+                TouchArea {
+                    width: 100%;
+                    height: 100%;
+                    clicked => { root.ext-toggled(chip.name); }
+                }
+            }
+
+            // GPS 3-way control: Any / Has GPS / No GPS.
+            HorizontalLayout {
+                spacing: 2px;
+
+                Rectangle {
+                    width: gps-any-text.preferred-width + 16px;
+                    height: 24px;
+                    border-radius: 4px;
+                    background: root.gps-mode == 0 ? #3a6 : #2d3446;
+                    border-width: 1px;
+                    border-color: root.gps-mode == 0 ? #3a6 : #3a4255;
+                    gps-any-text := Text {
+                        text: "Any";
+                        color: root.gps-mode == 0 ? #fff : #9aa4b2;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        width: 100%;
+                        height: 100%;
+                    }
+                    TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        clicked => { root.gps-mode-changed(0); }
+                    }
+                }
+
+                Rectangle {
+                    width: gps-has-text.preferred-width + 16px;
+                    height: 24px;
+                    border-radius: 4px;
+                    background: root.gps-mode == 1 ? #3a6 : #2d3446;
+                    border-width: 1px;
+                    border-color: root.gps-mode == 1 ? #3a6 : #3a4255;
+                    gps-has-text := Text {
+                        text: "Has GPS";
+                        color: root.gps-mode == 1 ? #fff : #9aa4b2;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        width: 100%;
+                        height: 100%;
+                    }
+                    TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        clicked => { root.gps-mode-changed(1); }
+                    }
+                }
+
+                Rectangle {
+                    width: gps-no-text.preferred-width + 16px;
+                    height: 24px;
+                    border-radius: 4px;
+                    background: root.gps-mode == 2 ? #3a6 : #2d3446;
+                    border-width: 1px;
+                    border-color: root.gps-mode == 2 ? #3a6 : #3a4255;
+                    gps-no-text := Text {
+                        text: "No GPS";
+                        color: root.gps-mode == 2 ? #fff : #9aa4b2;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        width: 100%;
+                        height: 100%;
+                    }
+                    TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        clicked => { root.gps-mode-changed(2); }
+                    }
+                }
             }
         }
 

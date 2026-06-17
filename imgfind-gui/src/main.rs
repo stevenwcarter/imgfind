@@ -51,6 +51,12 @@ fn main() -> Result<()> {
     window.set_tiles(ModelRc::default());
     window.set_lightbox_open(false);
     window.set_detail_open(false);
+    // Filter-bar initial state (Task 6 will drive these from real data).
+    window.set_size_lo(0.0);
+    window.set_size_hi(1.0);
+    window.set_size_label("Size: all".into());
+    window.set_type_chips(ModelRc::default());
+    window.set_gps_mode(0);
 
     // State shared with background threads via Arc<Mutex<_>>.
     let state: Arc<Mutex<SearchState>> = Arc::new(Mutex::new(SearchState::new()));
@@ -440,6 +446,11 @@ fn main() -> Result<()> {
             }
         });
     }
+
+    // --- filter-bar callbacks (no-op stubs; wired in Task 6) ---
+    window.on_filters_changed(|| {});
+    window.on_ext_toggled(|_name| {});
+    window.on_gps_mode_changed(|_mode| {});
 
     // Keep the model timer alive for the entire event loop.
     let _ = model_timer;
