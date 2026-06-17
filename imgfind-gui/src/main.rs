@@ -612,9 +612,10 @@ fn main() -> Result<()> {
         let backend_fc = backend.clone();
         let timer = Rc::clone(&debounce_timer);
         window.on_filters_changed(move || {
-            let lo = weak.upgrade().map(|w| w.get_size_lo()).unwrap_or(0.0);
-            let hi = weak.upgrade().map(|w| w.get_size_hi()).unwrap_or(1.0);
-            let gps_mode = weak.upgrade().map(|w| w.get_gps_mode()).unwrap_or(0);
+            let (lo, hi, gps_mode) = match weak.upgrade() {
+                Some(w) => (w.get_size_lo(), w.get_size_hi(), w.get_gps_mode()),
+                None => return,
+            };
             let exts = selected_exts_ref.lock().unwrap().clone();
             let new_filters = build_filters(lo, hi, size_bounds, &exts, gps_mode);
             let label = build_size_label(lo, hi, size_bounds);
@@ -757,6 +758,15 @@ fn fire_debounced_query(
             spawn_search(weak, state_ref, backend, query, 0, filters);
         }
         // Text("") = browse mode (or idle — browse with filters anyway).
+        // Text("") with default filters — restore idle state, nothing to browse.
+        SearchMode::Text(_) if filters == Filters::default() => {
+            if let Some(w) = weak.upgrade() {
+                w.set_status("Enter a search query to find images.".into());
+                w.set_show_load_more(false);
+                w.set_tiles(ModelRc::default());
+            }
+        }
+        // Text("") with active filters — browse with filters.
         SearchMode::Text(_) => {
             state_ref.lock().unwrap().start_search(String::new());
             if let Some(w) = weak.upgrade() {
