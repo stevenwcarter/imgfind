@@ -3439,10 +3439,12 @@ dependencies = [
  "image",
  "imgfind",
  "open",
+ "rusqlite",
  "slint",
  "slint-build",
  "tracing",
  "tracing-subscriber",
+ "zerocopy",
 ]
 
 [[package]]

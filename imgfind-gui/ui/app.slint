@@ -22,22 +22,32 @@ export component MainWindow inherits Window {
     in property <bool> lightbox-open: false;
     in property <image> lightbox-image;
 
+    // Detail panel state set from Rust.
+    in property <bool> detail-open: false;
+    in property <image> detail-image;
+    in property <string> detail-filename;
+    in property <string> detail-meta;
+
     callback search(string);
     callback load-more();
-    callback tile-clicked(int);
+    callback tile-selected(int);
+    callback tile-activated(int);
     callback tile-open-external(int);
+    callback detail-close();
+    callback search-similar();
+    callback detail-view-full();
     callback lightbox-close();
     callback lightbox-prev();
     callback lightbox-next();
 
     // Grid geometry constants.
-    // tile-size + gap determines the stride; cols is derived from window width.
     private property <length> tile-size: 200px;
     private property <length> tile-gap: 8px;
     private property <length> tile-stride: tile-size + tile-gap;
-    // Number of columns that fit in the available width (approx window width minus padding).
-    private property <int> cols: max(1, floor((root.width - 32px) / tile-stride));
-    // Total grid height: enough rows * stride, plus trailing gap.
+    // Number of columns that fit in the grid area (not root width — the panel
+    // narrows the available space when open, so we bind to grid-area.width).
+    private property <int> cols: max(1, floor((grid-area.width - 16px) / tile-stride));
+    // Total grid height: enough rows * stride.
     private property <int> row-count: ceil(tiles.length / cols);
     private property <length> grid-height: row-count * tile-stride;
 
@@ -60,71 +70,134 @@ export component MainWindow inherits Window {
             visible: root.status != "";
         }
 
-        ScrollView {
-            // Give the scroll view all remaining vertical space.
+        HorizontalLayout {
+            spacing: 0px;
             vertical-stretch: 1;
 
-            // Explicitly size the viewport so the ScrollView knows how tall the content is.
-            viewport-height: root.grid-height + (root.show-load-more ? 60px : 0px);
-            viewport-width: root.cols * root.tile-stride;
+            // Grid area — grows to fill all available width when panel is closed.
+            grid-area := Rectangle {
+                horizontal-stretch: 1;
+                background: transparent;
 
-            // Tiles rendered with absolute x/y derived from index arithmetic.
-            for tile[i] in root.tiles: Rectangle {
-                x: mod(i, root.cols) * root.tile-stride;
-                y: floor(i / root.cols) * root.tile-stride;
-                width: root.tile-size;
-                height: root.tile-size;
-                border-radius: 6px;
-                clip: true;
-                background: #2d3446;
-
-                Image {
-                    source: tile.image;
-                    image-fit: cover;
+                ScrollView {
                     width: 100%;
                     height: 100%;
-                }
+                    viewport-height: root.grid-height + (root.show-load-more ? 60px : 0px);
+                    viewport-width: root.cols * root.tile-stride;
 
-                TouchArea {
-                    width: 100%;
-                    height: 100%;
-                    clicked => { root.tile-clicked(i); }
-                    pointer-event(e) => {
-                        if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
-                            root.tile-open-external(i);
+                    for tile[i] in root.tiles: Rectangle {
+                        x: mod(i, root.cols) * root.tile-stride;
+                        y: floor(i / root.cols) * root.tile-stride;
+                        width: root.tile-size;
+                        height: root.tile-size;
+                        border-radius: 6px;
+                        clip: true;
+                        background: #2d3446;
+
+                        Image {
+                            source: tile.image;
+                            image-fit: cover;
+                            width: 100%;
+                            height: 100%;
                         }
+
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            clicked => { root.tile-selected(i); }
+                            double-clicked => { root.tile-activated(i); }
+                            pointer-event(e) => {
+                                if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                                    root.tile-open-external(i);
+                                }
+                            }
+                        }
+                    }
+
+                    if root.show-load-more: Button {
+                        x: 0px;
+                        y: root.grid-height + 8px;
+                        text: "Load more";
+                        clicked => { root.load-more(); }
                     }
                 }
             }
 
-            // "Load more" button sits below the grid inside the same viewport.
-            if root.show-load-more: Button {
-                x: 0px;
-                y: root.grid-height + 8px;
-                text: "Load more";
-                clicked => { root.load-more(); }
+            // Detail panel — fixed 340 px, only present when detail-open.
+            if root.detail-open: Rectangle {
+                width: 340px;
+                background: #252b3a;
+
+                // Left border divider rendered as a thin child rectangle.
+                Rectangle {
+                    x: 0px;
+                    y: 0px;
+                    width: 1px;
+                    height: parent.height;
+                    background: #3a4255;
+                }
+
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 8px;
+
+                    HorizontalLayout {
+                        alignment: end;
+                        Button {
+                            text: "✕";
+                            clicked => { root.detail-close(); }
+                        }
+                    }
+
+                    Image {
+                        source: root.detail-image;
+                        image-fit: contain;
+                        height: 300px;
+                    }
+
+                    Text {
+                        text: root.detail-filename;
+                        color: #e0e4ed;
+                        font-size: 13px;
+                        wrap: word-wrap;
+                    }
+
+                    Text {
+                        text: root.detail-meta;
+                        color: #9aa4b2;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+
+                    Button {
+                        text: "View full";
+                        // Opens the lightbox for the seed image by path, not by
+                        // grid index, so it stays valid after a similar-search
+                        // replaces the tile grid.
+                        clicked => { root.detail-view-full(); }
+                    }
+
+                    Button {
+                        text: "Search similar";
+                        clicked => { root.search-similar(); }
+                    }
+                }
             }
         }
     }
 
     // --- Lightbox overlay ---
-    // Rendered on top of everything when lightbox-open is true.
     if root.lightbox-open: Rectangle {
         width: root.width;
         height: root.height;
         background: #000000dd;
 
-        // Backdrop click closes the lightbox.
         TouchArea {
             width: 100%;
             height: 100%;
             clicked => { root.lightbox-close(); }
         }
 
-        // Full image centered, fit to window. Sits above the backdrop TouchArea
-        // so it receives events independently; the backdrop click-through is
-        // intentional (clicking the image area also closes — acceptable UX since
-        // we have explicit ‹/› buttons for navigation).
         Image {
             source: root.lightbox-image;
             image-fit: contain;
@@ -134,7 +207,6 @@ export component MainWindow inherits Window {
             y: (parent.height - self.height) / 2;
         }
 
-        // Navigation buttons anchored to the left and right edges.
         HorizontalLayout {
             width: 100%;
             height: 100%;
@@ -151,7 +223,6 @@ export component MainWindow inherits Window {
             }
         }
 
-        // Keyboard navigation: Esc closes, Left/Right navigate.
         forward-focus: lb-keys;
         lb-keys := FocusScope {
             key-pressed(event) => {
@@ -167,6 +238,20 @@ export component MainWindow inherits Window {
                 } else {
                     reject
                 }
+            }
+        }
+    }
+
+    // Top-level key handler: Escape closes the detail panel when the lightbox
+    // is not open (the lightbox's own lb-keys FocusScope owns Escape when open).
+    forward-focus: main-keys;
+    main-keys := FocusScope {
+        key-pressed(event) => {
+            if (root.detail-open && !root.lightbox-open && event.text == Key.Escape) {
+                root.detail-close();
+                accept
+            } else {
+                reject
             }
         }
     }
