@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use ratatui::style::Color;
 use ratatui_image::picker::Picker;
 use tokio::sync::mpsc::unbounded_channel;
 use tui_input::Input;
@@ -14,6 +15,7 @@ use tui_input::Input;
 use super::app::{App, InputMode};
 use super::event::EventHandler;
 use crate::database::Database;
+use crate::tui::app::SearchResult;
 
 /// Fixed terminal size for all render tests.
 const W: u16 = 80;
@@ -81,5 +83,100 @@ fn renders_idle_frame() {
     // Idle frame shows the outer title and the empty input box, no results.
     assert!(out.contains("imgfind-cli"), "outer title should render");
     insta::assert_snapshot!("idle_frame", out);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn renders_editing_mode_with_yellow_input_border() {
+    let (db, root) = temp_db();
+    let mut app = test_app(db);
+    app.input_mode = InputMode::Editing;
+    app.input = Input::new("sunset".to_string());
+
+    // Snapshot (text) + style assertion (color).
+    let backend = TestBackend::new(W, H);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|frame| frame.render_widget(&mut app, frame.area()))
+        .expect("draw");
+    let buf = terminal.backend().buffer().clone();
+
+    // The query text is visible.
+    let text = format!("{}", terminal.backend());
+    assert!(text.contains("sunset"), "typed query should render");
+    insta::assert_snapshot!("editing_mode", text);
+
+    // The input box border is yellow in editing mode. The input box is the
+    // bottom 3-row block (layout margin 2, last constraint Length(3)); its top
+    // border row is at y = H - 2 - 3 = 19. Scan that row for a yellow cell.
+    let border_y = H - 2 - 3;
+    let has_yellow = (0..W).any(|x| buf[(x, border_y)].fg == Color::Yellow);
+    if !has_yellow {
+        // Diagnostic: print the buffer and inspect nearby rows so we can find
+        // the actual yellow-border row if the layout shifts.
+        eprintln!("--- buffer text ---\n{text}");
+        for y in 0..H {
+            for x in 0..W {
+                let cell = &buf[(x, y)];
+                if cell.fg == Color::Yellow {
+                    eprintln!("yellow cell at ({x}, {y}): {:?}", cell.symbol());
+                }
+            }
+        }
+    }
+    assert!(has_yellow, "input border should be yellow in editing mode");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn renders_help_overlay_with_keybindings() {
+    let (db, root) = temp_db();
+    let mut app = test_app(db);
+    app.show_help = true;
+    let out = render_to_string(&mut app, W, H);
+    assert!(
+        out.contains("Keybindings"),
+        "help overlay title should render"
+    );
+    // A known key from keybindings_help() (the `e` edit-search entry).
+    assert!(out.contains('e'), "help overlay should list keybindings");
+    insta::assert_snapshot!("help_overlay", out);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn renders_empty_results_pagination() {
+    let (db, root) = temp_db();
+    let mut app = test_app(db);
+    app.search_result = Some(SearchResult {
+        images: Vec::new(),
+        result_count: 0,
+        query: "nothing".to_string(),
+    });
+    let out = render_to_string(&mut app, W, H);
+    // total_pages = 0.div_ceil(9) = 0; rendered as max(1) => "Page 1/1".
+    assert!(
+        out.contains("Page 1/1 (0 results)"),
+        "empty pagination line"
+    );
+    insta::assert_snapshot!("empty_results", out);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn pagination_reports_multiple_pages() {
+    let (db, root) = temp_db();
+    let mut app = test_app(db);
+    app.search_result = Some(SearchResult {
+        images: Vec::new(),
+        result_count: 20,
+        query: "many".to_string(),
+    });
+    // 20 results, 9 per page => 3 pages.
+    let out = render_to_string(&mut app, W, H);
+    assert!(
+        out.contains("Page 1/3 (20 results)"),
+        "multi-page pagination"
+    );
     let _ = std::fs::remove_dir_all(root);
 }

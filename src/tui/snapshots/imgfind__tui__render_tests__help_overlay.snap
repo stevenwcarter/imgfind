@@ -1,0 +1,28 @@
+---
+source: src/tui/render_tests.rs
+expression: out
+---
+"╭─────────────────────────────────imgfind-cli──────────────────────────────────╮"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                   ╭───────Keybindings (? to close)────────╮                  │"
+"│                   │e          edit search                 │                  │"
+"│                   │h/j/k/l    move focus                  │                  │"
+"│                   │H/L        previous / next page        │                  │"
+"│                   │1-9        zoom that image             │                  │"
+"│                   │Enter      zoom focused image          │                  │"
+"│                   │Esc        close zoom / help           │                  │"
+"│                   │scroll     zoom in/out (in zoom view)  │                  │"
+"│                   │right-click reset zoom                 │                  │"
+"│                   │?          toggle this help            │                  │"
+"│                   │q / Ctrl-C quit                        │                  │"
+"│                   ╰───────────────────────────────────────╯                  │"
+"│                                                                              │"
+"│ ┌Search query──────────────────────────────────────────────────────────────┐ │"
+"│ │                                                                          │ │"
+"│ └──────────────────────────────────────────────────────────────────────────┘ │"
+"│                                                                              │"
+"╰──────────────────────────────────────────────────────────────────────────────╯"
