@@ -78,7 +78,9 @@ impl Backend {
             .db
             .get_image_hash(&RelativePath(PathBuf::from(rel_path)))
             .with_context(|| format!("No hash for {rel_path}"))?;
-        get_or_generate_thumbnail(&self.db, rel_path, &hash, size)
+        let abs = self.abs_path(rel_path);
+        let abs_str = abs.to_string_lossy();
+        get_or_generate_thumbnail(&self.db, &abs_str, &hash, size)
             .with_context(|| format!("Failed to load thumbnail for {rel_path}"))
     }
 
@@ -141,6 +143,40 @@ mod tests {
         let (db, root) = temp_db();
         let backend = backend_with(db);
         assert!(!backend.model_ready());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Confirms that a cache-miss falls through to `generate_thumbnail_bytes`,
+    /// which must receive the *absolute* path — not `rel_path` relative to the
+    /// process cwd.  If `thumbnail` passed the relative path this test would
+    /// fail to open the image because the test cwd differs from `parent_dir`.
+    #[test]
+    fn thumbnail_cache_miss_uses_absolute_path() {
+        use image::{ImageBuffer, Rgb};
+
+        let (db, root) = temp_db();
+
+        // Write a real, decodable 8×8 RGB PNG at <parent_dir>/pic.png.
+        // RGB8 (not RGBA8) because generate_thumbnail_bytes re-encodes as JPEG,
+        // and the JPEG encoder does not support an alpha channel.
+        let img_path = db.parent_dir.join("pic.png");
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_pixel(8, 8, Rgb([255, 0, 128]));
+        img.save(&img_path).expect("save test image");
+
+        // Insert the image row (no cached thumbnail → cache miss guaranteed).
+        {
+            let conn = db.pool.get().expect("conn");
+            conn.execute(
+                "INSERT INTO images (id, path, hash) VALUES (1, 'pic.png', 'h2')",
+                [],
+            )
+            .expect("insert image");
+        }
+
+        let backend = backend_with(db);
+        let bytes = backend.thumbnail("pic.png", 64).expect("thumbnail from abs path");
+        assert!(!bytes.is_empty(), "thumbnail bytes must be non-empty on cache miss");
+
         let _ = std::fs::remove_dir_all(root);
     }
 }
