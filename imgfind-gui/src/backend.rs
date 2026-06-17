@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use clipper::ClipEmbedder;
 use imgfind::config::SearchConfig;
 use imgfind::database::{Database, ImageMetadata, extract_image_metadata};
+use imgfind::filters::Filters;
 use imgfind::search::SearchEngine;
 use imgfind::thumbnail::get_or_generate_thumbnail;
 use imgfind::{RelativePath, get_db_path, relative_to_abs_path};
@@ -77,6 +78,7 @@ impl Backend {
                 offset,
                 sc.distance_threshold,
                 sc.max_k,
+                &Filters::default(),
             )
             .context("Search failed")?;
         Ok(rows

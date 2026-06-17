@@ -772,45 +772,46 @@ impl Database {
         offset: usize,
         distance_threshold: f32,
         max_k: usize,
+        filters: &Filters,
     ) -> Result<Vec<(String, f32, Option<i64>)>> {
-        // vec0's `k` bounds the TOTAL neighbors the virtual table yields, and
-        // OFFSET is applied on top of that set. So `k` must cover the entire
-        // requested window (offset + limit), otherwise pages past the first
-        // get nothing (OFFSET skips all `k` rows). Capped at max_k, which
-        // bounds total reachable results across all pages.
-        let k = (offset + limit).clamp(1, max_k);
+        // k must cover offset+limit AFTER filtering; raise to max_k so a full
+        // page can survive post-MATCH filtering. `k` and the distance threshold
+        // are interpolated as the vec0 MATCH/k syntax requires literal values
+        // (not bound params). Both are trusted numeric config values, never
+        // user free-text.
+        let k = max_k.max(offset + limit).clamp(1, max_k);
         let vt = self.vectors_table()?;
+        let (clause, fvalues) = build_filter_clause(filters);
 
-        // `k` and the distance threshold are interpolated as the vec0 MATCH/k
-        // syntax requires literal values (not bound params). Both are trusted
-        // numeric config values, never user free-text.
         let query = format!(
             "SELECT i.path, v.distance, m.file_size
-              FROM {vt} v
-              JOIN images i ON i.id = v.rowid
-              LEFT JOIN image_metadata m ON m.image_id = i.id
-              WHERE v.embedding MATCH ?1 AND k = {k}
-            AND v.distance <= {distance_threshold:.6}
+               FROM {vt} v
+               JOIN images i ON i.id = v.rowid
+               LEFT JOIN image_metadata m ON m.image_id = i.id
+              WHERE v.embedding MATCH ? AND k = {k}
+                AND v.distance <= {distance_threshold:.6}{clause}
               ORDER BY v.distance LIMIT {limit} OFFSET {offset}"
         );
 
         let conn = self
             .pool
             .get()
-            .context("Failed to get DB connection for searching similar images")?;
+            .context("DB connection for filtered vector search")?;
         let mut stmt = conn.prepare(&query)?;
-
-        let results = stmt.query_map(params![query_embedding.as_bytes()], |row| {
-            let rel_path: String = row.get(0)?;
-            let distance: f32 = row.get(1)?;
-            let file_size: Option<i64> = row.get(2)?;
-
-            Ok((rel_path, distance, file_size))
+        // Param order: embedding blob first (the `?` in MATCH), then filter params.
+        // Anonymous `?` is used for MATCH (not `?1`) so it composes with the
+        // appended filter `?`s under params_from_iter (positional + anonymous
+        // cannot be mixed in rusqlite).
+        let mut values: Vec<rusqlite::types::Value> =
+            vec![rusqlite::types::Value::Blob(query_embedding.as_bytes().to_vec())];
+        values.extend(fvalues);
+        let results = stmt.query_map(params_from_iter(values), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, f32>(1)?, row.get::<_, Option<i64>>(2)?))
         })?;
 
         let mut search_results = Vec::new();
-        for result in results {
-            search_results.push(result?);
+        for r in results {
+            search_results.push(r?);
         }
 
         Ok(search_results)
@@ -858,7 +859,14 @@ impl Database {
             .collect();
 
         // Reuse the existing vec0 search path with the stored vector.
-        self.search_similar_images_meta(&embedding, limit, offset, distance_threshold, max_k)
+        self.search_similar_images_meta(
+            &embedding,
+            limit,
+            offset,
+            distance_threshold,
+            max_k,
+            &crate::filters::Filters::default(),
+        )
     }
 
     pub fn search_similar_images_with_blob(
@@ -1685,11 +1693,11 @@ mod tests {
 
         // Page 1: first 4 (nearest) results.
         let page1 = db
-            .search_similar_images_meta(&query, 4, 0, 2.0, 100)
+            .search_similar_images_meta(&query, 4, 0, 2.0, 100, &crate::filters::Filters::default())
             .expect("page 1");
         // Page 2: next 4 results. Pre-fix this returned ZERO rows.
         let page2 = db
-            .search_similar_images_meta(&query, 4, 4, 2.0, 100)
+            .search_similar_images_meta(&query, 4, 4, 2.0, 100, &crate::filters::Filters::default())
             .expect("page 2");
 
         assert_eq!(page1.len(), 4, "page 1 should be full");
@@ -2044,6 +2052,54 @@ mod tests {
         exts.sort();
         assert_eq!(exts, vec!["jpg".to_string(), "png".to_string()]); // lowercased, deduped
         assert_eq!(db.file_size_bounds().unwrap(), (10, 50));
+        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn filtered_vector_search_excludes_nonmatching_types() {
+        use crate::filters::Filters;
+        use zerocopy::IntoBytes;
+        let db_path = temp_db_path();
+        let db = Database::new(&db_path).expect("db");
+        {
+            let conn = db.pool.get().expect("conn");
+            // Two near-identical embeddings; different extensions.
+            let mut a = vec![0.0f32; 512];
+            a[0] = 1.0;
+            let b = a.clone();
+            for (id, path, emb) in [(1, "a.jpg", &a), (2, "b.png", &b)] {
+                conn.execute(
+                    "INSERT INTO images (id, path, hash) VALUES (?1,?2,?3)",
+                    rusqlite::params![id, path, format!("h{id}")],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO image_metadata (image_id, file_size) VALUES (?1, 1000)",
+                    rusqlite::params![id],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO image_vectors (rowid, embedding) VALUES (?1, ?2)",
+                    rusqlite::params![id, emb.as_bytes()],
+                )
+                .unwrap();
+            }
+        }
+        // Query close to both, filter to jpg only → only a.jpg.
+        let mut q = vec![0.0f32; 512];
+        q[0] = 1.0;
+        let jpg_only = Filters { extensions: vec!["jpg".into()], ..Default::default() };
+        let rows = db
+            .search_similar_images_meta(&q, 80, 0, 1.3, 100, &jpg_only)
+            .unwrap();
+        let paths: Vec<&str> = rows.iter().map(|(p, _, _)| p.as_str()).collect();
+        assert!(paths.contains(&"a.jpg"));
+        assert!(!paths.contains(&"b.png"), "png filtered out of vector results");
+        // No filter → both present.
+        let both = db
+            .search_similar_images_meta(&q, 80, 0, 1.3, 100, &Filters::default())
+            .unwrap();
+        assert_eq!(both.len(), 2);
         let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
     }
 }
