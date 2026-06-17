@@ -1,31 +1,33 @@
-# `imgfind` – CLIP-Based Image Search CLI
+# `imgfind` – CLIP-Based Image Search
 
-## 🧭 Overview
+## Overview
 
-`imgfind` is a Rust-based CLI tool that helps users find images in a directory (or recursively) that match a natural language query. It uses CLIP embeddings to compute semantic similarity between a user-provided prompt and indexed image content.
+`imgfind` is a Rust-based tool for finding images by natural-language query. It uses CLIP embeddings to compute semantic similarity between a text prompt and indexed image content.
 
-## ✨ Features
+The project ships as a **2-crate workspace**: a core `imgfind` binary (CLI + ratatui TUI) and a separate `imgfind-gui` binary (native Slint desktop GUI).
 
-- **🔍 Natural Language Search**: Find images using descriptive text like "sunset over mountains" or "a cat sitting on a chair"
-- **⚡ Fast Indexing**: Efficient batched image processing and embedding generation using CLIP
-- **📊 Smart Caching**: Avoids re-processing unchanged images using content hashing
-- **🗄️ SQLite Storage**: Reliable database storage with efficient vector similarity search
-- **🔧 CLI Interface**: Simple command-line interface with helpful status information
-- **🖼️ Interactive TUI**: Browse results in a ratatui-based terminal UI with inline image previews
-- **🌐 Web Server**: Built-in Axum server with a React SPA, a REST search API, and a GraphQL endpoint (map view, tags, collections, favorites)
-- **🐚 Shell Completions**: Generate completion scripts for bash, zsh, and fish
+## Features
 
-## 🚀 Quick Start
+- **Natural Language Search**: Find images using descriptive text like "sunset over mountains" or "a cat sitting on a chair"
+- **Fast Indexing**: Efficient batched image processing and embedding generation using CLIP
+- **Smart Caching**: Avoids re-processing unchanged images using content hashing
+- **SQLite Storage**: Reliable database storage with efficient vector similarity search
+- **CLI Interface**: Simple command-line interface with helpful status information
+- **Interactive TUI**: Browse results in a ratatui-based terminal UI with inline image previews
+- **Native GUI**: Slint desktop app — search results in a thumbnail grid, click to open a lightbox; map view not yet ported
+- **Shell Completions**: Generate completion scripts for bash, zsh, and fish
+
+## Quick Start
 
 ### Installation
 
 1. **Build from source:**
 
    ```bash
-   cargo build --release
+   cargo build --release --workspace
    ```
 
-2. **Install locally:**
+2. **Install locally (both binaries):**
 
    ```bash
    ./install.sh
@@ -39,34 +41,33 @@
    imgfind index --dir ~/Pictures --recursive
    ```
 
-2. **Search for images:**
+2. **Search for images (CLI):**
 
    ```bash
    imgfind search "beach vacation"
    imgfind search "family dinner" --limit 5
-   imgfind search "landscape photography"
    ```
 
-3. **Check status:**
+3. **Open the native GUI:**
+
+   ```bash
+   imgfind-gui
+   # or: cargo run -p imgfind-gui -- --dir ~/Pictures
+   ```
+
+4. **Check status:**
 
    ```bash
    imgfind status
    ```
 
-4. **Clean up missing files:**
-
-   ```bash
-   imgfind clean
-   ```
-
-## 🛠️ Commands
+## Commands
 
 | Command | Description | Options |
 |---------|-------------|---------|
 | `index` | Index images in a directory | `--dir <path>`, `--recursive`, `--root`, `--quiet`, `--batch-size <N>`, `--no-thumbnails`, `--model <name>` |
 | `search` | Search using natural language | `--limit <N>`, `--threshold <f>`, `--short`, `--recursive`, `--display`, `--all`, `--model <name>` |
 | `tui` | Browse results in an interactive terminal UI | `--dir <path>` |
-| `serve` | Run the web server (REST + GraphQL + SPA) | `--dir <path>`, `--host <addr>`, `--port <N>` |
 | `thumbnails` | Generate thumbnails in batches | `--size <px>`, `--count <N>` |
 | `metadata` | Backfill EXIF metadata for indexed images | `--dir <path>`, `--quiet`, `--count <N>` |
 | `clean` | Remove entries for missing files | - |
@@ -74,6 +75,8 @@
 | `config` | Manage configuration | `show`, `add-ignore <pat>`, `remove-ignore <pat>`, `reset` |
 | `models` | Manage embedding models | `list`, `use <name>` |
 | `completions` | Generate a shell completion script | `<bash\|zsh\|fish>` |
+
+The `imgfind-gui` binary takes an optional `--dir DIR` flag to target a specific directory's database.
 
 ### Index options
 
@@ -92,32 +95,23 @@
 
 ### Shell completions
 
-Generate a completion script and load it into your shell:
-
 ```bash
-# bash
 imgfind completions bash > /etc/bash_completion.d/imgfind
-
-# zsh (example: into a dir on your $fpath)
-imgfind completions zsh > ~/.zfunc/_imgfind
-
-# fish
+imgfind completions zsh  > ~/.zfunc/_imgfind
 imgfind completions fish > ~/.config/fish/completions/imgfind.fish
-
-# or eval directly into the current shell
-eval "$(imgfind completions bash)"
+eval "$(imgfind completions bash)"   # or eval directly into current shell
 ```
 
 ### Embedding models
 
-`imgfind` stores vectors in per-model tables, so multiple embedding models can coexist in one database. Currently a single CLIP model ships.
+`imgfind` stores vectors in per-model tables, so multiple embedding models can coexist in one database.
 
 ```bash
 imgfind models list        # list registered models (active marked with *)
 imgfind models use <name>  # set the active model
 ```
 
-## 📂 Project Structure
+## Project Structure
 
 ### Technology Stack
 
@@ -127,21 +121,8 @@ imgfind models use <name>  # set the active model
 - **Database**: SQLite via `rusqlite`
 - **Vector Search**: Cosine similarity on normalized embeddings
 - **CLI**: `clap` for argument parsing
-
-### Database
-
-- **Location**: `~/.imgfind/imgfind.db` (automatically searches up directory tree)
-- **Schema**:
-
-  ```sql
-  CREATE TABLE images (
-    id INTEGER PRIMARY KEY,
-    path TEXT UNIQUE NOT NULL,
-    hash TEXT NOT NULL,
-    embedding BLOB NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-  ```
+- **TUI**: `ratatui` + `ratatui-image`
+- **Native GUI**: `slint`
 
 ### Supported Formats
 
@@ -152,72 +133,16 @@ imgfind models use <name>  # set the active model
 - TIFF (.tiff)
 - WebP (.webp)
 
-## 🧠 How It Works
+## Interactive TUI
 
-### Indexing Process
-
-1. **Directory Walking**: Recursively scans for supported image files
-2. **Content Hashing**: Uses `oshash-rs` for efficient media file hashing
-3. **Duplicate Detection**: Skips already-indexed images based on path and hash
-4. **Embedding Generation**: Creates 512-dimensional CLIP embeddings via `clipper`
-5. **Normalization**: Vector normalization for efficient cosine similarity
-6. **Storage**: Saves embeddings as binary data in SQLite
-
-### Search Process
-
-1. **Query Embedding**: Generates CLIP embedding for search text
-2. **Similarity Computation**: Calculates cosine similarity (dot product of normalized vectors)
-3. **Ranking**: Returns top-N results sorted by similarity score
-4. **Display**: Shows results with similarity scores
-
-### Performance Features
-
-- **Incremental Indexing**: Only processes new or changed images
-- **Efficient Hashing**: Media-optimized hash function for change detection
-- **Normalized Vectors**: Fast cosine similarity via dot product
-- **SQLite Optimization**: Indexed database for fast lookups
-
-## 📊 Example Output
-
-```bash
-$ imgfind search "outdoor nature scene" --limit 3
-
-Found 3 results for "outdoor nature scene":
-
-  1. /Users/you/Pictures/vacation/mountain_hike.jpg     (similarity: 0.8234)
-  2. /Users/you/Pictures/nature/forest_trail.jpg       (similarity: 0.7891)
-  3. /Users/you/Pictures/camping/lake_sunrise.jpg      (similarity: 0.7456)
-```
-
-```bash
-$ imgfind status
-
-imgfind Database Status
-======================
-Database location: /Users/you/.imgfind/imgfind.db
-Total indexed images: 1,247
-
-Sample images:
-  1. /Users/you/Pictures/family/birthday_2024.jpg
-  2. /Users/you/Pictures/vacation/beach_sunset.jpg
-  3. /Users/you/Pictures/pets/cat_sleeping.jpg
-  4. /Users/you/Pictures/food/homemade_pizza.jpg
-  5. /Users/you/Pictures/work/presentation.jpg
-  ... and 1,242 more
-
-Database size: 12.34 MB
-```
-
-## 🖥️ Interactive TUI
-
-Launch the terminal UI with `imgfind tui`. It shows a 3×3 grid (9 images per page) with inline previews and a per-thumbnail similarity score label, plus a `?` help overlay listing every keybinding.
+Launch the terminal UI with `imgfind tui`. It shows a 3x3 grid (9 images per page) with inline previews and a per-thumbnail similarity score label, plus a `?` help overlay listing every keybinding.
 
 | Key | Action |
 |-----|--------|
 | `e` | edit search |
 | `h` / `j` / `k` / `l` | move focus |
 | `H` / `L` | previous / next page |
-| `1`–`9` | zoom that image |
+| `1`-`9` | zoom that image |
 | `Enter` | zoom focused image |
 | `Esc` | close zoom / help |
 | scroll | zoom in/out (in zoom view) |
@@ -225,39 +150,7 @@ Launch the terminal UI with `imgfind tui`. It shows a 3×3 grid (9 images per pa
 | `?` | toggle help overlay |
 | `q` / `Ctrl-C` | quit |
 
-While an image is zoomed, a control hint (`scroll to zoom | right-click to reset | ESC to close`) is shown at the bottom of the zoom view.
-
-## 🌐 Web Server & API
-
-Start the server with `imgfind serve` (defaults to `127.0.0.1:6060`; use `--host 0.0.0.0` to expose it, `--port` to change the port). It serves the embedded React SPA, a REST search API, and a GraphQL endpoint.
-
-The server starts accepting connections immediately and loads the CLIP model in the background. Search endpoints return `503` (with `Retry-After`) until the model is ready.
-
-### Endpoints
-
-- `GET /healthz` — readiness probe; returns `{ "model": "loading" }` or `{ "model": "ready" }`.
-- `GET /api/v1/search/{query}?limit=N&offset=M` — metadata-first JSON search:
-
-  ```json
-  {
-    "results": [{ "path": "...", "distance": 0.42, "fileSize": 123456 }],
-    "hasMore": true
-  }
-  ```
-
-  (defaults: `limit=80`, `offset=0`). Thumbnails are fetched separately from
-  `GET /api/v1/search/thumb:300/{path}`, and full files from `GET /api/v1/search/file/{path}`.
-- `POST /graphql` — GraphQL API, with `/graphql/graphiql` and `/graphql/playground` UIs.
-
-### GraphQL
-
-- **Search**: `search(query, limit, offset)` → `[ImageResult { path, distance, fileSize }]`.
-- **Map**: `imagesByBounds(north, south, east, west)` → clustered, jittered image locations for the map view.
-- **Favorites**: `favorites`, `isFavorite(path)`, and the `toggleFavorite(path)` mutation.
-- **Tags**: `tags`, `tagsForImage(path)`, `imagesByTag(name)`, and the `createTag(name)`, `tagImage(path, tag)`, `untagImage(path, tag)` mutations.
-- **Collections**: `collections`, `collectionImages(name)`, and the `createCollection(name)`, `addToCollection(name, path)`, `removeFromCollection(name, path)` mutations.
-
-## ⚙️ Configuration
+## Configuration
 
 Configuration lives at `~/.imgfind/config.toml` (created on first run). Inspect it with `imgfind config show`.
 
@@ -273,16 +166,7 @@ distance_threshold = 1.3 # max cosine distance to include (lower = stricter)
 max_k = 100              # upper bound on the vec0 `k` result-set ceiling
 ```
 
-Manage ignore patterns from the CLI:
-
-```bash
-imgfind config show
-imgfind config add-ignore "screenshots"
-imgfind config remove-ignore "screenshots"
-imgfind config reset
-```
-
-## 🔧 Advanced Usage
+## Advanced Usage
 
 ### Environment Variables
 
@@ -293,50 +177,30 @@ imgfind config reset
 
 - Use descriptive, natural language queries
 - Try different phrasings if initial results aren't optimal
-- Similarity scores range from -1 to 1 (higher is better)
 - Use `--limit` to control number of results
-- Tighten or loosen matching with `--threshold` (lower = stricter), or set `[search].distance_threshold` in the config for a persistent default
+- Tighten or loosen matching with `--threshold` (lower = stricter)
 
-### Performance Tips
-
-- Initial indexing may take time for large collections
-- Re-indexing is fast due to content-based change detection
-- Consider periodic cleanup with `imgfind clean`
-
-## 🧰 Development
+## Development
 
 ### Dependencies
 
-- Rust 1.70+
+- Rust 1.85+
 - CLIP model (downloaded automatically on first use)
 - SQLite (bundled)
+- `clipper` crate (local path dep at `../clipper`, must be present to build)
 
 ### Building
 
 ```bash
-# Development build
-cargo build
-
-# Release build (optimized)
-cargo build --release
-
-# Run tests
-cargo test
+cargo build --release --workspace   # both binaries
+cargo test --workspace              # all tests
 ```
 
-### Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Run tests and ensure they pass
-5. Submit a pull request
-
-## 📄 License
+## License
 
 MIT License - see LICENSE file for details
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - [CLIP](https://openai.com/blog/clip/) by OpenAI for the underlying model
 - [oshash-rs](https://github.com/stevenwcarter/oshash-rs) for efficient media hashing
@@ -344,4 +208,4 @@ MIT License - see LICENSE file for details
 
 ---
 
-© 2025 `imgfind` Contributors
+(c) 2025 `imgfind` Contributors
