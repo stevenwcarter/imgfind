@@ -144,7 +144,9 @@ export component MainWindow inherits Window {
                     HorizontalLayout {
                         alignment: end;
                         Button {
-                            text: "✕";
+                            // U+00D7 (×, Latin-1) renders in Slint's default font;
+                            // the previous ✕ (U+2715) had no glyph and showed as tofu.
+                            text: "×";
                             clicked => { root.detail-close(); }
                         }
                     }
