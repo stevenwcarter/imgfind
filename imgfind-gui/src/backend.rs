@@ -96,8 +96,6 @@ impl Backend {
             .collect())
     }
 
-    // T6 wires these three methods to the filter-bar UI state.
-    #[allow(dead_code)]
     pub fn browse(&self, filters: &Filters, offset: usize) -> Result<Vec<SearchResult>> {
         let rows = self
             .db
@@ -113,14 +111,12 @@ impl Backend {
             .collect())
     }
 
-    #[allow(dead_code)]
     pub fn extensions(&self) -> Result<Vec<String>> {
         self.db
             .distinct_extensions()
             .context("Failed to list extensions")
     }
 
-    #[allow(dead_code)]
     pub fn size_bounds(&self) -> Result<(i64, i64)> {
         self.db
             .file_size_bounds()
