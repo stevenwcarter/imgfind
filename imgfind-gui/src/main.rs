@@ -1,6 +1,8 @@
 slint::include_modules!();
 
 mod backend;
+#[allow(dead_code)] // Task 4 wires detail into the UI and removes this allow.
+mod detail;
 mod image_util;
 mod state;
 
