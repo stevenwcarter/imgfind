@@ -8,7 +8,7 @@ use std::sync::{Arc, OnceLock};
 use anyhow::{Context, Result};
 use clipper::ClipEmbedder;
 use imgfind::config::SearchConfig;
-use imgfind::database::Database;
+use imgfind::database::{Database, ImageMetadata, extract_image_metadata};
 use imgfind::search::SearchEngine;
 use imgfind::thumbnail::get_or_generate_thumbnail;
 use imgfind::{RelativePath, get_db_path, relative_to_abs_path};
@@ -103,6 +103,43 @@ impl Backend {
     pub fn abs_path(&self, rel_path: &str) -> PathBuf {
         relative_to_abs_path(std::path::Path::new(rel_path), &self.parent_dir)
     }
+
+    /// EXIF/metadata for an indexed image, read fresh from the file (same fields
+    /// stored at index time).
+    // Not yet wired into the UI; allow until the detail panel calls it.
+    #[allow(dead_code)]
+    pub fn metadata(&self, rel_path: &str) -> Result<ImageMetadata> {
+        let abs = self.abs_path(rel_path);
+        extract_image_metadata(&abs.to_string_lossy())
+            .with_context(|| format!("Failed to read metadata for {rel_path}"))
+    }
+
+    /// Images similar to `rel_path`, using its stored embedding. The seed itself
+    /// is filtered out of the results.
+    // Not yet wired into the UI; allow until the "similar images" panel calls it.
+    #[allow(dead_code)]
+    pub fn search_similar(&self, rel_path: &str, offset: usize) -> Result<Vec<SearchResult>> {
+        let sc = SearchConfig::default();
+        let rows = self
+            .db
+            .find_similar_to_path(
+                &RelativePath(PathBuf::from(rel_path)),
+                PAGE_SIZE,
+                offset,
+                sc.distance_threshold,
+                sc.max_k,
+            )
+            .with_context(|| format!("Similar search failed for {rel_path}"))?;
+        Ok(rows
+            .into_iter()
+            .filter(|(path, _, _)| path != rel_path)
+            .map(|(path, distance, file_size)| SearchResult {
+                path,
+                distance,
+                file_size,
+            })
+            .collect())
+    }
 }
 
 #[cfg(test)]
@@ -164,6 +201,50 @@ mod tests {
         let (db, root) = temp_db();
         let backend = backend_with(db);
         assert!(!backend.model_ready());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn search_similar_filters_out_the_seed() {
+        use zerocopy::IntoBytes;
+
+        let (db, root) = temp_db();
+        {
+            let conn = db.pool.get().expect("conn");
+            conn.execute("INSERT INTO images (id, path, hash) VALUES (1, 'a.jpg', 'ha')", [])
+                .unwrap();
+            conn.execute("INSERT INTO images (id, path, hash) VALUES (2, 'b.jpg', 'hb')", [])
+                .unwrap();
+            // Use close vectors (not orthogonal) so both fall within the default
+            // distance_threshold of 1.3. a is unit vector along dim 0; b is
+            // normalized [1.0, 0.1, 0, ...] giving L2(a,b) ≈ 0.1 << 1.3.
+            let mut a = vec![0.0f32; 512];
+            a[0] = 1.0;
+            let mut b = vec![0.0f32; 512];
+            b[0] = 1.0;
+            b[1] = 0.1;
+            let norm: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+            b.iter_mut().for_each(|x| *x /= norm);
+            conn.execute(
+                "INSERT INTO image_vectors (rowid, embedding) VALUES (1, ?1)",
+                rusqlite::params![a.as_bytes()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO image_vectors (rowid, embedding) VALUES (2, ?1)",
+                rusqlite::params![b.as_bytes()],
+            )
+            .unwrap();
+        }
+        let backend = backend_with(db);
+
+        let results = backend.search_similar("a.jpg", 0).expect("similar");
+        let paths: Vec<&str> = results.iter().map(|r| r.path.as_str()).collect();
+        assert!(
+            !paths.contains(&"a.jpg"),
+            "seed must be filtered out of similar results"
+        );
+        assert!(paths.contains(&"b.jpg"), "other images should remain");
         let _ = std::fs::remove_dir_all(root);
     }
 
