@@ -215,12 +215,14 @@ export component MainWindow inherits Window {
             alignment: space-between;
 
             Button {
-                text: "‹";
+                // ASCII < / > render in Slint's default font; the previous
+                // ‹ › (U+2039/203A) risk showing as tofu like the close button did.
+                text: "<";
                 clicked => { root.lightbox-prev(); }
             }
 
             Button {
-                text: "›";
+                text: ">";
                 clicked => { root.lightbox-next(); }
             }
         }
