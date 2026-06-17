@@ -828,6 +828,7 @@ impl Database {
         offset: usize,
         distance_threshold: f32,
         max_k: usize,
+        filters: &crate::filters::Filters,
     ) -> Result<Vec<(String, f32, Option<i64>)>> {
         let vt = self.vectors_table()?;
         let rel = path.as_str();
@@ -865,7 +866,7 @@ impl Database {
             offset,
             distance_threshold,
             max_k,
-            &crate::filters::Filters::default(),
+            filters,
         )
     }
 
@@ -1938,7 +1939,14 @@ mod tests {
         // Seed = a.jpg. Its nearest neighbour is itself (distance ~0); b.jpg is
         // orthogonal (L2 distance = sqrt(2) ≈ 1.414), so we use threshold 2.0.
         let rows = db
-            .find_similar_to_path(&RelativePath(PathBuf::from("a.jpg")), 10, 0, 2.0, 100)
+            .find_similar_to_path(
+                &RelativePath(PathBuf::from("a.jpg")),
+                10,
+                0,
+                2.0,
+                100,
+                &crate::filters::Filters::default(),
+            )
             .expect("similar");
         let paths: Vec<&str> = rows.iter().map(|(p, _, _)| p.as_str()).collect();
         assert!(

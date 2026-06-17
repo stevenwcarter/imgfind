@@ -490,7 +490,7 @@ fn spawn_search(
     offset: usize,
 ) {
     std::thread::spawn(move || {
-        let res = backend.search(&query, offset);
+        let res = backend.search(&query, offset, &imgfind::filters::Filters::default());
 
         // Fetch raw thumbnail bytes on the worker thread (DB/disk I/O).
         // `Vec<Option<Vec<u8>>>` is Send; `slint::Image` is not.
@@ -545,7 +545,7 @@ fn spawn_similar(
     offset: usize,
 ) {
     std::thread::spawn(move || {
-        let res = backend.search_similar(&seed_path, offset);
+        let res = backend.search_similar(&seed_path, offset, &imgfind::filters::Filters::default());
 
         let raw_thumbs: Vec<Option<Vec<u8>>> = match &res {
             Ok(results) => results
