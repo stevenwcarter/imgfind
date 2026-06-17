@@ -116,11 +116,13 @@ fn build_size_label(lo: f32, hi: f32, size_bounds: (i64, i64)) -> SharedString {
     let lo_bytes = fraction_to_bytes(lo, min, max, true);
     let hi_bytes = fraction_to_bytes(hi, min, max, false);
     match (lo_bytes, hi_bytes) {
+        // ASCII-only separators/labels: the Slint default font has no glyph for
+        // en-dash or U+221E and would render them as tofu (see project memory).
         (None, None) => "Size: all".into(),
-        (Some(lo_b), None) => format!("{} – ∞", format_bytes(lo_b)).into(),
-        (None, Some(hi_b)) => format!("0 – {}", format_bytes(hi_b)).into(),
+        (Some(lo_b), None) => format!("{} - max", format_bytes(lo_b)).into(),
+        (None, Some(hi_b)) => format!("0 - {}", format_bytes(hi_b)).into(),
         (Some(lo_b), Some(hi_b)) => {
-            format!("{} – {}", format_bytes(lo_b), format_bytes(hi_b)).into()
+            format!("{} - {}", format_bytes(lo_b), format_bytes(hi_b)).into()
         }
     }
 }
