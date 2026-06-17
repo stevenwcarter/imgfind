@@ -2,7 +2,6 @@
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use clipper::ClipEmbedder;
-use imgfind::context::GraphQLContext;
 use imgfind::logging::init_tracing;
 use imgfind::metadata::extract_missing_metadata;
 use imgfind::{config, get_db_path, get_local_db_path};
@@ -12,14 +11,12 @@ use oshash::oshash;
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
 use walkdir::WalkDir;
 
 use imgfind::AbsolutePath;
 use imgfind::abs_to_relative_path;
 use imgfind::database::{Database, ImageMetadata, extract_image_metadata};
 use imgfind::indexing::chunk_pending;
-use imgfind::routes::app;
 use imgfind::search::{SearchEngine, normalize_vector};
 use imgfind::thumbnail::generate_missing_thumbnails_batch;
 
@@ -120,15 +117,6 @@ enum Commands {
         /// Number of thumbnails to generate in this batch (default: 50)
         #[arg(short, long, default_value_t = 50)]
         count: usize,
-    },
-    Serve {
-        #[arg(short, long)]
-        dir: Option<String>,
-        /// Address to bind. Use 0.0.0.0 to expose on all interfaces.
-        #[arg(long, default_value = "127.0.0.1")]
-        host: String,
-        #[arg(short, long, default_value_t = 6060)]
-        port: usize,
     },
     /// Manage embedding models
     Models {
@@ -276,11 +264,6 @@ async fn main() -> Result<()> {
             let mut db = Database::new(&db_path)?;
             generate_thumbnails_batch(&mut db, size, count)?;
         }
-        Commands::Serve { dir, host, port } => {
-            let db_path = get_db_path(dir.as_deref())?;
-            let db = Database::new(&db_path)?;
-            serve(db, dir.unwrap_or(".".to_owned()), host, port).await?;
-        }
         Commands::Models { action } => {
             let db_path = get_db_path(None)?;
             let db = Database::new(&db_path)?;
@@ -313,40 +296,6 @@ async fn main() -> Result<()> {
             );
         }
     }
-
-    Ok(())
-}
-
-async fn serve(db: Database, directory: String, host: String, port: usize) -> Result<()> {
-    // Load the CLIP model in the background so the server starts accepting
-    // connections immediately; search endpoints report 503 until it is ready.
-    let model_name = db.active_model()?.name;
-    let cell: Arc<std::sync::OnceLock<ClipEmbedder>> = Arc::new(std::sync::OnceLock::new());
-    {
-        let cell = cell.clone();
-        let model_name = model_name.clone();
-        tokio::task::spawn_blocking(move || match ClipEmbedder::from_model(&model_name, false) {
-            Ok(m) => {
-                let _ = cell.set(m);
-                info!("CLIP model loaded");
-            }
-            Err(e) => log::error!("CLIP model load failed: {e:#}"),
-        });
-    }
-    let context = GraphQLContext::new(db, directory, cell);
-    let app = app(context.clone());
-    let addr = format!("{host}:{port}");
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .with_context(|| format!("Failed to bind to {addr}"))?;
-    info!("Listening on http://{addr}");
-    let server = axum::serve(listener, app).with_graceful_shutdown(async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to install Ctrl+C handler");
-    });
-
-    server.await.context("Server error")?;
 
     Ok(())
 }
