@@ -98,7 +98,10 @@ mod tests {
         let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
             ImageBuffer::from_fn(2, 2, |x, y| Rgb([(x * 64) as u8, (y * 64) as u8, 128u8]));
 
-        let tmp_path = std::env::temp_dir().join("imgfind_decode_test.png");
+        // Unique per-process name so concurrent test runners sharing /tmp
+        // (cargo nextest, CI matrices) don't race on the same file.
+        let tmp_path =
+            std::env::temp_dir().join(format!("imgfind_decode_test_{}.png", std::process::id()));
         img.save(&tmp_path).expect("failed to save test PNG");
 
         // Ensure cleanup even on panic.
