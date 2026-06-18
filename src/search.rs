@@ -1,4 +1,5 @@
 use crate::database::{Database, ImageSearchResult};
+use crate::filters::Filters;
 use anyhow::Result;
 
 pub struct SearchEngine<'a> {
@@ -41,8 +42,8 @@ impl<'a> SearchEngine<'a> {
         offset: usize,
         distance_threshold: f32,
         max_k: usize,
+        filters: &Filters,
     ) -> Result<Vec<(String, f32, Option<i64>)>> {
-        // Use sqlite-vec for efficient similarity search
         let query_embedding = normalize_vector(&query_embedding);
         self.db.search_similar_images_meta(
             &query_embedding,
@@ -50,6 +51,7 @@ impl<'a> SearchEngine<'a> {
             offset,
             distance_threshold,
             max_k,
+            filters,
         )
     }
     pub fn search_with_thumbnails_raw(

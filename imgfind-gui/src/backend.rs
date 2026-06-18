@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use clipper::ClipEmbedder;
 use imgfind::config::SearchConfig;
 use imgfind::database::{Database, ImageMetadata, extract_image_metadata};
+use imgfind::filters::Filters;
 use imgfind::search::SearchEngine;
 use imgfind::thumbnail::get_or_generate_thumbnail;
 use imgfind::{RelativePath, get_db_path, relative_to_abs_path};
@@ -60,7 +61,12 @@ impl Backend {
         self.embedder.get().is_some()
     }
 
-    pub fn search(&self, query: &str, offset: usize) -> Result<Vec<SearchResult>> {
+    pub fn search(
+        &self,
+        query: &str,
+        offset: usize,
+        filters: &Filters,
+    ) -> Result<Vec<SearchResult>> {
         let embedder = self
             .embedder
             .get()
@@ -77,6 +83,7 @@ impl Backend {
                 offset,
                 sc.distance_threshold,
                 sc.max_k,
+                filters,
             )
             .context("Search failed")?;
         Ok(rows
@@ -87,6 +94,33 @@ impl Backend {
                 file_size,
             })
             .collect())
+    }
+
+    pub fn browse(&self, filters: &Filters, offset: usize) -> Result<Vec<SearchResult>> {
+        let rows = self
+            .db
+            .browse(filters, PAGE_SIZE, offset)
+            .context("Browse failed")?;
+        Ok(rows
+            .into_iter()
+            .map(|(path, file_size)| SearchResult {
+                path,
+                distance: 0.0,
+                file_size,
+            })
+            .collect())
+    }
+
+    pub fn extensions(&self) -> Result<Vec<String>> {
+        self.db
+            .distinct_extensions()
+            .context("Failed to list extensions")
+    }
+
+    pub fn size_bounds(&self) -> Result<(i64, i64)> {
+        self.db
+            .file_size_bounds()
+            .context("Failed to read size bounds")
     }
 
     pub fn thumbnail(&self, rel_path: &str, size: u32) -> Result<Vec<u8>> {
@@ -114,7 +148,12 @@ impl Backend {
 
     /// Images similar to `rel_path`, using its stored embedding. The seed itself
     /// is filtered out of the results.
-    pub fn search_similar(&self, rel_path: &str, offset: usize) -> Result<Vec<SearchResult>> {
+    pub fn search_similar(
+        &self,
+        rel_path: &str,
+        offset: usize,
+        filters: &Filters,
+    ) -> Result<Vec<SearchResult>> {
         let sc = SearchConfig::default();
         let rows = self
             .db
@@ -124,6 +163,7 @@ impl Backend {
                 offset,
                 sc.distance_threshold,
                 sc.max_k,
+                filters,
             )
             .with_context(|| format!("Similar search failed for {rel_path}"))?;
         Ok(rows
@@ -240,13 +280,67 @@ mod tests {
         }
         let backend = backend_with(db);
 
-        let results = backend.search_similar("a.jpg", 0).expect("similar");
+        let results = backend
+            .search_similar("a.jpg", 0, &Filters::default())
+            .expect("similar");
         let paths: Vec<&str> = results.iter().map(|r| r.path.as_str()).collect();
         assert!(
             !paths.contains(&"a.jpg"),
             "seed must be filtered out of similar results"
         );
         assert!(paths.contains(&"b.jpg"), "other images should remain");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn backend_browse_applies_filters() {
+        use imgfind::filters::{Filters, GpsFilter};
+
+        let (db, root) = temp_db();
+        {
+            let conn = db.pool.get().unwrap();
+            for (id, path, size, lat) in [
+                (1i64, "a.jpg", 1000i64, Some(1.0f64)),
+                (2i64, "b.png", 50i64, None::<f64>),
+            ] {
+                conn.execute(
+                    "INSERT INTO images (id,path,hash) VALUES (?1,?2,?3)",
+                    rusqlite::params![id, path, format!("h{id}")],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO image_metadata (image_id,file_size,latitude,longitude) VALUES (?1,?2,?3,?3)",
+                    rusqlite::params![id, size, lat],
+                )
+                .unwrap();
+            }
+        }
+        let backend = backend_with(db);
+
+        let jpg = backend
+            .browse(
+                &Filters {
+                    extensions: vec!["jpg".into()],
+                    ..Default::default()
+                },
+                0,
+            )
+            .unwrap();
+        assert_eq!(jpg.len(), 1);
+        assert_eq!(jpg[0].path, "a.jpg");
+
+        let gps = backend
+            .browse(
+                &Filters {
+                    gps: GpsFilter::HasGps,
+                    ..Default::default()
+                },
+                0,
+            )
+            .unwrap();
+        assert_eq!(gps.len(), 1);
+        assert_eq!(gps[0].path, "a.jpg");
+
         let _ = std::fs::remove_dir_all(root);
     }
 

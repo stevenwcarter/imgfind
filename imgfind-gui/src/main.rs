@@ -5,16 +5,19 @@ mod detail;
 mod image_util;
 mod state;
 
+use std::collections::HashSet;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use slint::{ModelRc, Timer, TimerMode, VecModel, Weak};
+use slint::{ModelRc, SharedString, Timer, TimerMode, VecModel, Weak};
 
 use backend::Backend;
 use detail::{DetailState, filename_of, format_metadata, select};
+use imgfind::filters::{Filters, GpsFilter};
 use state::{SearchResult, SearchState, ViewState};
 
 /// Whether the current tile grid was populated by a text search or a
@@ -35,12 +38,107 @@ struct Args {
     dir: Option<String>,
 }
 
+/// Map a [0, 1] slider fraction to bytes, treating extremes as unbounded.
+///
+/// When `fraction` is exactly 0.0 the lower side is unbounded (`None`);
+/// when it is exactly 1.0 the upper side is unbounded (`None`).  This
+/// ensures that a fully-reset slider shows all images rather than
+/// filtering to a zero-width range.
+fn fraction_to_bytes(fraction: f32, min: i64, max: i64, is_lo: bool) -> Option<i64> {
+    if is_lo && fraction <= 0.0 {
+        return None;
+    }
+    if !is_lo && fraction >= 1.0 {
+        return None;
+    }
+    let bytes = min as f64 + fraction as f64 * (max - min) as f64;
+    Some(bytes.round() as i64)
+}
+
+/// Format `bytes` as a human-readable size string, e.g. "2.3 MB".
+fn format_bytes(bytes: i64) -> String {
+    const MB: f64 = 1_048_576.0;
+    const KB: f64 = 1_024.0;
+    if bytes >= MB as i64 {
+        format!("{:.1} MB", bytes as f64 / MB)
+    } else if bytes >= KB as i64 {
+        format!("{:.0} KB", bytes as f64 / KB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+/// Build a `Filters` from current UI slider/chip/GPS state.
+fn build_filters(
+    lo: f32,
+    hi: f32,
+    size_bounds: (i64, i64),
+    selected_exts: &HashSet<String>,
+    gps_mode: i32,
+) -> Filters {
+    let (min, max) = size_bounds;
+    let size_min = fraction_to_bytes(lo, min, max, true);
+    let size_max = fraction_to_bytes(hi, min, max, false);
+    let extensions: Vec<String> = {
+        let mut v: Vec<String> = selected_exts.iter().cloned().collect();
+        v.sort();
+        v
+    };
+    let gps = match gps_mode {
+        1 => GpsFilter::HasGps,
+        2 => GpsFilter::NoGps,
+        _ => GpsFilter::Any,
+    };
+    Filters {
+        size_min,
+        size_max,
+        extensions,
+        gps,
+    }
+}
+
+/// Rebuild the `type-chips` model from the available extensions, marking
+/// those present in `selected` as `on: true`.
+fn build_chips_model(
+    all_exts: &[String],
+    selected: &HashSet<String>,
+) -> ModelRc<(SharedString, bool)> {
+    let chips: Vec<(SharedString, bool)> = all_exts
+        .iter()
+        .map(|ext| (SharedString::from(ext.as_str()), selected.contains(ext)))
+        .collect();
+    ModelRc::from(std::rc::Rc::new(VecModel::from(chips)))
+}
+
+/// Build the human-readable size-label string from lo/hi fractions.
+fn build_size_label(lo: f32, hi: f32, size_bounds: (i64, i64)) -> SharedString {
+    let (min, max) = size_bounds;
+    let lo_bytes = fraction_to_bytes(lo, min, max, true);
+    let hi_bytes = fraction_to_bytes(hi, min, max, false);
+    match (lo_bytes, hi_bytes) {
+        // ASCII-only separators/labels: the Slint default font has no glyph for
+        // en-dash or U+221E and would render them as tofu (see project memory).
+        (None, None) => "Size: all".into(),
+        (Some(lo_b), None) => format!("{} - max", format_bytes(lo_b)).into(),
+        (None, Some(hi_b)) => format!("0 - {}", format_bytes(hi_b)).into(),
+        (Some(lo_b), Some(hi_b)) => {
+            format!("{} - {}", format_bytes(lo_b), format_bytes(hi_b)).into()
+        }
+    }
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt().init();
 
     let args = Args::parse();
     let backend = Backend::open(args.dir.as_deref()).context("Failed to open imgfind database")?;
     backend.start_loading_model();
+
+    // Fetch size bounds once at startup for the [0,1]↔bytes mapping.
+    let size_bounds = backend.size_bounds().unwrap_or((0, 0));
+
+    // All extensions known to the DB, used to drive the type-chips model.
+    let all_extensions: Vec<String> = backend.extensions().unwrap_or_default();
 
     let window = MainWindow::new().context("Failed to create window")?;
 
@@ -51,6 +149,12 @@ fn main() -> Result<()> {
     window.set_tiles(ModelRc::default());
     window.set_lightbox_open(false);
     window.set_detail_open(false);
+    // Filter-bar initial state.
+    window.set_size_lo(0.0);
+    window.set_size_hi(1.0);
+    window.set_size_label("Size: all".into());
+    window.set_type_chips(build_chips_model(&all_extensions, &HashSet::new()));
+    window.set_gps_mode(0);
 
     // State shared with background threads via Arc<Mutex<_>>.
     let state: Arc<Mutex<SearchState>> = Arc::new(Mutex::new(SearchState::new()));
@@ -64,6 +168,12 @@ fn main() -> Result<()> {
     // Tracks whether the tile grid was populated by a text or similarity search,
     // so `on_load_more` knows which backend method to call.
     let search_mode: Arc<Mutex<SearchMode>> = Arc::new(Mutex::new(SearchMode::Text(String::new())));
+
+    // Live filter state, shared with every query closure.
+    let filters: Arc<Mutex<Filters>> = Arc::new(Mutex::new(Filters::default()));
+
+    // Currently-selected extension set (drives chip `on` state + Filters.extensions).
+    let selected_exts: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
 
     // Poll for model readiness every 250 ms.  The timer performs exactly ONE
     // job: detect the loading→ready transition, enable the search box, and
@@ -98,21 +208,46 @@ fn main() -> Result<()> {
         let lb_ref = Arc::clone(&lb_index);
         let detail_ref = Arc::clone(&detail);
         let mode_ref = Arc::clone(&search_mode);
+        let filters_ref = Arc::clone(&filters);
         let backend_search = backend.clone();
         window.on_search(move |query| {
             let query = query.trim().to_string();
+            let current_filters = filters_ref.lock().unwrap().clone();
+
             if query.is_empty() {
-                // Clearing the search box resets everything, including the
-                // detail panel and lightbox (both could hold stale state).
-                *state_ref.lock().unwrap() = SearchState::new();
-                *detail_ref.lock().unwrap() = None;
-                *lb_ref.lock().unwrap() = None;
-                if let Some(w) = weak.upgrade() {
-                    w.set_status("Enter a search query to find images.".into());
-                    w.set_show_load_more(false);
-                    w.set_tiles(ModelRc::default());
-                    w.set_detail_open(false);
-                    w.set_lightbox_open(false);
+                if current_filters == Filters::default() {
+                    // No query, no active filters — reset to idle.
+                    *state_ref.lock().unwrap() = SearchState::new();
+                    *detail_ref.lock().unwrap() = None;
+                    *lb_ref.lock().unwrap() = None;
+                    *mode_ref.lock().unwrap() = SearchMode::Text(String::new());
+                    if let Some(w) = weak.upgrade() {
+                        w.set_status("Enter a search query to find images.".into());
+                        w.set_show_load_more(false);
+                        w.set_tiles(ModelRc::default());
+                        w.set_detail_open(false);
+                        w.set_lightbox_open(false);
+                    }
+                } else {
+                    // Empty query but filters active — browse with filters.
+                    *lb_ref.lock().unwrap() = None;
+                    *detail_ref.lock().unwrap() = None;
+                    *mode_ref.lock().unwrap() = SearchMode::Text(String::new());
+                    state_ref.lock().unwrap().start_search(String::new());
+                    if let Some(w) = weak.upgrade() {
+                        w.set_lightbox_open(false);
+                        w.set_detail_open(false);
+                        w.set_status("Searching\u{2026}".into());
+                        w.set_show_load_more(false);
+                        w.set_can_search(false);
+                    }
+                    spawn_browse(
+                        weak.clone(),
+                        Arc::clone(&state_ref),
+                        backend_search.clone(),
+                        current_filters,
+                        0,
+                    );
                 }
                 return;
             }
@@ -140,6 +275,7 @@ fn main() -> Result<()> {
                 backend_search.clone(),
                 query,
                 0,
+                current_filters,
             );
         });
     }
@@ -149,10 +285,12 @@ fn main() -> Result<()> {
         let weak = window.as_weak();
         let state_ref = Arc::clone(&state);
         let mode_ref = Arc::clone(&search_mode);
+        let filters_ref = Arc::clone(&filters);
         let backend_more = backend.clone();
         window.on_load_more(move || {
             let offset = state_ref.lock().unwrap().next_offset();
             let mode = mode_ref.lock().unwrap().clone();
+            let current_filters = filters_ref.lock().unwrap().clone();
 
             if let Some(w) = weak.upgrade() {
                 w.set_status("Searching\u{2026}".into());
@@ -168,6 +306,7 @@ fn main() -> Result<()> {
                         backend_more.clone(),
                         query,
                         offset,
+                        current_filters,
                     );
                 }
                 SearchMode::Similar(seed) if !seed.is_empty() => {
@@ -176,6 +315,17 @@ fn main() -> Result<()> {
                         Arc::clone(&state_ref),
                         backend_more.clone(),
                         seed,
+                        offset,
+                        current_filters,
+                    );
+                }
+                // Text("") means we're in browse mode.
+                SearchMode::Text(_) => {
+                    spawn_browse(
+                        weak.clone(),
+                        Arc::clone(&state_ref),
+                        backend_more.clone(),
+                        current_filters,
                         offset,
                     );
                 }
@@ -337,6 +487,7 @@ fn main() -> Result<()> {
         let state_ref = Arc::clone(&state);
         let detail_ref = Arc::clone(&detail);
         let mode_ref = Arc::clone(&search_mode);
+        let filters_ref = Arc::clone(&filters);
         let backend_sim = backend.clone();
         window.on_search_similar(move || {
             let seed_path = {
@@ -346,6 +497,7 @@ fn main() -> Result<()> {
             let Some(seed_path) = seed_path else { return };
 
             let filename = filename_of(&seed_path);
+            let current_filters = filters_ref.lock().unwrap().clone();
             *mode_ref.lock().unwrap() = SearchMode::Similar(seed_path.clone());
 
             // `start_search` records the seed path as the "committed query" so
@@ -368,6 +520,7 @@ fn main() -> Result<()> {
                 backend_sim.clone(),
                 seed_path,
                 0,
+                current_filters,
             );
         });
     }
@@ -441,11 +594,216 @@ fn main() -> Result<()> {
         });
     }
 
-    // Keep the model timer alive for the entire event loop.
+    // --- filter-bar debounce timer ---
+    //
+    // A single stable `FnMut` timer callback is registered once; the three
+    // filter-change callbacks below restart it on every change so rapid
+    // events (e.g. slider dragging) coalesce into one query.  The callback
+    // reads all relevant state from Arcs at fire time, so it always uses
+    // the *latest* values regardless of which event triggered the restart.
+    // The debounce timer is shared by all three filter callbacks below.
+    // Each callback calls `start_debounce(&timer, …)` which replaces the
+    // pending timer fire with a new 250 ms single-shot containing the
+    // latest filter snapshot.
+    // Timer is !Send+!Sync, so Rc (not Arc) is correct — all callbacks run
+    // on the Slint UI thread.
+    let debounce_timer: Rc<Timer> = Rc::new(Timer::default());
+
+    // `on_filters_changed` — fired by the range slider after each handle move.
+    {
+        let weak = window.as_weak();
+        let state_ref = Arc::clone(&state);
+        let mode_ref = Arc::clone(&search_mode);
+        let filters_ref = Arc::clone(&filters);
+        let selected_exts_ref = Arc::clone(&selected_exts);
+        let backend_fc = backend.clone();
+        let timer = Rc::clone(&debounce_timer);
+        window.on_filters_changed(move || {
+            let (lo, hi, gps_mode) = match weak.upgrade() {
+                Some(w) => (w.get_size_lo(), w.get_size_hi(), w.get_gps_mode()),
+                None => return,
+            };
+            let exts = selected_exts_ref.lock().unwrap().clone();
+            let new_filters = build_filters(lo, hi, size_bounds, &exts, gps_mode);
+            let label = build_size_label(lo, hi, size_bounds);
+            if let Some(w) = weak.upgrade() {
+                w.set_size_label(label);
+            }
+            *filters_ref.lock().unwrap() = new_filters.clone();
+            start_debounce(
+                &timer,
+                weak.clone(),
+                Arc::clone(&state_ref),
+                Arc::clone(&mode_ref),
+                backend_fc.clone(),
+                new_filters,
+            );
+        });
+    }
+
+    // `on_ext_toggled` — fired when the user clicks a file-type chip.
+    {
+        let weak = window.as_weak();
+        let state_ref = Arc::clone(&state);
+        let mode_ref = Arc::clone(&search_mode);
+        let filters_ref = Arc::clone(&filters);
+        let selected_exts_ref = Arc::clone(&selected_exts);
+        let all_exts_et = all_extensions.clone();
+        let backend_et = backend.clone();
+        let timer = Rc::clone(&debounce_timer);
+        window.on_ext_toggled(move |name| {
+            let ext = name.to_string().to_lowercase();
+            {
+                let mut set = selected_exts_ref.lock().unwrap();
+                if set.contains(&ext) {
+                    set.remove(&ext);
+                } else {
+                    set.insert(ext);
+                }
+            }
+            let selected = selected_exts_ref.lock().unwrap().clone();
+            let model = build_chips_model(&all_exts_et, &selected);
+            let (lo, hi, gps_mode) = weak
+                .upgrade()
+                .map(|w| (w.get_size_lo(), w.get_size_hi(), w.get_gps_mode()))
+                .unwrap_or((0.0, 1.0, 0));
+            if let Some(w) = weak.upgrade() {
+                w.set_type_chips(model);
+            }
+            let new_filters = build_filters(lo, hi, size_bounds, &selected, gps_mode);
+            *filters_ref.lock().unwrap() = new_filters.clone();
+            start_debounce(
+                &timer,
+                weak.clone(),
+                Arc::clone(&state_ref),
+                Arc::clone(&mode_ref),
+                backend_et.clone(),
+                new_filters,
+            );
+        });
+    }
+
+    // `on_gps_mode_changed` — fired when the user clicks Any/Has/No GPS.
+    {
+        let weak = window.as_weak();
+        let state_ref = Arc::clone(&state);
+        let mode_ref = Arc::clone(&search_mode);
+        let filters_ref = Arc::clone(&filters);
+        let selected_exts_ref = Arc::clone(&selected_exts);
+        let backend_gps = backend.clone();
+        let timer = Rc::clone(&debounce_timer);
+        window.on_gps_mode_changed(move |mode| {
+            if let Some(w) = weak.upgrade() {
+                w.set_gps_mode(mode);
+            }
+            let (lo, hi) = weak
+                .upgrade()
+                .map(|w| (w.get_size_lo(), w.get_size_hi()))
+                .unwrap_or((0.0, 1.0));
+            let exts = selected_exts_ref.lock().unwrap().clone();
+            let new_filters = build_filters(lo, hi, size_bounds, &exts, mode);
+            *filters_ref.lock().unwrap() = new_filters.clone();
+            start_debounce(
+                &timer,
+                weak.clone(),
+                Arc::clone(&state_ref),
+                Arc::clone(&mode_ref),
+                backend_gps.clone(),
+                new_filters,
+            );
+        });
+    }
+
+    // Keep the model timer and debounce timer alive for the entire event loop.
     let _ = model_timer;
+    let _ = debounce_timer;
 
     window.run().context("Event loop failed")?;
     Ok(())
+}
+
+/// Restart the debounce timer with a fresh 250 ms single-shot callback.
+///
+/// Each filter-change event calls this function, which replaces any pending
+/// timer fire with a new one carrying the *latest* filter snapshot.  Because
+/// `Timer::start` accepts `FnMut + 'static` and we cannot move non-`Copy`
+/// values out of an outer `FnMut` callback, we allocate a new closure per
+/// restart — which is fine for a 250 ms debounce rate.
+fn start_debounce(
+    timer: &Timer,
+    weak: Weak<MainWindow>,
+    state_ref: Arc<Mutex<SearchState>>,
+    mode_ref: Arc<Mutex<SearchMode>>,
+    backend: Backend,
+    filters: Filters,
+) {
+    timer.start(
+        TimerMode::SingleShot,
+        Duration::from_millis(250),
+        move || {
+            fire_debounced_query(
+                weak.clone(),
+                Arc::clone(&state_ref),
+                Arc::clone(&mode_ref),
+                backend.clone(),
+                filters.clone(),
+            );
+        },
+    );
+}
+
+/// Called from all three debounce closures after rebuilding `Filters`.
+///
+/// Reads `search_mode` and either runs a text search, similarity search, or
+/// browse, starting from offset 0.
+fn fire_debounced_query(
+    weak: Weak<MainWindow>,
+    state_ref: Arc<Mutex<SearchState>>,
+    mode_ref: Arc<Mutex<SearchMode>>,
+    backend: Backend,
+    filters: Filters,
+) {
+    let mode = mode_ref.lock().unwrap().clone();
+    match mode {
+        SearchMode::Text(query) if !query.is_empty() => {
+            state_ref.lock().unwrap().start_search(query.clone());
+            if let Some(w) = weak.upgrade() {
+                w.set_status("Searching\u{2026}".into());
+                w.set_show_load_more(false);
+                w.set_can_search(false);
+            }
+            spawn_search(weak, state_ref, backend, query, 0, filters);
+        }
+        // Text("") = browse mode (or idle — browse with filters anyway).
+        // Text("") with default filters — restore idle state, nothing to browse.
+        SearchMode::Text(_) if filters == Filters::default() => {
+            if let Some(w) = weak.upgrade() {
+                w.set_status("Enter a search query to find images.".into());
+                w.set_show_load_more(false);
+                w.set_tiles(ModelRc::default());
+            }
+        }
+        // Text("") with active filters — browse with filters.
+        SearchMode::Text(_) => {
+            state_ref.lock().unwrap().start_search(String::new());
+            if let Some(w) = weak.upgrade() {
+                w.set_status("Searching\u{2026}".into());
+                w.set_show_load_more(false);
+                w.set_can_search(false);
+            }
+            spawn_browse(weak, state_ref, backend, filters, 0);
+        }
+        SearchMode::Similar(seed) => {
+            state_ref.lock().unwrap().start_search(seed.clone());
+            if let Some(w) = weak.upgrade() {
+                let filename = filename_of(&seed);
+                w.set_status(format!("Similar to {filename}").into());
+                w.set_show_load_more(false);
+                w.set_can_search(false);
+            }
+            spawn_similar(weak, state_ref, backend, seed, 0, filters);
+        }
+    }
 }
 
 /// Decode raw JPEG bytes (already on the UI thread) into Slint `Image` tiles.
@@ -488,9 +846,10 @@ fn spawn_search(
     backend: Backend,
     query: String,
     offset: usize,
+    filters: Filters,
 ) {
     std::thread::spawn(move || {
-        let res = backend.search(&query, offset);
+        let res = backend.search(&query, offset, &filters);
 
         // Fetch raw thumbnail bytes on the worker thread (DB/disk I/O).
         // `Vec<Option<Vec<u8>>>` is Send; `slint::Image` is not.
@@ -543,9 +902,62 @@ fn spawn_similar(
     backend: Backend,
     seed_path: String,
     offset: usize,
+    filters: Filters,
 ) {
     std::thread::spawn(move || {
-        let res = backend.search_similar(&seed_path, offset);
+        let res = backend.search_similar(&seed_path, offset, &filters);
+
+        let raw_thumbs: Vec<Option<Vec<u8>>> = match &res {
+            Ok(results) => results
+                .iter()
+                .map(|r| backend.thumbnail(&r.path, 300).ok())
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+
+        slint::invoke_from_event_loop(move || {
+            let Some(w) = weak.upgrade() else { return };
+
+            let (vs, has_more, error_msg, results) = {
+                let mut s = state_ref.lock().unwrap();
+                match res {
+                    Ok(page) => s.apply_page(page, offset),
+                    Err(e) => s.apply_error(e.to_string(), offset),
+                }
+                let vs = s.view_state();
+                let has_more = s.has_more;
+                let error_msg = s.error.clone();
+                let results = s.results.clone();
+                (vs, has_more, error_msg, results)
+            };
+
+            if matches!(vs, ViewState::Results | ViewState::Empty) {
+                let model = build_tiles_model(&results, raw_thumbs);
+                w.set_tiles(model);
+            }
+
+            w.set_status(status_text_for(vs, error_msg.as_deref()));
+            w.set_show_load_more(has_more && vs == ViewState::Results);
+            w.set_can_search(true);
+        })
+        .ok();
+    });
+}
+
+/// Browse all indexed images subject to `filters`, paginated by `offset`.
+///
+/// Mirrors `spawn_search` but calls `backend.browse` instead of embedding a
+/// text query.  Used when the query box is empty but filters are active, and
+/// for the filter-bar debounce when `search_mode` is idle/browse.
+fn spawn_browse(
+    weak: Weak<MainWindow>,
+    state_ref: Arc<Mutex<SearchState>>,
+    backend: Backend,
+    filters: Filters,
+    offset: usize,
+) {
+    std::thread::spawn(move || {
+        let res = backend.browse(&filters, offset);
 
         let raw_thumbs: Vec<Option<Vec<u8>>> = match &res {
             Ok(results) => results
@@ -634,7 +1046,7 @@ fn load_lightbox_image(weak: Weak<MainWindow>, backend: Backend, rel_path: Strin
 
 #[cfg(test)]
 mod tests {
-    use super::{clamp_next, clamp_prev};
+    use super::{build_size_label, clamp_next, clamp_prev, format_bytes, fraction_to_bytes};
 
     #[test]
     fn clamp_prev_at_zero_stays_zero() {
@@ -659,5 +1071,71 @@ mod tests {
     #[test]
     fn clamp_next_empty_len_returns_current() {
         assert_eq!(clamp_next(5, 0), 5);
+    }
+
+    // --- fraction_to_bytes ---
+
+    #[test]
+    fn lo_at_zero_is_unbounded() {
+        assert_eq!(fraction_to_bytes(0.0, 0, 1_000_000, true), None);
+    }
+
+    #[test]
+    fn hi_at_one_is_unbounded() {
+        assert_eq!(fraction_to_bytes(1.0, 0, 1_000_000, false), None);
+    }
+
+    #[test]
+    fn lo_mid_maps_correctly() {
+        // 0.5 of [0, 1 000 000] = 500 000
+        assert_eq!(fraction_to_bytes(0.5, 0, 1_000_000, true), Some(500_000));
+    }
+
+    #[test]
+    fn hi_mid_maps_correctly() {
+        assert_eq!(fraction_to_bytes(0.5, 0, 1_000_000, false), Some(500_000));
+    }
+
+    #[test]
+    fn lo_at_one_is_not_unbounded() {
+        // lo == 1.0 is NOT the "unbounded" extreme for the lo side (0.0 is).
+        assert!(fraction_to_bytes(1.0, 0, 1_000_000, true).is_some());
+    }
+
+    #[test]
+    fn hi_at_zero_is_not_unbounded() {
+        assert!(fraction_to_bytes(0.0, 0, 1_000_000, false).is_some());
+    }
+
+    // --- format_bytes ---
+
+    #[test]
+    fn format_bytes_megabytes() {
+        assert_eq!(format_bytes(2_097_152), "2.0 MB");
+    }
+
+    #[test]
+    fn format_bytes_kilobytes() {
+        assert_eq!(format_bytes(2048), "2 KB");
+    }
+
+    #[test]
+    fn format_bytes_small() {
+        assert_eq!(format_bytes(512), "512 B");
+    }
+
+    // --- build_size_label ---
+
+    #[test]
+    fn size_label_both_at_extremes_is_all() {
+        let label = build_size_label(0.0, 1.0, (0, 10_000_000));
+        assert_eq!(label, "Size: all");
+    }
+
+    #[test]
+    fn size_label_partial_range() {
+        // lo=0 (unbounded), hi=0.5 → "0 – 4.8 MB" (5_000_000 bytes = 4.8 MB)
+        let label = build_size_label(0.0, 0.5, (0, 10_000_000));
+        assert!(label.contains("4.8 MB"), "got: {label}");
     }
 }
