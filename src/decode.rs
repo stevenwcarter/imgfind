@@ -1,8 +1,9 @@
 //! Single decode seam for every pixel-decode in imgfind.
 //!
 //! RAW files (by extension) are decoded via `rawler` — largest embedded preview
-//! first, full demosaic as a fallback (see `decode_raw`, Task 2). Every other
-//! extension uses the `image` crate exactly as before.
+//! first, full demosaic as a fallback (see `decode_raw`). All other extensions use
+//! the `image` crate. Either way, `decode_image` then applies the file's EXIF
+//! orientation tag so the returned image is upright.
 
 use anyhow::{Context, Result};
 use std::path::Path;
