@@ -325,6 +325,10 @@ fn parse_threshold(s: &str) -> Result<f32, String> {
 
 /// Launch the imgfind-gui binary with `args`, blocking until it exits and
 /// propagating its exit code, so `imgfind gui ARGS` behaves like `imgfind-gui ARGS`.
+///
+/// On the happy path this never returns `Ok`: it diverges via `process::exit` with
+/// the child's status. The `Result<()>` return type exists only to propagate a spawn
+/// failure (`?` at the call site) — that is the function's sole `Err` path.
 fn launch_gui(args: &[std::ffi::OsString]) -> anyhow::Result<()> {
     use std::ffi::OsString;
 
