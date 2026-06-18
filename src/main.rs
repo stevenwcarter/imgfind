@@ -70,6 +70,12 @@ enum Commands {
         #[arg(short, long)]
         dir: Option<String>,
     },
+    /// Launch the native desktop GUI (forwards remaining args to imgfind-gui)
+    Gui {
+        /// Arguments passed through to imgfind-gui (e.g. -d / --dir DIR)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<std::ffi::OsString>,
+    },
     /// Search for images using natural language
     Search {
         /// Search query
@@ -177,6 +183,7 @@ async fn main() -> Result<()> {
             let db = Database::new(&db_path)?;
             imgfind::tui::tui(db).await?;
         }
+        Commands::Gui { args } => launch_gui(&args)?,
         Commands::Metadata { dir, quiet, count } => {
             let db_path = get_db_path(dir.as_deref())?;
             let mut db = Database::new(&db_path)?;
@@ -314,6 +321,31 @@ fn parse_threshold(s: &str) -> Result<f32, String> {
         return Err("threshold must be a finite, non-negative number".to_string());
     }
     Ok(v)
+}
+
+/// Launch the imgfind-gui binary with `args`, blocking until it exits and
+/// propagating its exit code, so `imgfind gui ARGS` behaves like `imgfind-gui ARGS`.
+fn launch_gui(args: &[std::ffi::OsString]) -> anyhow::Result<()> {
+    use std::ffi::OsString;
+
+    // Prefer a sibling of the current executable (install.sh + cargo target layout);
+    // otherwise rely on PATH.
+    let sibling = std::env::current_exe().ok().and_then(|p| {
+        let cand = p.with_file_name(format!("imgfind-gui{}", std::env::consts::EXE_SUFFIX));
+        cand.exists().then_some(cand.into_os_string())
+    });
+    let program = sibling.unwrap_or_else(|| OsString::from("imgfind-gui"));
+
+    let status = std::process::Command::new(&program)
+        .args(args)
+        .status()
+        .with_context(|| {
+            format!(
+                "failed to launch imgfind-gui ({}); is it installed / on PATH?",
+                program.to_string_lossy()
+            )
+        })?;
+    std::process::exit(status.code().unwrap_or(1));
 }
 
 fn metadata(db: &mut Database, quiet: bool, count: usize) -> Result<()> {
@@ -980,6 +1012,41 @@ fn generate_thumbnails_batch(db: &mut Database, size: u32, count: usize) -> Resu
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod gui_cli_tests {
+    use super::*;
+    use clap::Parser;
+    use std::ffi::OsString;
+
+    #[test]
+    fn gui_captures_trailing_args_including_hyphens() {
+        let cli = Cli::try_parse_from(["imgfind", "gui", "--dir", "x", "-d", "y", "--whatever"])
+            .expect("parse");
+        match cli.command {
+            Commands::Gui { args } => {
+                let want: Vec<OsString> = ["--dir", "x", "-d", "y", "--whatever"]
+                    .iter()
+                    .map(OsString::from)
+                    .collect();
+                assert_eq!(args, want);
+            }
+            _ => panic!("expected Gui subcommand"),
+        }
+    }
+
+    #[test]
+    fn gui_with_no_args_is_empty() {
+        let cli = Cli::try_parse_from(["imgfind", "gui"]).expect("parse");
+        assert!(matches!(cli.command, Commands::Gui { args } if args.is_empty()));
+    }
+
+    #[test]
+    fn existing_subcommand_still_parses() {
+        let cli = Cli::try_parse_from(["imgfind", "tui"]).expect("parse");
+        assert!(matches!(cli.command, Commands::Tui { .. }));
+    }
 }
 
 #[cfg(test)]
