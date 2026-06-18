@@ -99,15 +99,11 @@ fn decode_raw(path: &Path) -> Result<image::DynamicImage> {
 mod tests {
     use super::*;
 
-    const RAW_FIXTURE: &str = "tests/fixtures/sample.dng";
+    const RAW_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sample.dng");
 
     #[test]
     fn decodes_real_raw_to_nonempty_image() {
         let p = std::path::Path::new(RAW_FIXTURE);
-        if !p.exists() {
-            eprintln!("skipping: RAW fixture {RAW_FIXTURE} not present");
-            return;
-        }
         let img = decode_image(p).expect("RAW decode should succeed");
         assert!(img.width() > 0 && img.height() > 0);
     }

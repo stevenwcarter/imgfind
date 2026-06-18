@@ -2144,11 +2144,7 @@ mod tests {
 
     #[test]
     fn extracts_metadata_from_raw_fixture() {
-        let fixture = "tests/fixtures/sample.dng";
-        if !std::path::Path::new(fixture).exists() {
-            eprintln!("skipping: RAW fixture {fixture} not present");
-            return;
-        }
+        let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sample.dng");
         let md = extract_image_metadata(fixture).expect("metadata extraction");
         assert!(
             md.width.is_some() && md.height.is_some(),

@@ -1,6 +1,7 @@
 use std::fs;
 
 use anyhow::{Context, Result};
+use tracing_subscriber::EnvFilter;
 
 pub fn init_tracing() -> Result<()> {
     dotenvy::dotenv().ok();
@@ -14,7 +15,16 @@ pub fn init_tracing() -> Result<()> {
     let file_appender = tracing_appender::rolling::never(&log_path, "log.txt");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
+    // Honor RUST_LOG when set; default to `info`.  Additionally suppress
+    // rawler's per-file WARN noise ("Decoder has no full/preview image
+    // support") that fires on every RAW file lacking an embedded preview —
+    // the demosaic fallback handles those files correctly without a warning.
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"))
+        .add_directive("rawler=error".parse()?);
+
     tracing_subscriber::fmt()
+        .with_env_filter(filter)
         .with_writer(non_blocking)
         .with_ansi(true)
         .init();
