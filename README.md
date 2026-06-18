@@ -132,6 +132,7 @@ imgfind models use <name>  # set the active model
 - BMP (.bmp)
 - TIFF (.tiff)
 - WebP (.webp)
+- **RAW (camera):** Nikon (.nef, .nrw), Adobe/generic (.dng), Olympus (.orf), Canon (.cr2, .cr3, .crw), Sony (.arw, .sr2, .srf), Fujifilm (.raf), Panasonic (.rw2), Pentax (.pef), Samsung (.srw), Epson (.erf), Minolta (.mrw), Leica/misc (.raw, .rwl), Phase One/Hasselblad (.iiq, .3fr, .fff), Mamiya/Leaf/Kodak (.mef, .mos, .kdc, .dcr) — decoded via embedded preview with full-demosaic fallback.
 
 ## Interactive TUI
 

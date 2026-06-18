@@ -1,6 +1,5 @@
 use crate::{database::Database, get_db_path};
 use anyhow::{Context, Result};
-use image::ImageReader;
 use rayon::prelude::*;
 use rusqlite::params;
 use std::io::Cursor;
@@ -163,9 +162,7 @@ pub fn generate_missing_thumbnails_batch(
 
 // Generate resized JPEG bytes for a thumbnail (pure function aside from file IO)
 fn generate_thumbnail_bytes(filepath: &str, size: u32) -> Result<Vec<u8>> {
-    let image = ImageReader::open(filepath)
-        .with_context(|| format!("Failed to open image: {}", filepath))?
-        .decode()
+    let image = crate::decode::decode_image(std::path::Path::new(filepath))
         .with_context(|| format!("Failed to decode image: {}", filepath))?;
 
     let resized_image = image.resize(size, size, image::imageops::FilterType::Lanczos3);

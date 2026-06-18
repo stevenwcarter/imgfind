@@ -1,4 +1,4 @@
-use image::{DynamicImage, GenericImageView, ImageReader};
+use image::{DynamicImage, GenericImageView};
 use ratatui::layout::Rect;
 use ratatui_image::{FilterType, thread::ThreadProtocol};
 use tokio::sync::mpsc::unbounded_channel;
@@ -132,16 +132,10 @@ impl App {
                     {
                         zoomed_image
                     } else {
-                        match ImageReader::open(&image_path) {
-                            Ok(reader) => match reader.decode() {
-                                Ok(img) => img,
-                                Err(e) => {
-                                    warn!("failed to decode image {image_path}: {e}");
-                                    return;
-                                }
-                            },
+                        match crate::decode::decode_image(std::path::Path::new(&image_path)) {
+                            Ok(img) => img,
                             Err(e) => {
-                                warn!("failed to open image {image_path}: {e}");
+                                warn!("failed to decode image {image_path}: {e}");
                                 return;
                             }
                         }
