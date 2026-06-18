@@ -55,6 +55,24 @@ fn read_exif_orientation(path: &Path) -> Option<u8> {
     u8::try_from(field.value.get_uint(0)?).ok()
 }
 
+/// Apply the file's EXIF orientation to `img` in place (best-effort; no-op if absent).
+fn apply_exif_orientation(img: &mut image::DynamicImage, path: &Path) {
+    if let Some(orientation) =
+        read_exif_orientation(path).and_then(image::metadata::Orientation::from_exif)
+    {
+        img.apply_orientation(orientation);
+    }
+}
+
+/// Long-edge pixel floor for a RAW embedded preview to be used as-is for full-screen
+/// viewing; below this we demosaic the sensor for full native resolution.
+const FULL_RAW_MIN_LONG_EDGE: u32 = 2000;
+
+/// True when an image of these dimensions is large enough to use as-is for full view.
+fn preview_meets_full_threshold(width: u32, height: u32) -> bool {
+    width.max(height) >= FULL_RAW_MIN_LONG_EDGE
+}
+
 /// Decode any supported still or RAW image to a `DynamicImage`, corrected for
 /// EXIF orientation (0x0112) so the result is upright.
 pub fn decode_image(path: &Path) -> Result<image::DynamicImage> {
@@ -70,15 +88,82 @@ pub fn decode_image(path: &Path) -> Result<image::DynamicImage> {
         image::open(path).with_context(|| format!("decoding image {}", path.display()))?
     };
 
-    // Apply EXIF orientation uniformly (RAW preview / non-RAW alike). Best-effort:
-    // no tag or unreadable EXIF leaves the image as-decoded.
-    if let Some(orientation) =
-        read_exif_orientation(path).and_then(image::metadata::Orientation::from_exif)
+    apply_exif_orientation(&mut img, path);
+    Ok(img)
+}
+
+/// Decode an image at full/high resolution for full-screen viewing (the GUI lightbox).
+/// Non-RAW: the original (already full-res). RAW: the largest embedded preview if its
+/// long edge is >= `FULL_RAW_MIN_LONG_EDGE`, else a full sensor demosaic. EXIF
+/// orientation applied. For thumbnails/embeddings use the faster `decode_image` instead.
+pub fn decode_full_image(path: &Path) -> Result<image::DynamicImage> {
+    let is_raw = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(is_raw_extension)
+        .unwrap_or(false);
+
+    let mut img = if is_raw {
+        decode_raw_full(path)?
+    } else {
+        image::open(path).with_context(|| format!("decoding image {}", path.display()))?
+    };
+
+    apply_exif_orientation(&mut img, path);
+    Ok(img)
+}
+
+/// Decode a RAW at full resolution: the largest embedded preview when its long edge is
+/// `>= FULL_RAW_MIN_LONG_EDGE`, else a full sensor demosaic. If demosaic fails, falls
+/// back to the (small) preview rather than erroring.
+fn decode_raw_full(path: &Path) -> Result<image::DynamicImage> {
+    use rawler::decoders::RawDecodeParams;
+    use rawler::imgop::develop::RawDevelop;
+    use rawler::rawsource::RawSource;
+
+    let source =
+        RawSource::new(path).with_context(|| format!("opening RAW file {}", path.display()))?;
+    let decoder = rawler::get_decoder(&source)
+        .with_context(|| format!("no RAW decoder for {}", path.display()))?;
+    let params = RawDecodeParams::default();
+
+    // Largest embedded preview: full_image preferred, else preview_image.
+    let best_preview = match decoder
+        .full_image(&source, &params)
+        .with_context(|| format!("reading embedded full image for {}", path.display()))?
     {
-        img.apply_orientation(orientation);
+        Some(img) => Some(img),
+        None => decoder
+            .preview_image(&source, &params)
+            .with_context(|| format!("reading embedded preview for {}", path.display()))?,
+    };
+
+    let preview_big_enough = best_preview
+        .as_ref()
+        .map(|img| preview_meets_full_threshold(img.width(), img.height()))
+        .unwrap_or(false);
+    if preview_big_enough {
+        return Ok(best_preview.expect("checked Some above"));
     }
 
-    Ok(img)
+    // Preview too small or absent: demosaic the sensor to full native resolution.
+    let demosaic = (|| -> Result<image::DynamicImage> {
+        let raw = decoder
+            .raw_image(&source, &params, false)
+            .with_context(|| format!("decoding RAW sensor data for {}", path.display()))?;
+        let intermediate = RawDevelop::default()
+            .develop_intermediate(&raw)
+            .with_context(|| format!("developing RAW image {}", path.display()))?;
+        intermediate
+            .to_dynamic_image()
+            .with_context(|| format!("converting developed RAW to image for {}", path.display()))
+    })();
+
+    match demosaic {
+        Ok(img) => Ok(img),
+        // A small preview beats nothing; only error if we have no preview at all.
+        Err(e) => best_preview.ok_or(e),
+    }
 }
 
 /// Decode a RAW file via rawler: try the largest embedded preview (camera-rendered
@@ -123,6 +208,48 @@ fn decode_raw(path: &Path) -> Result<image::DynamicImage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_threshold_uses_long_edge() {
+        assert!(preview_meets_full_threshold(2000, 100));
+        assert!(preview_meets_full_threshold(100, 2500));
+        assert!(preview_meets_full_threshold(3000, 2000));
+        assert!(!preview_meets_full_threshold(1999, 1999));
+    }
+
+    #[test]
+    fn decode_full_image_decodes_raw_fixture() {
+        let p = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/sample.dng"
+        ));
+        let img = decode_full_image(p).expect("decode_full_image on sample.dng");
+        assert!(img.width() > 0 && img.height() > 0);
+    }
+
+    #[test]
+    fn decode_full_image_non_raw_matches_image_open() {
+        use image::{ImageBuffer, Rgb};
+        let buf: ImageBuffer<Rgb<u8>, Vec<u8>> =
+            ImageBuffer::from_fn(6, 4, |x, _| Rgb([(x * 30) as u8, 80, 120]));
+        let path = std::env::temp_dir().join(format!("imgfind_full_{}.png", std::process::id()));
+        buf.save(&path).expect("save");
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let _c = Cleanup(path.clone());
+
+        let via_full = decode_full_image(&path).expect("decode_full_image");
+        let via_open = image::open(&path).expect("image::open");
+        assert_eq!(
+            (via_full.width(), via_full.height()),
+            (via_open.width(), via_open.height())
+        );
+        assert_eq!((via_full.width(), via_full.height()), (6, 4)); // full-res, no shrink
+    }
 
     const RAW_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sample.dng");
 

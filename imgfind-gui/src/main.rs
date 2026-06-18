@@ -1019,26 +1019,22 @@ fn clamp_next(current: usize, len: usize) -> usize {
 fn load_lightbox_image(weak: Weak<MainWindow>, backend: Backend, rel_path: String) {
     std::thread::spawn(move || {
         let abs = backend.abs_path(&rel_path);
-        let bytes = match std::fs::read(&abs) {
-            Ok(b) => b,
+        // Full-resolution, RAW-aware, orientation-corrected decode — on this background
+        // thread so a slow RAW demosaic never freezes the UI.
+        let img = match imgfind::decode::decode_full_image(&abs) {
+            Ok(img) => img,
             Err(e) => {
-                tracing::warn!("Lightbox: failed to read {abs:?}: {e}");
+                tracing::warn!("Lightbox: failed to decode {abs:?}: {e}");
                 return;
             }
         };
 
+        // `DynamicImage` is Send; move it to the UI thread and build the (!Send) Image there.
         slint::invoke_from_event_loop(move || {
             let Some(w) = weak.upgrade() else { return };
-            match image_util::jpeg_to_slint_image(&bytes) {
-                Ok(img) => {
-                    w.set_lightbox_image(img);
-                    w.set_lightbox_open(true);
-                }
-                Err(e) => {
-                    tracing::warn!("Lightbox: failed to decode {rel_path}: {e}");
-                    // Leave the lightbox closed rather than showing a blank image.
-                }
-            }
+            let slint_img = image_util::dynamic_to_slint_image(&img);
+            w.set_lightbox_image(slint_img);
+            w.set_lightbox_open(true);
         })
         .ok();
     });
