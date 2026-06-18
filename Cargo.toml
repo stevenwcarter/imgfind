@@ -7,6 +7,9 @@ name = "imgfind"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
+description = "CLIP-based semantic image search: index images into a local SQLite database and find them by natural-language query (CLI + TUI)."
+repository = "https://github.com/stevenwcarter/imgfind"
+readme = "README.md"
 
 [profile.release]
 #codegen-units = 1
