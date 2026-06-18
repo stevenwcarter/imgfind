@@ -41,7 +41,21 @@ pub fn is_supported_extension(ext: &str) -> bool {
     STILL_EXTENSIONS.contains(&ext.as_str()) || RAW_EXTENSIONS.contains(&ext.as_str())
 }
 
-/// Decode any supported still or RAW image to a `DynamicImage`.
+/// Read the EXIF Orientation tag (0x0112, primary IFD) as its raw 1–8 value.
+/// Best-effort: returns `None` on any read failure or when the tag is absent —
+/// never propagates an error, so a missing/broken EXIF block can't fail a decode.
+fn read_exif_orientation(path: &Path) -> Option<u8> {
+    use exif::{In, Reader, Tag};
+
+    let file = std::fs::File::open(path).ok()?;
+    let mut bufreader = std::io::BufReader::new(&file);
+    let reader = Reader::new().read_from_container(&mut bufreader).ok()?;
+    let field = reader.get_field(Tag::Orientation, In::PRIMARY)?;
+    u8::try_from(field.value.get_uint(0)?).ok()
+}
+
+/// Decode any supported still or RAW image to a `DynamicImage`, corrected for
+/// EXIF orientation (0x0112) so the result is upright.
 pub fn decode_image(path: &Path) -> Result<image::DynamicImage> {
     let is_raw = path
         .extension()
@@ -49,11 +63,21 @@ pub fn decode_image(path: &Path) -> Result<image::DynamicImage> {
         .map(is_raw_extension)
         .unwrap_or(false);
 
-    if is_raw {
-        decode_raw(path)
+    let mut img = if is_raw {
+        decode_raw(path)?
     } else {
-        image::open(path).with_context(|| format!("decoding image {}", path.display()))
+        image::open(path).with_context(|| format!("decoding image {}", path.display()))?
+    };
+
+    // Apply EXIF orientation uniformly (RAW preview / non-RAW alike). Best-effort:
+    // no tag or unreadable EXIF leaves the image as-decoded.
+    if let Some(orientation) =
+        read_exif_orientation(path).and_then(image::metadata::Orientation::from_exif)
+    {
+        img.apply_orientation(orientation);
     }
+
+    Ok(img)
 }
 
 /// Decode a RAW file via rawler: try the largest embedded preview (camera-rendered
@@ -130,6 +154,108 @@ mod tests {
         assert!(!is_supported_extension("txt"));
         assert!(!is_raw_extension("txt"));
         assert!(!is_supported_extension(""));
+    }
+
+    /// Build JPEG bytes for a `w`x`h` image carrying an EXIF Orientation tag.
+    /// The `image` JPEG encoder does not emit EXIF, so we splice a minimal big-endian
+    /// EXIF APP1 segment (single SHORT Orientation entry) right after the SOI marker.
+    fn jpeg_with_orientation(w: u32, h: u32, exif_orientation: u8) -> Vec<u8> {
+        use image::{ImageBuffer, ImageFormat, Rgb};
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+            ImageBuffer::from_fn(w, h, |x, _| Rgb([(x * 40) as u8, 100, 150]));
+        let mut jpeg = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut std::io::Cursor::new(&mut jpeg), ImageFormat::Jpeg)
+            .expect("encode jpeg");
+
+        // APP1: marker FFE1, length 0x0022 (34), "Exif\0\0", TIFF(MM, 0x002A, IFD0@8),
+        // 1 entry: tag 0x0112 (Orientation), type 0x0003 (SHORT), count 1,
+        // value left-justified big-endian SHORT = 00 <orient> 00 00; then next-IFD = 0.
+        let app1: Vec<u8> = vec![
+            0xFF,
+            0xE1,
+            0x00,
+            0x22,
+            b'E',
+            b'x',
+            b'i',
+            b'f',
+            0x00,
+            0x00,
+            0x4D,
+            0x4D,
+            0x00,
+            0x2A,
+            0x00,
+            0x00,
+            0x00,
+            0x08,
+            0x00,
+            0x01,
+            0x01,
+            0x12,
+            0x00,
+            0x03,
+            0x00,
+            0x00,
+            0x00,
+            0x01,
+            0x00,
+            exif_orientation,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+        ];
+
+        // Splice the APP1 segment in immediately after the 2-byte SOI (FFD8).
+        let mut out = Vec::with_capacity(jpeg.len() + app1.len());
+        out.extend_from_slice(&jpeg[..2]);
+        out.extend_from_slice(&app1);
+        out.extend_from_slice(&jpeg[2..]);
+        out
+    }
+
+    struct TempFile(std::path::PathBuf);
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn decode_image_applies_exif_orientation() {
+        // 4x2 landscape tagged Orientation=6 (Rotate90 CW) -> upright should be 2x4.
+        let bytes = jpeg_with_orientation(4, 2, 6);
+        let path = std::env::temp_dir().join(format!("imgfind_orient6_{}.jpg", std::process::id()));
+        std::fs::write(&path, &bytes).expect("write temp jpeg");
+        let _cleanup = TempFile(path.clone());
+
+        let decoded = decode_image(&path).expect("decode_image");
+        assert_eq!(
+            (decoded.width(), decoded.height()),
+            (2, 4),
+            "Orientation=6 must rotate the 4x2 image to 2x4"
+        );
+    }
+
+    #[test]
+    fn decode_image_without_orientation_tag_is_unchanged() {
+        // Same image, no EXIF tag at all -> stays 4x2.
+        use image::{ImageBuffer, ImageFormat, Rgb};
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+            ImageBuffer::from_fn(4, 2, |x, _| Rgb([(x * 40) as u8, 100, 150]));
+        let path =
+            std::env::temp_dir().join(format!("imgfind_noorient_{}.jpg", std::process::id()));
+        image::DynamicImage::ImageRgb8(img)
+            .save_with_format(&path, ImageFormat::Jpeg)
+            .expect("save jpeg");
+        let _cleanup = TempFile(path.clone());
+
+        let decoded = decode_image(&path).expect("decode_image");
+        assert_eq!((decoded.width(), decoded.height()), (4, 2));
     }
 
     #[test]
