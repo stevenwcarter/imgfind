@@ -199,7 +199,28 @@ cargo test --workspace              # all tests
 
 ## License
 
-MIT License - see LICENSE file for details
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+  <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.
+
+### Third-party dependency licenses
+
+imgfind statically links **[rawler](https://github.com/dnglab/dnglab)** (camera
+RAW decoding), which is licensed under **LGPL-2.1**. This is fully compatible
+with imgfind's MIT/Apache-2.0 license for normal use. Note for redistributors:
+because rawler is statically linked, LGPL-2.1 §6 requires that recipients of a
+**distributed binary** be able to relink it against a modified rawler. imgfind's
+own source being openly available here satisfies that obligation; if you ship a
+binary, retain this notice and point recipients to the rawler source. Other
+dependencies are under permissive licenses (MIT/Apache-2.0/BSD).
 
 ## Acknowledgments
 
