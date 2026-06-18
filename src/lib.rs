@@ -7,6 +7,7 @@ use std::{
 
 pub mod config;
 pub mod database;
+pub mod decode;
 pub mod filters;
 pub mod indexing;
 pub mod logging;
