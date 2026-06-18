@@ -29,13 +29,14 @@ just cover                          # coverage via cargo llvm-cov -> lcov.info
 
 Run the native GUI:
 ```bash
-cargo run -p imgfind-gui -- [--dir DIR]
-# --dir resolves the DB via the same walk-up/global logic as the CLI
+imgfind gui [-d DIR]                     # installed: launcher subcommand, forwards args to imgfind-gui
+cargo run -p imgfind-gui -- [--dir DIR]  # or run the GUI crate directly
+# -d/--dir resolves the DB via the same walk-up/global logic as the CLI
 ```
 
 ## CLI commands
 
-`index` (default recursive), `search`, `metadata`, `tui`, `thumbnails`, `clean`, `status`, `config {show|add-ignore|remove-ignore|reset}`. See `USAGE.md` and `src/main.rs` for flags. Notable: `index --root` forces a DB in the cwd; `search --short` prints bare paths for piping; `search --display`/`tui` render images inline in supporting terminals.
+`index` (default recursive), `search`, `metadata`, `tui`, `gui`, `thumbnails`, `clean`, `status`, `config {show|add-ignore|remove-ignore|reset}`. See `USAGE.md` and `src/main.rs` for flags. Notable: `index --root` forces a DB in the cwd; `search --short` prints bare paths for piping; `search --display`/`tui` render images inline in supporting terminals; `gui [ARGS]` is a passthrough launcher (`Commands::Gui`, `trailing_var_arg`) that spawns `imgfind-gui` with `ARGS` (block model, exit-code propagated; binary resolved sibling-of-`current_exe` then PATH).
 
 ## Architecture
 
