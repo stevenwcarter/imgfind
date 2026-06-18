@@ -56,14 +56,61 @@ pub fn decode_image(path: &Path) -> Result<image::DynamicImage> {
     }
 }
 
-/// Decode a RAW file via rawler (preview → demosaic fallback). Filled in Task 2.
+/// Decode a RAW file via rawler: try the largest embedded preview (camera-rendered
+/// JPEG) first for speed, then fall back to full demosaic of the sensor data.
 fn decode_raw(path: &Path) -> Result<image::DynamicImage> {
-    anyhow::bail!("RAW decoding not yet implemented for {}", path.display())
+    use rawler::decoders::RawDecodeParams;
+    use rawler::imgop::develop::RawDevelop;
+    use rawler::rawsource::RawSource;
+
+    let source =
+        RawSource::new(path).with_context(|| format!("opening RAW file {}", path.display()))?;
+    let decoder = rawler::get_decoder(&source)
+        .with_context(|| format!("no RAW decoder for {}", path.display()))?;
+    let params = RawDecodeParams::default();
+
+    // Preview-first: camera-rendered JPEG (fast common path).
+    if let Some(img) = decoder
+        .full_image(&source, &params)
+        .with_context(|| format!("reading embedded full image for {}", path.display()))?
+    {
+        return Ok(img);
+    }
+    if let Some(img) = decoder
+        .preview_image(&source, &params)
+        .with_context(|| format!("reading embedded preview for {}", path.display()))?
+    {
+        return Ok(img);
+    }
+
+    // Fallback: demosaic the sensor data to sRGB.
+    let raw = decoder
+        .raw_image(&source, &params, false)
+        .with_context(|| format!("decoding RAW sensor data for {}", path.display()))?;
+    let intermediate = RawDevelop::default()
+        .develop_intermediate(&raw)
+        .with_context(|| format!("developing RAW image {}", path.display()))?;
+    intermediate
+        .to_dynamic_image()
+        .with_context(|| format!("converting developed RAW to image for {}", path.display()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const RAW_FIXTURE: &str = "tests/fixtures/sample.dng";
+
+    #[test]
+    fn decodes_real_raw_to_nonempty_image() {
+        let p = std::path::Path::new(RAW_FIXTURE);
+        if !p.exists() {
+            eprintln!("skipping: RAW fixture {RAW_FIXTURE} not present");
+            return;
+        }
+        let img = decode_image(p).expect("RAW decode should succeed");
+        assert!(img.width() > 0 && img.height() > 0);
+    }
 
     #[test]
     fn recognizes_still_extensions_case_insensitively() {
