@@ -796,7 +796,27 @@ fn search_images(
 }
 
 fn print_image(path: &str) -> Result<()> {
-    let bytes = std::fs::read(path).context("Failed to read image file for display")?;
+    let is_raw = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(imgfind::decode::is_raw_extension)
+        .unwrap_or(false);
+
+    let bytes = if is_raw {
+        // Terminals can't render RAW; decode via the seam and re-encode to JPEG.
+        let img = imgfind::decode::decode_image(std::path::Path::new(path))
+            .context("Failed to decode RAW image for display")?;
+        let mut buf = Vec::new();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut buf),
+            image::ImageFormat::Jpeg,
+        )
+        .context("Failed to encode RAW preview as JPEG for display")?;
+        buf
+    } else {
+        std::fs::read(path).context("Failed to read image file for display")?
+    };
+
     let image = iterm2img::from_bytes(bytes)
         .width_auto()
         .height_percent(33)
