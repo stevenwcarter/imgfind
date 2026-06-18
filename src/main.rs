@@ -9,7 +9,6 @@ use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, info, warn};
 use oshash::oshash;
 use rayon::prelude::*;
-use std::collections::HashSet;
 use std::path::PathBuf;
 use walkdir::WalkDir;
 
@@ -368,11 +367,6 @@ fn index_directory(
     spinner.finish_and_clear();
     info!("CLIP model loaded successfully");
 
-    let image_extensions: HashSet<&str> = ["jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp"]
-        .iter()
-        .cloned()
-        .collect();
-
     // First pass: collect all image files
     if !quiet {
         println!("Scanning for image files...");
@@ -411,13 +405,11 @@ fn index_directory(
             continue;
         }
 
-        // Check if it's an image file
-        if let Some(extension) = path.extension() {
-            if let Some(ext_str) = extension.to_str() {
-                if image_extensions.contains(ext_str.to_lowercase().as_str()) {
-                    image_files.push(path.to_path_buf());
-                }
-            }
+        // Check if it's a supported image (still or RAW) by extension.
+        if let Some(ext_str) = path.extension().and_then(|e| e.to_str())
+            && imgfind::decode::is_supported_extension(ext_str)
+        {
+            image_files.push(path.to_path_buf());
         }
     }
 
@@ -512,7 +504,7 @@ fn index_directory(
                 ));
             }
 
-            let img = match image::open(abs_path) {
+            let img = match imgfind::decode::decode_image(abs_path) {
                 Ok(img) => img,
                 Err(e) => {
                     warn!("Failed to decode image {}: {}", path_str, e);

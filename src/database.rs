@@ -1345,7 +1345,6 @@ pub struct ImageWithMetadata {
 /// Extract metadata from image file
 pub fn extract_image_metadata(file_path: &str) -> Result<ImageMetadata> {
     use exif::{In, Reader, Tag};
-    use image::ImageReader as ImgReader;
     use std::fs;
     use std::io::BufReader;
 
@@ -1365,10 +1364,8 @@ pub fn extract_image_metadata(file_path: &str) -> Result<ImageMetadata> {
         metadata.file_size = Some(file_metadata.len());
     }
 
-    // Get image dimensions
-    if let Ok(img_reader) = ImgReader::open(file_path)
-        && let Ok(img) = img_reader.decode()
-    {
+    // Get image dimensions (RAW-aware via the decode seam; best-effort).
+    if let Ok(img) = crate::decode::decode_image(std::path::Path::new(file_path)) {
         let (width, height) = img.dimensions();
         metadata.width = Some(width);
         metadata.height = Some(height);
@@ -2143,5 +2140,24 @@ mod tests {
             .unwrap();
         assert_eq!(both.len(), 2);
         let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn extracts_metadata_from_raw_fixture() {
+        let fixture = "tests/fixtures/sample.dng";
+        if !std::path::Path::new(fixture).exists() {
+            eprintln!("skipping: RAW fixture {fixture} not present");
+            return;
+        }
+        let md = extract_image_metadata(fixture).expect("metadata extraction");
+        assert!(
+            md.width.is_some() && md.height.is_some(),
+            "dimensions populated"
+        );
+        // At least one EXIF identity field should be present in a real RAW.
+        assert!(
+            md.camera_make.is_some() || md.camera_model.is_some() || md.datetime_taken.is_some(),
+            "some EXIF field populated"
+        );
     }
 }
