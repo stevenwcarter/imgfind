@@ -51,8 +51,9 @@ The project ships as a **2-crate workspace**: a core `imgfind` binary (CLI + rat
 3. **Open the native GUI:**
 
    ```bash
-   imgfind-gui
-   # or: cargo run -p imgfind-gui -- --dir ~/Pictures
+   imgfind gui                  # launcher subcommand (forwards args to imgfind-gui)
+   imgfind gui -d ~/Pictures    # -d / --dir targets a directory's database
+   imgfind-gui                  # or run the GUI binary directly
    ```
 
 4. **Check status:**
@@ -68,6 +69,7 @@ The project ships as a **2-crate workspace**: a core `imgfind` binary (CLI + rat
 | `index` | Index images in a directory | `--dir <path>`, `--recursive`, `--root`, `--quiet`, `--batch-size <N>`, `--no-thumbnails`, `--model <name>` |
 | `search` | Search using natural language | `--limit <N>`, `--threshold <f>`, `--short`, `--recursive`, `--display`, `--all`, `--model <name>` |
 | `tui` | Browse results in an interactive terminal UI | `--dir <path>` |
+| `gui` | Launch the native desktop GUI (forwards remaining args to `imgfind-gui`) | passthrough, e.g. `-d`/`--dir <path>` |
 | `thumbnails` | Generate thumbnails in batches | `--size <px>`, `--count <N>` |
 | `metadata` | Backfill EXIF metadata for indexed images | `--dir <path>`, `--quiet`, `--count <N>` |
 | `clean` | Remove entries for missing files | - |
@@ -76,7 +78,7 @@ The project ships as a **2-crate workspace**: a core `imgfind` binary (CLI + rat
 | `models` | Manage embedding models | `list`, `use <name>` |
 | `completions` | Generate a shell completion script | `<bash\|zsh\|fish>` |
 
-The `imgfind-gui` binary takes an optional `--dir DIR` flag to target a specific directory's database.
+The `imgfind-gui` binary takes an optional `-d`/`--dir DIR` flag to target a specific directory's database. You can also launch it via `imgfind gui [ARGS]`, which forwards `ARGS` (e.g. `-d ~/Pictures`) to `imgfind-gui` and blocks until it exits.
 
 ### Index options
 

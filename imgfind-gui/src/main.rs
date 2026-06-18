@@ -34,7 +34,7 @@ enum SearchMode {
 #[command(name = "imgfind-gui", about = "CLIP image search — native GUI")]
 struct Args {
     /// Directory to search for an imgfind database (walks up from here).
-    #[arg(long)]
+    #[arg(short, long)]
     dir: Option<String>,
 }
 
@@ -1042,6 +1042,28 @@ fn load_lightbox_image(weak: Weak<MainWindow>, backend: Backend, rel_path: Strin
         })
         .ok();
     });
+}
+
+#[cfg(test)]
+mod arg_tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn dir_accepts_both_short_and_long() {
+        assert_eq!(
+            Args::try_parse_from(["imgfind-gui", "-d", "/x"])
+                .unwrap()
+                .dir,
+            Some("/x".to_string())
+        );
+        assert_eq!(
+            Args::try_parse_from(["imgfind-gui", "--dir", "/x"])
+                .unwrap()
+                .dir,
+            Some("/x".to_string())
+        );
+    }
 }
 
 #[cfg(test)]

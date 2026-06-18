@@ -85,8 +85,10 @@ Each thumbnail shows a similarity score label, and the zoom view shows a control
 
 Launch the Slint desktop GUI:
 ```bash
-imgfind-gui                   # uses the database found by walking up from cwd
-imgfind-gui --dir ~/Pictures  # target a specific directory's database
+imgfind gui                   # launcher subcommand: forwards args to imgfind-gui, blocks until it exits
+imgfind gui -d ~/Pictures     # -d / --dir targets a specific directory's database
+imgfind-gui                   # or run the GUI binary directly (uses the DB found by walking up from cwd)
+imgfind-gui --dir ~/Pictures  # --dir / -d target a specific directory's database
 ```
 
 The GUI shows a search box; press Enter to run a query. Results appear as a scrollable thumbnail grid. Click a thumbnail to open a lightbox (prev/next navigation, Esc to close); right-click a thumbnail to open the original file in the OS viewer. Use "Load more" to page through additional results. Note: the map view is not yet ported to the GUI.
