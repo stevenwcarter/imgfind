@@ -67,6 +67,36 @@ pub fn order_by_clause(sort: &Sort) -> String {
     }
 }
 
+use std::cmp::Ordering;
+
+fn ord_dir(o: Ordering, asc: bool) -> Ordering {
+    if asc { o } else { o.reverse() }
+}
+
+/// In-place stable sort of result rows matching `order_by_clause`.
+///
+/// Ordering rules mirror the SQL:
+/// - `Name`: sort by path with direction.
+/// - `Size`: NULLs (`None`) always last regardless of direction, then value
+///   by direction, then path ASC as tiebreak.
+/// - `Type`: ext by direction, then path ASC as tiebreak.
+pub fn sort_rows(rows: &mut [RowMeta], sort: &Sort) {
+    let asc = matches!(sort.dir, SortDir::Asc);
+    rows.sort_by(|a, b| match sort.key {
+        SortKey::Name => ord_dir(a.path.cmp(&b.path), asc),
+        SortKey::Size => {
+            let primary = match (a.size, b.size) {
+                (None, None) => Ordering::Equal,
+                (None, Some(_)) => Ordering::Greater, // NULL last regardless of dir
+                (Some(_), None) => Ordering::Less,
+                (Some(x), Some(y)) => ord_dir(x.cmp(&y), asc),
+            };
+            primary.then_with(|| a.path.cmp(&b.path))
+        }
+        SortKey::Type => ord_dir(a.ext.cmp(&b.ext), asc).then_with(|| a.path.cmp(&b.path)),
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,5 +140,104 @@ mod tests {
     fn serde_reprs_are_lowercase() {
         assert_eq!(serde_json::to_string(&SortKey::Type).unwrap(), "\"type\"");
         assert_eq!(serde_json::to_string(&SortDir::Asc).unwrap(), "\"asc\"");
+    }
+
+    #[test]
+    fn sort_rows_by_size_nulls_last_path_tiebreak() {
+        let mut rows = vec![
+            RowMeta {
+                id: 1,
+                path: "b.jpg".into(),
+                size: Some(10),
+                ext: "jpg".into(),
+            },
+            RowMeta {
+                id: 2,
+                path: "a.jpg".into(),
+                size: None,
+                ext: "jpg".into(),
+            },
+            RowMeta {
+                id: 3,
+                path: "c.jpg".into(),
+                size: Some(10),
+                ext: "jpg".into(),
+            },
+            RowMeta {
+                id: 4,
+                path: "d.jpg".into(),
+                size: Some(5),
+                ext: "jpg".into(),
+            },
+        ];
+        sort_rows(
+            &mut rows,
+            &Sort {
+                key: SortKey::Size,
+                dir: SortDir::Asc,
+            },
+        );
+        assert_eq!(
+            rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![4, 1, 3, 2]
+        );
+    }
+
+    #[test]
+    fn sort_rows_by_type_then_name() {
+        let mut rows = vec![
+            RowMeta {
+                id: 1,
+                path: "z.png".into(),
+                size: None,
+                ext: "png".into(),
+            },
+            RowMeta {
+                id: 2,
+                path: "a.png".into(),
+                size: None,
+                ext: "png".into(),
+            },
+            RowMeta {
+                id: 3,
+                path: "m.jpg".into(),
+                size: None,
+                ext: "jpg".into(),
+            },
+        ];
+        sort_rows(
+            &mut rows,
+            &Sort {
+                key: SortKey::Type,
+                dir: SortDir::Asc,
+            },
+        );
+        assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), vec![3, 2, 1]);
+    }
+
+    #[test]
+    fn sort_rows_by_name_desc() {
+        let mut rows = vec![
+            RowMeta {
+                id: 1,
+                path: "a.jpg".into(),
+                size: None,
+                ext: "jpg".into(),
+            },
+            RowMeta {
+                id: 2,
+                path: "b.jpg".into(),
+                size: None,
+                ext: "jpg".into(),
+            },
+        ];
+        sort_rows(
+            &mut rows,
+            &Sort {
+                key: SortKey::Name,
+                dir: SortDir::Desc,
+            },
+        );
+        assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), vec![2, 1]);
     }
 }
