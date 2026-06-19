@@ -5,6 +5,7 @@ export struct Tile {
     path: string,
     image: image,
     size-kb: int,
+    index: int,
 }
 
 export component MainWindow inherits Window {
@@ -15,8 +16,8 @@ export component MainWindow inherits Window {
 
     // Properties set from Rust.
     in property <[Tile]> tiles;
+    in property <int> total-items;
     in property <string> status;
-    in property <bool> show-load-more;
     in property <bool> can-search: false;
 
     // Lightbox state set from Rust.
@@ -40,7 +41,6 @@ export component MainWindow inherits Window {
     in property <int> gps-mode: 0;
 
     callback search(string);
-    callback load-more();
     callback tile-selected(int);
     callback tile-activated(int);
     callback tile-open-external(int);
@@ -69,10 +69,14 @@ export component MainWindow inherits Window {
     private property <length> tile-stride: tile-size + tile-gap;
     // Number of columns that fit in the grid area (not root width — the panel
     // narrows the available space when open, so we bind to grid-area.width).
-    private property <int> cols: max(1, floor((grid-area.width - 16px) / tile-stride));
-    // Total grid height: enough rows * stride.
-    private property <int> row-count: ceil(tiles.length / cols);
+    // Exposed as `out` so Rust can read it for the T14 windowed loader.
+    out property <int> cols: max(1, floor((grid-area.width - 16px) / tile-stride));
+    // Total grid height: driven by total-items (full result set), not tiles.length
+    // (the capped render window), so the scrollbar spans the complete library.
+    private property <int> row-count: ceil(root.total-items / cols);
     private property <length> grid-height: row-count * tile-stride;
+    // Scroll offset exposed for T14's viewport-driven window loader.
+    out property <length> grid-viewport-y: grid-scroll.viewport-y;
 
     // ALL keyboard shortcuts live in ONE place: the single `app-keys` FocusScope
     // below, which wraps the whole window and uses `capture-key-pressed`. Slint
@@ -313,18 +317,21 @@ export component MainWindow inherits Window {
                     grid-scroll := ScrollView {
                         width: 100%;
                         height: 100%;
-                        viewport-height: root.grid-height + (root.show-load-more ? 60px : 0px);
+                        viewport-height: root.grid-height;
                         viewport-width: root.cols * root.tile-stride;
 
-                        for tile[i] in root.tiles: Rectangle {
-                            x: mod(i, root.cols) * root.tile-stride;
-                            y: floor(i / root.cols) * root.tile-stride;
+                        for tile in root.tiles: Rectangle {
+                            // Position by global index so the tile lands in the
+                            // correct row/col even when the window doesn't start
+                            // at 0 (T14 will deliver a non-zero-offset slice).
+                            x: mod(tile.index, root.cols) * root.tile-stride;
+                            y: floor(tile.index / root.cols) * root.tile-stride;
                             width: root.tile-size;
                             height: root.tile-size;
                             border-radius: 6px;
                             clip: true;
                             background: #2d3446;
-                            border-width: i == root.selected-index ? 3px : 0px;
+                            border-width: tile.index == root.selected-index ? 3px : 0px;
                             border-color: #5b8cff;
 
                             Image {
@@ -340,21 +347,14 @@ export component MainWindow inherits Window {
                                 // Return keyboard focus to app-keys when the user
                                 // clicks into the grid (e.g. after typing a query),
                                 // so vim/arrow navigation works immediately.
-                                clicked => { root.tile-selected(i); app-keys.focus(); }
-                                double-clicked => { root.tile-activated(i); }
+                                clicked => { root.tile-selected(tile.index); app-keys.focus(); }
+                                double-clicked => { root.tile-activated(tile.index); }
                                 pointer-event(e) => {
                                     if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
-                                        root.tile-open-external(i);
+                                        root.tile-open-external(tile.index);
                                     }
                                 }
                             }
-                        }
-
-                        if root.show-load-more: Button {
-                            x: 0px;
-                            y: root.grid-height + 8px;
-                            text: "Load more";
-                            clicked => { root.load-more(); app-keys.focus(); }
                         }
                     }
                 }

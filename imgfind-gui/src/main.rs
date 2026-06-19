@@ -26,8 +26,8 @@ use state::{SearchState, ViewState};
 
 /// Whether the current tile grid was populated by a text search or a
 /// vector-similarity search.  Stored in an `Arc<Mutex<_>>` so both the
-/// `on_search` / `on_search_similar` closures (which set it) and
-/// `on_load_more` (which reads it) share the same value across threads.
+/// `on_search` / `on_search_similar` closures (which set it) and the
+/// `fire_debounced_query` path (which reads it) share the same value across threads.
 #[derive(Clone)]
 enum SearchMode {
     Text(String),
@@ -168,6 +168,7 @@ fn main() -> Result<()> {
     window.set_can_search(false);
     window.set_status("Loading model...".into());
     window.set_tiles(ModelRc::default());
+    window.set_total_items(0);
     window.set_lightbox_open(false);
     window.set_detail_open(false);
     // Filter-bar initial state.
@@ -196,7 +197,7 @@ fn main() -> Result<()> {
     let detail: Arc<Mutex<Option<DetailState>>> = Arc::new(Mutex::new(None));
 
     // Tracks whether the tile grid was populated by a text or similarity search,
-    // so `on_load_more` knows which backend method to call.
+    // so the filter-bar debounce (`fire_debounced_query`) knows which backend method to call.
     let search_mode: Arc<Mutex<SearchMode>> = Arc::new(Mutex::new(SearchMode::Text(String::new())));
 
     // Live filter state, shared with every query closure.
@@ -256,6 +257,7 @@ fn main() -> Result<()> {
                     if let Some(w) = weak.upgrade() {
                         w.set_status("Enter a search query to find images.".into());
                         w.set_tiles(ModelRc::default());
+                        w.set_total_items(0);
                         w.set_detail_open(false);
                         w.set_lightbox_open(false);
                         w.set_selected_index(-1);
@@ -871,6 +873,7 @@ fn fire_debounced_query(
             if let Some(w) = weak.upgrade() {
                 w.set_status("Enter a search query to find images.".into());
                 w.set_tiles(ModelRc::default());
+                w.set_total_items(0);
                 w.set_selected_index(-1);
             }
         }
@@ -915,11 +918,21 @@ fn fire_debounced_query(
 }
 
 /// Decode raw JPEG bytes (already on the UI thread) into Slint `Image` tiles.
-fn build_tiles_model(results: &[RowMeta], raw_thumbs: Vec<Option<Vec<u8>>>) -> ModelRc<Tile> {
+///
+/// `offset` is the global index of `results[0]` in the full result list.
+/// For the current INTERIM cap (T12/T13) the window always starts at 0, so
+/// callers pass 0; T14 will pass the real window start when it delivers a
+/// non-zero-offset slice.
+fn build_tiles_model(
+    results: &[RowMeta],
+    raw_thumbs: Vec<Option<Vec<u8>>>,
+    offset: usize,
+) -> ModelRc<Tile> {
     let tiles: Vec<Tile> = results
         .iter()
         .zip(raw_thumbs)
-        .map(|(r, maybe_bytes)| {
+        .enumerate()
+        .map(|(i, (r, maybe_bytes))| {
             let img = maybe_bytes
                 .and_then(|bytes| image_util::jpeg_to_slint_image(&bytes).ok())
                 .unwrap_or_default();
@@ -928,6 +941,9 @@ fn build_tiles_model(results: &[RowMeta], raw_thumbs: Vec<Option<Vec<u8>>>) -> M
                 path: r.path.clone().into(),
                 image: img,
                 size_kb: size_kb as i32,
+                // Global index: window offset + position within this slice.
+                // T14 will supply a non-zero offset when the window doesn't start at 0.
+                index: (offset + i) as i32,
             }
         })
         .collect();
@@ -985,11 +1001,15 @@ fn apply_fetch_result(
 
         // Only the (non-Send) JPEG→slint::Image decode runs here on the UI
         // thread; the tiles cover at most the WINDOW_MIN prefix (see
-        // `fetch_capped_thumbs`).
+        // `fetch_capped_thumbs`).  `total-items` is always the full result
+        // count so the scrollbar spans the complete library.
         if matches!(vs, ViewState::Results | ViewState::Empty) {
-            let capped = &results[..results.len().min(window::WINDOW_MIN)];
-            let model = build_tiles_model(capped, raw_thumbs);
+            let total = results.len();
+            let capped = &results[..total.min(window::WINDOW_MIN)];
+            // Window starts at global index 0 (INTERIM — T14 will generalise).
+            let model = build_tiles_model(capped, raw_thumbs, 0);
             w.set_tiles(model);
+            w.set_total_items(total as i32);
         }
 
         apply_selection_after_results(&w, &sel.selected, results.len(), sel.reset);
