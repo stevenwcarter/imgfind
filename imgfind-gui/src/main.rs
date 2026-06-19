@@ -3,6 +3,7 @@ slint::include_modules!();
 mod backend;
 mod detail;
 mod image_util;
+mod nav;
 mod state;
 
 use std::collections::HashSet;
@@ -28,6 +29,24 @@ use state::{SearchResult, SearchState, ViewState};
 enum SearchMode {
     Text(String),
     Similar(String),
+}
+
+/// Selection-update policy forwarded to the three `spawn_*` helpers.
+///
+/// Bundling into a struct keeps the helpers under clippy's `too_many_arguments`
+/// limit while keeping the policy explicit at every call site.
+struct SelectionPolicy {
+    /// Shared selection state to update when results land.
+    selected: Arc<Mutex<Option<usize>>>,
+    /// If `true`, clear the selection to `None` (new text/browse search that
+    /// replaces the entire grid).  If `false`, re-clamp the stored index to
+    /// the new grid length — leaves it in place when it's still valid, clears
+    /// it when it falls off the end (load-more, similarity searches).
+    reset: bool,
+    /// If `true`, toggle `grid-focus-pulse` so the grid `FocusScope` re-grabs
+    /// keyboard focus.  `false` for load-more to avoid yanking focus while the
+    /// user may be scrolling.
+    pulse: bool,
 }
 
 #[derive(Parser)]
@@ -162,6 +181,10 @@ fn main() -> Result<()> {
     // Current lightbox index. None when the lightbox is closed.
     let lb_index: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
 
+    // Index into `state.results` of the keyboard/mouse-selected tile (mirrors the
+    // Slint `selected-index` property). Shares the index space with `lb_index`.
+    let selected: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
+
     // Monotonic counter bumped on every lightbox load request. A background decode
     // only applies its result if its captured generation is still the latest, so a
     // slow decode can't land after the user has already navigated to another image.
@@ -214,6 +237,7 @@ fn main() -> Result<()> {
         let detail_ref = Arc::clone(&detail);
         let mode_ref = Arc::clone(&search_mode);
         let filters_ref = Arc::clone(&filters);
+        let selected_ref = Arc::clone(&selected);
         let backend_search = backend.clone();
         window.on_search(move |query| {
             let query = query.trim().to_string();
@@ -225,6 +249,7 @@ fn main() -> Result<()> {
                     *state_ref.lock().unwrap() = SearchState::new();
                     *detail_ref.lock().unwrap() = None;
                     *lb_ref.lock().unwrap() = None;
+                    *selected_ref.lock().unwrap() = None;
                     *mode_ref.lock().unwrap() = SearchMode::Text(String::new());
                     if let Some(w) = weak.upgrade() {
                         w.set_status("Enter a search query to find images.".into());
@@ -232,6 +257,7 @@ fn main() -> Result<()> {
                         w.set_tiles(ModelRc::default());
                         w.set_detail_open(false);
                         w.set_lightbox_open(false);
+                        w.set_selected_index(-1);
                     }
                 } else {
                     // Empty query but filters active — browse with filters.
@@ -252,6 +278,11 @@ fn main() -> Result<()> {
                         backend_search.clone(),
                         current_filters,
                         0,
+                        SelectionPolicy {
+                            selected: Arc::clone(&selected_ref),
+                            reset: true,
+                            pulse: true,
+                        },
                     );
                 }
                 return;
@@ -281,6 +312,11 @@ fn main() -> Result<()> {
                 query,
                 0,
                 current_filters,
+                SelectionPolicy {
+                    selected: Arc::clone(&selected_ref),
+                    reset: true,
+                    pulse: true,
+                },
             );
         });
     }
@@ -291,6 +327,7 @@ fn main() -> Result<()> {
         let state_ref = Arc::clone(&state);
         let mode_ref = Arc::clone(&search_mode);
         let filters_ref = Arc::clone(&filters);
+        let selected_ref = Arc::clone(&selected);
         let backend_more = backend.clone();
         window.on_load_more(move || {
             let offset = state_ref.lock().unwrap().next_offset();
@@ -312,6 +349,11 @@ fn main() -> Result<()> {
                         query,
                         offset,
                         current_filters,
+                        SelectionPolicy {
+                            selected: Arc::clone(&selected_ref),
+                            reset: false,
+                            pulse: false,
+                        },
                     );
                 }
                 SearchMode::Similar(seed) if !seed.is_empty() => {
@@ -322,6 +364,11 @@ fn main() -> Result<()> {
                         seed,
                         offset,
                         current_filters,
+                        SelectionPolicy {
+                            selected: Arc::clone(&selected_ref),
+                            reset: false,
+                            pulse: false,
+                        },
                     );
                 }
                 // Text("") means we're in browse mode.
@@ -332,6 +379,11 @@ fn main() -> Result<()> {
                         backend_more.clone(),
                         current_filters,
                         offset,
+                        SelectionPolicy {
+                            selected: Arc::clone(&selected_ref),
+                            reset: false,
+                            pulse: false,
+                        },
                     );
                 }
                 _ => {
@@ -350,9 +402,15 @@ fn main() -> Result<()> {
         let weak = window.as_weak();
         let state_ref = Arc::clone(&state);
         let detail_ref = Arc::clone(&detail);
+        let selected_ref = Arc::clone(&selected);
         let backend_detail = backend.clone();
         window.on_tile_selected(move |index| {
             let idx = index as usize;
+            // Keep the shared selection in sync so keyboard and mouse share one highlight.
+            *selected_ref.lock().unwrap() = Some(idx);
+            if let Some(w) = weak.upgrade() {
+                w.set_selected_index(index);
+            }
             let path = {
                 let s = state_ref.lock().unwrap();
                 s.results.get(idx).map(|r| r.path.clone())
@@ -405,6 +463,7 @@ fn main() -> Result<()> {
         let weak = window.as_weak();
         let state_ref = Arc::clone(&state);
         let lb_ref = Arc::clone(&lb_index);
+        let selected_ref = Arc::clone(&selected);
         let backend_lb = backend.clone();
         let gen_ref = Arc::clone(&lb_generation);
         window.on_tile_activated(move |index| {
@@ -417,6 +476,11 @@ fn main() -> Result<()> {
                 .map(|r| r.path.clone());
             let Some(rel) = path else { return };
             *lb_ref.lock().unwrap() = Some(idx);
+            // Seed the grid selection so closing the lightbox (Esc) lands on this tile.
+            *selected_ref.lock().unwrap() = Some(idx);
+            if let Some(w) = weak.upgrade() {
+                w.set_selected_index(index);
+            }
             load_lightbox_image(weak.clone(), backend_lb.clone(), rel, gen_ref.clone());
         });
     }
@@ -495,6 +559,7 @@ fn main() -> Result<()> {
         let detail_ref = Arc::clone(&detail);
         let mode_ref = Arc::clone(&search_mode);
         let filters_ref = Arc::clone(&filters);
+        let selected_ref = Arc::clone(&selected);
         let backend_sim = backend.clone();
         window.on_search_similar(move || {
             let seed_path = {
@@ -528,6 +593,11 @@ fn main() -> Result<()> {
                 seed_path,
                 0,
                 current_filters,
+                SelectionPolicy {
+                    selected: Arc::clone(&selected_ref),
+                    reset: false,
+                    pulse: true,
+                },
             );
         });
     }
@@ -549,6 +619,7 @@ fn main() -> Result<()> {
         let weak = window.as_weak();
         let state_ref = Arc::clone(&state);
         let lb_ref = Arc::clone(&lb_index);
+        let selected_ref = Arc::clone(&selected);
         let backend_lb = backend.clone();
         let gen_ref = Arc::clone(&lb_generation);
         window.on_lightbox_prev(move || {
@@ -559,6 +630,11 @@ fn main() -> Result<()> {
                 *guard = Some(next);
                 next
             };
+            // Mirror into the grid selection so closing the lightbox lands on this tile.
+            *selected_ref.lock().unwrap() = Some(new_idx);
+            if let Some(w) = weak.upgrade() {
+                w.set_selected_index(new_idx as i32);
+            }
             let path = state_ref
                 .lock()
                 .unwrap()
@@ -576,6 +652,7 @@ fn main() -> Result<()> {
         let weak = window.as_weak();
         let state_ref = Arc::clone(&state);
         let lb_ref = Arc::clone(&lb_index);
+        let selected_ref = Arc::clone(&selected);
         let backend_lb = backend.clone();
         let gen_ref = Arc::clone(&lb_generation);
         window.on_lightbox_next(move || {
@@ -591,6 +668,11 @@ fn main() -> Result<()> {
             if len == 0 {
                 return;
             }
+            // Mirror into the grid selection so closing the lightbox lands on this tile.
+            *selected_ref.lock().unwrap() = Some(new_idx);
+            if let Some(w) = weak.upgrade() {
+                w.set_selected_index(new_idx as i32);
+            }
             let path = state_ref
                 .lock()
                 .unwrap()
@@ -599,6 +681,53 @@ fn main() -> Result<()> {
                 .map(|r| r.path.clone());
             if let Some(rel) = path {
                 load_lightbox_image(weak.clone(), backend_lb.clone(), rel, gen_ref.clone());
+            }
+        });
+    }
+
+    // --- grid-nav callback: keyboard hjkl/arrow movement in the tile grid ---
+    {
+        let state_ref = Arc::clone(&state);
+        let selected_ref = Arc::clone(&selected);
+        let weak = window.as_weak();
+        window.on_grid_nav(move |dir_i, cols_i| {
+            let Some(dir) = nav::NavDir::from_i32(dir_i) else {
+                return;
+            };
+            let len = state_ref.lock().unwrap().results.len();
+            let cur = *selected_ref.lock().unwrap();
+            let new = nav::move_selection(cur, dir, cols_i.max(0) as usize, len);
+            *selected_ref.lock().unwrap() = new;
+            if let Some(w) = weak.upgrade() {
+                w.set_selected_index(new.map(|i| i as i32).unwrap_or(-1));
+                // Live-update the detail panel only if it is already open.
+                if let Some(i) = new
+                    && w.get_detail_open()
+                {
+                    w.invoke_tile_selected(i as i32);
+                }
+            }
+        });
+    }
+
+    // --- grid-open-detail callback: Enter key opens the detail panel for the selected tile ---
+    {
+        let selected_ref = Arc::clone(&selected);
+        let weak = window.as_weak();
+        window.on_grid_open_detail(move || {
+            if let (Some(i), Some(w)) = (*selected_ref.lock().unwrap(), weak.upgrade()) {
+                w.invoke_tile_selected(i as i32);
+            }
+        });
+    }
+
+    // --- grid-open-lightbox callback: Space key opens the lightbox for the selected tile ---
+    {
+        let selected_ref = Arc::clone(&selected);
+        let weak = window.as_weak();
+        window.on_grid_open_lightbox(move || {
+            if let (Some(i), Some(w)) = (*selected_ref.lock().unwrap(), weak.upgrade()) {
+                w.invoke_tile_activated(i as i32);
             }
         });
     }
@@ -625,6 +754,7 @@ fn main() -> Result<()> {
         let mode_ref = Arc::clone(&search_mode);
         let filters_ref = Arc::clone(&filters);
         let selected_exts_ref = Arc::clone(&selected_exts);
+        let selected_ref = Arc::clone(&selected);
         let backend_fc = backend.clone();
         let timer = Rc::clone(&debounce_timer);
         window.on_filters_changed(move || {
@@ -646,6 +776,7 @@ fn main() -> Result<()> {
                 Arc::clone(&mode_ref),
                 backend_fc.clone(),
                 new_filters,
+                Arc::clone(&selected_ref),
             );
         });
     }
@@ -657,6 +788,7 @@ fn main() -> Result<()> {
         let mode_ref = Arc::clone(&search_mode);
         let filters_ref = Arc::clone(&filters);
         let selected_exts_ref = Arc::clone(&selected_exts);
+        let selected_ref = Arc::clone(&selected);
         let all_exts_et = all_extensions.clone();
         let backend_et = backend.clone();
         let timer = Rc::clone(&debounce_timer);
@@ -670,8 +802,8 @@ fn main() -> Result<()> {
                     set.insert(ext);
                 }
             }
-            let selected = selected_exts_ref.lock().unwrap().clone();
-            let model = build_chips_model(&all_exts_et, &selected);
+            let active_exts = selected_exts_ref.lock().unwrap().clone();
+            let model = build_chips_model(&all_exts_et, &active_exts);
             let (lo, hi, gps_mode) = weak
                 .upgrade()
                 .map(|w| (w.get_size_lo(), w.get_size_hi(), w.get_gps_mode()))
@@ -679,7 +811,7 @@ fn main() -> Result<()> {
             if let Some(w) = weak.upgrade() {
                 w.set_type_chips(model);
             }
-            let new_filters = build_filters(lo, hi, size_bounds, &selected, gps_mode);
+            let new_filters = build_filters(lo, hi, size_bounds, &active_exts, gps_mode);
             *filters_ref.lock().unwrap() = new_filters.clone();
             start_debounce(
                 &timer,
@@ -688,6 +820,7 @@ fn main() -> Result<()> {
                 Arc::clone(&mode_ref),
                 backend_et.clone(),
                 new_filters,
+                Arc::clone(&selected_ref),
             );
         });
     }
@@ -699,6 +832,7 @@ fn main() -> Result<()> {
         let mode_ref = Arc::clone(&search_mode);
         let filters_ref = Arc::clone(&filters);
         let selected_exts_ref = Arc::clone(&selected_exts);
+        let selected_ref = Arc::clone(&selected);
         let backend_gps = backend.clone();
         let timer = Rc::clone(&debounce_timer);
         window.on_gps_mode_changed(move |mode| {
@@ -719,6 +853,7 @@ fn main() -> Result<()> {
                 Arc::clone(&mode_ref),
                 backend_gps.clone(),
                 new_filters,
+                Arc::clone(&selected_ref),
             );
         });
     }
@@ -745,6 +880,7 @@ fn start_debounce(
     mode_ref: Arc<Mutex<SearchMode>>,
     backend: Backend,
     filters: Filters,
+    selected_ref: Arc<Mutex<Option<usize>>>,
 ) {
     timer.start(
         TimerMode::SingleShot,
@@ -756,6 +892,7 @@ fn start_debounce(
                 Arc::clone(&mode_ref),
                 backend.clone(),
                 filters.clone(),
+                Arc::clone(&selected_ref),
             );
         },
     );
@@ -764,13 +901,16 @@ fn start_debounce(
 /// Called from all three debounce closures after rebuilding `Filters`.
 ///
 /// Reads `search_mode` and either runs a text search, similarity search, or
-/// browse, starting from offset 0.
+/// browse, starting from offset 0.  The filter change is treated as a fresh
+/// search (reset for text/browse, re-clamp for similar), with a focus pulse so
+/// the grid FocusScope re-grabs keyboard focus when results land.
 fn fire_debounced_query(
     weak: Weak<MainWindow>,
     state_ref: Arc<Mutex<SearchState>>,
     mode_ref: Arc<Mutex<SearchMode>>,
     backend: Backend,
     filters: Filters,
+    selected_ref: Arc<Mutex<Option<usize>>>,
 ) {
     let mode = mode_ref.lock().unwrap().clone();
     match mode {
@@ -781,15 +921,29 @@ fn fire_debounced_query(
                 w.set_show_load_more(false);
                 w.set_can_search(false);
             }
-            spawn_search(weak, state_ref, backend, query, 0, filters);
+            spawn_search(
+                weak,
+                state_ref,
+                backend,
+                query,
+                0,
+                filters,
+                SelectionPolicy {
+                    selected: selected_ref,
+                    reset: true,
+                    pulse: true,
+                },
+            );
         }
         // Text("") = browse mode (or idle — browse with filters anyway).
         // Text("") with default filters — restore idle state, nothing to browse.
         SearchMode::Text(_) if filters == Filters::default() => {
+            *selected_ref.lock().unwrap() = None;
             if let Some(w) = weak.upgrade() {
                 w.set_status("Enter a search query to find images.".into());
                 w.set_show_load_more(false);
                 w.set_tiles(ModelRc::default());
+                w.set_selected_index(-1);
             }
         }
         // Text("") with active filters — browse with filters.
@@ -800,7 +954,18 @@ fn fire_debounced_query(
                 w.set_show_load_more(false);
                 w.set_can_search(false);
             }
-            spawn_browse(weak, state_ref, backend, filters, 0);
+            spawn_browse(
+                weak,
+                state_ref,
+                backend,
+                filters,
+                0,
+                SelectionPolicy {
+                    selected: selected_ref,
+                    reset: true,
+                    pulse: true,
+                },
+            );
         }
         SearchMode::Similar(seed) => {
             state_ref.lock().unwrap().start_search(seed.clone());
@@ -810,7 +975,19 @@ fn fire_debounced_query(
                 w.set_show_load_more(false);
                 w.set_can_search(false);
             }
-            spawn_similar(weak, state_ref, backend, seed, 0, filters);
+            spawn_similar(
+                weak,
+                state_ref,
+                backend,
+                seed,
+                0,
+                filters,
+                SelectionPolicy {
+                    selected: selected_ref,
+                    reset: false,
+                    pulse: true,
+                },
+            );
         }
     }
 }
@@ -849,6 +1026,7 @@ fn status_text_for(vs: ViewState, error_msg: Option<&str>) -> slint::SharedStrin
 ///
 /// DB and disk I/O (thumbnail fetches) happen on the worker thread; only the
 /// non-`Send` `slint::Image` decode runs inside `invoke_from_event_loop`.
+/// `sel` controls how the keyboard selection is updated when results land.
 fn spawn_search(
     weak: Weak<MainWindow>,
     state_ref: Arc<Mutex<SearchState>>,
@@ -856,6 +1034,7 @@ fn spawn_search(
     query: String,
     offset: usize,
     filters: Filters,
+    sel: SelectionPolicy,
 ) {
     std::thread::spawn(move || {
         let res = backend.search(&query, offset, &filters);
@@ -892,6 +1071,8 @@ fn spawn_search(
                 w.set_tiles(model);
             }
 
+            apply_selection_after_results(&w, &sel.selected, results.len(), sel.reset, sel.pulse && !results.is_empty());
+
             w.set_status(status_text_for(vs, error_msg.as_deref()));
             w.set_show_load_more(has_more && vs == ViewState::Results);
             w.set_can_search(true);
@@ -905,6 +1086,9 @@ fn spawn_search(
 /// The detail panel stays open (callers keep `detail-open` true); this
 /// function only updates the tile grid.  Closures are `Send + 'static`
 /// for the same reasons as `spawn_search`.
+/// `sel` controls how the keyboard selection is updated when results land.
+/// For similarity searches the seed remains highlighted, so callers should
+/// set `sel.reset = false`.
 fn spawn_similar(
     weak: Weak<MainWindow>,
     state_ref: Arc<Mutex<SearchState>>,
@@ -912,6 +1096,7 @@ fn spawn_similar(
     seed_path: String,
     offset: usize,
     filters: Filters,
+    sel: SelectionPolicy,
 ) {
     std::thread::spawn(move || {
         let res = backend.search_similar(&seed_path, offset, &filters);
@@ -945,6 +1130,8 @@ fn spawn_similar(
                 w.set_tiles(model);
             }
 
+            apply_selection_after_results(&w, &sel.selected, results.len(), sel.reset, sel.pulse && !results.is_empty());
+
             w.set_status(status_text_for(vs, error_msg.as_deref()));
             w.set_show_load_more(has_more && vs == ViewState::Results);
             w.set_can_search(true);
@@ -958,12 +1145,14 @@ fn spawn_similar(
 /// Mirrors `spawn_search` but calls `backend.browse` instead of embedding a
 /// text query.  Used when the query box is empty but filters are active, and
 /// for the filter-bar debounce when `search_mode` is idle/browse.
+/// `sel` controls how the keyboard selection is updated when results land.
 fn spawn_browse(
     weak: Weak<MainWindow>,
     state_ref: Arc<Mutex<SearchState>>,
     backend: Backend,
     filters: Filters,
     offset: usize,
+    sel: SelectionPolicy,
 ) {
     std::thread::spawn(move || {
         let res = backend.browse(&filters, offset);
@@ -997,12 +1186,45 @@ fn spawn_browse(
                 w.set_tiles(model);
             }
 
+            apply_selection_after_results(&w, &sel.selected, results.len(), sel.reset, sel.pulse && !results.is_empty());
+
             w.set_status(status_text_for(vs, error_msg.as_deref()));
             w.set_show_load_more(has_more && vs == ViewState::Results);
             w.set_can_search(true);
         })
         .ok();
     });
+}
+
+/// Update the shared grid selection and the Slint `selected-index` property
+/// after a page of results is applied.
+///
+/// - `reset`: if `true`, clear the selection to `None` / `-1` (new text /
+///   browse search that replaces the grid).  If `false`, re-clamp the stored
+///   index to the new grid length — if it is now out-of-range, clear it;
+///   otherwise leave it (load-more and similarity searches that keep the
+///   highlighted tile visible).
+/// - `pulse`: if `true`, toggle `grid-focus-pulse` so the grid `FocusScope`
+///   re-grabs keyboard focus.  Pass `false` for load-more to avoid yanking
+///   focus while the user may be scrolling.
+fn apply_selection_after_results(
+    w: &MainWindow,
+    selected_ref: &Arc<Mutex<Option<usize>>>,
+    new_len: usize,
+    reset: bool,
+    pulse: bool,
+) {
+    let new_sel = if reset {
+        None
+    } else {
+        let cur = *selected_ref.lock().unwrap();
+        cur.filter(|&i| i < new_len)
+    };
+    *selected_ref.lock().unwrap() = new_sel;
+    w.set_selected_index(new_sel.map(|i| i as i32).unwrap_or(-1));
+    if pulse {
+        w.set_grid_focus_pulse(!w.get_grid_focus_pulse());
+    }
 }
 
 /// Previous lightbox index, clamped at 0 (no wrap).

@@ -55,6 +55,18 @@ export component MainWindow inherits Window {
     callback ext-toggled(string);
     callback gps-mode-changed(int);
 
+    // Keyboard-navigation selection: index into `tiles` of the highlighted tile,
+    // or -1 for none. Driven by Rust (mouse click + grid-nav handler).
+    in property <int> selected-index: -1;
+    // Toggled by Rust after a search returns results, to move keyboard focus to
+    // the grid so hjkl/arrows work immediately.
+    in property <bool> grid-focus-pulse;
+
+    // dir encoding: 0=Left, 1=Right, 2=Up, 3=Down. Second arg is the live column count.
+    callback grid-nav(int, int);
+    callback grid-open-detail();
+    callback grid-open-lightbox();
+
     // Grid geometry constants.
     private property <length> tile-size: 200px;
     private property <length> tile-gap: 8px;
@@ -65,6 +77,18 @@ export component MainWindow inherits Window {
     // Total grid height: enough rows * stride.
     private property <int> row-count: ceil(tiles.length / cols);
     private property <length> grid-height: row-count * tile-stride;
+
+    // Keep the selected tile within the scroll viewport.
+    changed selected-index => {
+        if (root.selected-index >= 0) {
+            // Inline expressions: tile-y, tile-bottom, top, bottom.
+            if (floor(root.selected-index / root.cols) * root.tile-stride < -grid-scroll.viewport-y) {
+                grid-scroll.viewport-y = -(floor(root.selected-index / root.cols) * root.tile-stride);
+            } else if (floor(root.selected-index / root.cols) * root.tile-stride + root.tile-size > -grid-scroll.viewport-y + grid-scroll.visible-height) {
+                grid-scroll.viewport-y = -(floor(root.selected-index / root.cols) * root.tile-stride + root.tile-size - grid-scroll.visible-height);
+            }
+        }
+    }
 
     VerticalLayout {
         padding: 16px;
@@ -217,7 +241,46 @@ export component MainWindow inherits Window {
                 horizontal-stretch: 1;
                 background: transparent;
 
-                ScrollView {
+                grid-focus := FocusScope {
+                    init => { self.focus(); }
+                    // Re-grab focus whenever Rust pulses grid-focus-pulse (after a search).
+                    property <bool> pulse <=> root.grid-focus-pulse;
+                    changed pulse => { self.focus(); }
+
+                    key-pressed(event) => {
+                        if (event.text == "h" || event.text == "H" || event.text == Key.LeftArrow) {
+                            root.grid-nav(0, root.cols);
+                            return accept;
+                        }
+                        if (event.text == "l" || event.text == "L" || event.text == Key.RightArrow) {
+                            root.grid-nav(1, root.cols);
+                            return accept;
+                        }
+                        if (event.text == "k" || event.text == "K" || event.text == Key.UpArrow) {
+                            root.grid-nav(2, root.cols);
+                            return accept;
+                        }
+                        if (event.text == "j" || event.text == "J" || event.text == Key.DownArrow) {
+                            root.grid-nav(3, root.cols);
+                            return accept;
+                        }
+                        if (event.text == Key.Return) {
+                            root.grid-open-detail();
+                            return accept;
+                        }
+                        if (event.text == " ") {
+                            root.grid-open-lightbox();
+                            return accept;
+                        }
+                        if (event.text == Key.Escape && root.detail-open) {
+                            root.detail-close();
+                            return accept;
+                        }
+                        return reject;
+                    }
+                }
+
+                grid-scroll := ScrollView {
                     width: 100%;
                     height: 100%;
                     viewport-height: root.grid-height + (root.show-load-more ? 60px : 0px);
@@ -231,6 +294,8 @@ export component MainWindow inherits Window {
                         border-radius: 6px;
                         clip: true;
                         background: #2d3446;
+                        border-width: i == root.selected-index ? 3px : 0px;
+                        border-color: #5b8cff;
 
                         Image {
                             source: tile.image;
@@ -371,10 +436,10 @@ export component MainWindow inherits Window {
                 if (event.text == Key.Escape) {
                     root.lightbox-close();
                     accept
-                } else if (event.text == Key.LeftArrow) {
+                } else if (event.text == Key.LeftArrow || event.text == "h" || event.text == "H") {
                     root.lightbox-prev();
                     accept
-                } else if (event.text == Key.RightArrow) {
+                } else if (event.text == Key.RightArrow || event.text == "l" || event.text == "L") {
                     root.lightbox-next();
                     accept
                 } else {
