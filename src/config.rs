@@ -6,6 +6,8 @@ use std::cell::OnceCell;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::sort::{Sort, SortDir, SortKey};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexConfig {
     /// Number of images to embed per CLIP batch during indexing
@@ -53,6 +55,51 @@ impl Default for SearchConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuiConfig {
+    /// Number of adjacent images to preload in the lightbox (prev/next)
+    #[serde(default = "default_preload_neighbors")]
+    pub preload_neighbors: usize,
+    /// Default sort key for the image grid
+    #[serde(default = "default_gui_sort")]
+    pub default_sort: SortKey,
+    /// Default sort direction for the image grid
+    #[serde(default = "default_gui_sort_dir")]
+    pub default_sort_direction: SortDir,
+}
+
+fn default_preload_neighbors() -> usize {
+    2
+}
+
+fn default_gui_sort() -> SortKey {
+    SortKey::Name
+}
+
+fn default_gui_sort_dir() -> SortDir {
+    SortDir::Asc
+}
+
+impl Default for GuiConfig {
+    fn default() -> Self {
+        GuiConfig {
+            preload_neighbors: default_preload_neighbors(),
+            default_sort: default_gui_sort(),
+            default_sort_direction: default_gui_sort_dir(),
+        }
+    }
+}
+
+impl GuiConfig {
+    /// Compose the stored key + direction into a `Sort` value.
+    pub fn resolved_sort(&self) -> Sort {
+        Sort {
+            key: self.default_sort,
+            dir: self.default_sort_direction,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Directory patterns to ignore during indexing
     #[serde(default)]
@@ -63,6 +110,9 @@ pub struct Config {
     /// Search tuning options
     #[serde(default)]
     pub search: SearchConfig,
+    /// Native GUI tuning options
+    #[serde(default)]
+    pub gui: GuiConfig,
     /// Default embedding model used to seed a newly-created database. `None`
     /// falls back to the built-in baseline model.
     #[serde(default)]
@@ -77,6 +127,7 @@ impl Default for Config {
         Self {
             index: IndexConfig::default(),
             search: SearchConfig::default(),
+            gui: GuiConfig::default(),
             default_model: None,
             ignore_patterns: vec![
                 // Default patterns to ignore
@@ -194,6 +245,32 @@ mod tests {
     use std::path::Path;
 
     #[test]
+    fn missing_gui_section_uses_defaults() {
+        let cfg: Config = toml::from_str("ignore_patterns = []").unwrap();
+        assert_eq!(cfg.gui.preload_neighbors, 2);
+        assert_eq!(cfg.gui.default_sort, crate::sort::SortKey::Name);
+        assert_eq!(cfg.gui.default_sort_direction, crate::sort::SortDir::Asc);
+    }
+
+    #[test]
+    fn explicit_gui_values_parse() {
+        let cfg: Config = toml::from_str(
+            "[gui]\npreload_neighbors = 5\ndefault_sort = \"size\"\ndefault_sort_direction = \"desc\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.gui.preload_neighbors, 5);
+        assert_eq!(cfg.gui.default_sort, crate::sort::SortKey::Size);
+        assert_eq!(cfg.gui.default_sort_direction, crate::sort::SortDir::Desc);
+        assert_eq!(
+            cfg.gui.resolved_sort(),
+            crate::sort::Sort {
+                key: crate::sort::SortKey::Size,
+                dir: crate::sort::SortDir::Desc,
+            }
+        );
+    }
+
+    #[test]
     fn test_default_config() {
         let config = Config::default();
         assert!(!config.ignore_patterns.is_empty());
@@ -210,6 +287,7 @@ mod tests {
             ],
             index: IndexConfig::default(),
             search: SearchConfig::default(),
+            gui: GuiConfig::default(),
             default_model: None,
             compiled_regexes: OnceCell::new(),
         };
@@ -233,6 +311,7 @@ mod tests {
             ignore_patterns: vec!["node_modules".to_string(), r".*generated.*".to_string()],
             index: IndexConfig::default(),
             search: SearchConfig::default(),
+            gui: GuiConfig::default(),
             default_model: None,
             compiled_regexes: OnceCell::new(),
         };
