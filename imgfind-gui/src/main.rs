@@ -3,6 +3,7 @@ slint::include_modules!();
 mod backend;
 mod detail;
 mod image_util;
+mod nav;
 mod state;
 
 use std::collections::HashSet;
