@@ -13,7 +13,6 @@ pub enum NavDir {
 }
 
 impl NavDir {
-    #[allow(dead_code)]
     pub fn from_i32(v: i32) -> Option<NavDir> {
         match v {
             0 => Some(NavDir::Left),
@@ -34,7 +33,6 @@ impl NavDir {
 ///   already in the top/bottom row for that column
 ///
 /// `cols` is coerced to at least 1.
-#[allow(dead_code)]
 pub fn move_selection(cur: Option<usize>, dir: NavDir, cols: usize, len: usize) -> Option<usize> {
     if len == 0 {
         return None;
