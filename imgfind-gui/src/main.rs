@@ -147,7 +147,11 @@ fn build_size_label(lo: f32, hi: f32, size_bounds: (i64, i64)) -> SharedString {
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt().init();
+    // Honor RUST_LOG when set; default to `info`. Writes to stdout so logs are
+    // visible when the GUI is launched from a terminal (e.g. `imgfind gui`).
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let args = Args::parse();
     let backend = Backend::open(args.dir.as_deref()).context("Failed to open imgfind database")?;
@@ -608,7 +612,7 @@ fn main() -> Result<()> {
         let lb_ref = Arc::clone(&lb_index);
         let gen_ref = Arc::clone(&lb_generation);
         window.on_lightbox_close(move || {
-            tracing::debug!("lightbox-close invoked");
+            tracing::info!("lightbox-close invoked");
             *lb_ref.lock().unwrap() = None;
             // Invalidate any in-flight decode so its completion cannot re-assert
             // lightbox-open = true and reopen the lightbox we just closed.
@@ -630,7 +634,7 @@ fn main() -> Result<()> {
         let backend_lb = backend.clone();
         let gen_ref = Arc::clone(&lb_generation);
         window.on_lightbox_prev(move || {
-            tracing::debug!("lightbox-prev invoked");
+            tracing::info!("lightbox-prev invoked");
             let new_idx = {
                 let mut guard = lb_ref.lock().unwrap();
                 let current = guard.unwrap_or(0);
@@ -664,7 +668,7 @@ fn main() -> Result<()> {
         let backend_lb = backend.clone();
         let gen_ref = Arc::clone(&lb_generation);
         window.on_lightbox_next(move || {
-            tracing::debug!("lightbox-next invoked");
+            tracing::info!("lightbox-next invoked");
             let (new_idx, len) = {
                 let s = state_ref.lock().unwrap();
                 let len = s.results.len();
