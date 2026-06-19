@@ -6,6 +6,7 @@ mod image_util;
 mod nav;
 mod preload;
 mod state;
+mod window;
 
 use std::collections::HashSet;
 use std::rc::Rc;
