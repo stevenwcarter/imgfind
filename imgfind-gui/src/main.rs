@@ -715,7 +715,13 @@ fn main() -> Result<()> {
         let selected_ref = Arc::clone(&selected);
         let weak = window.as_weak();
         window.on_grid_open_detail(move || {
-            if let (Some(i), Some(w)) = (*selected_ref.lock().unwrap(), weak.upgrade()) {
+            // Copy the selection out and DROP the guard before invoking
+            // tile-selected, which re-locks `selected`. std::sync::Mutex is not
+            // reentrant, so holding the guard across the invoke (as an if-let
+            // scrutinee temporary does — it lives through the body) deadlocks the
+            // UI thread.
+            let sel = *selected_ref.lock().unwrap();
+            if let (Some(i), Some(w)) = (sel, weak.upgrade()) {
                 w.invoke_tile_selected(i as i32);
             }
         });
@@ -726,7 +732,11 @@ fn main() -> Result<()> {
         let selected_ref = Arc::clone(&selected);
         let weak = window.as_weak();
         window.on_grid_open_lightbox(move || {
-            if let (Some(i), Some(w)) = (*selected_ref.lock().unwrap(), weak.upgrade()) {
+            // Drop the `selected` guard before invoking tile-activated (which
+            // re-locks `selected`); see on_grid_open_detail above — a held
+            // if-let scrutinee guard across the invoke deadlocks the UI thread.
+            let sel = *selected_ref.lock().unwrap();
+            if let (Some(i), Some(w)) = (sel, weak.upgrade()) {
                 w.invoke_tile_activated(i as i32);
             }
         });
