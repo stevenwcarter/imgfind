@@ -1,4 +1,5 @@
 use crate::filters::{Filters, build_filter_clause};
+use crate::ui_state::UiState;
 use crate::{AbsolutePath, RelativePath, get_db_parent_dir};
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose};
@@ -77,9 +78,47 @@ impl Database {
             .context("wal_checkpoint(RESTART)")?;
         Ok(())
     }
+
+    /// Retrieve the persisted GUI session state from the `ui_state` table.
+    ///
+    /// Returns `Ok(None)` when no row exists yet, and also when the stored JSON
+    /// cannot be deserialised (e.g. after a schema evolution that changed field
+    /// types). In the latter case a `tracing::warn!` is emitted so the problem
+    /// is visible in logs without crashing the GUI.
+    pub fn get_ui_state(&self) -> Result<Option<UiState>> {
+        let conn = self.pool.get().context("DB connection for get_ui_state")?;
+        let json: Option<String> = conn
+            .query_row("SELECT state_json FROM ui_state WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        match json {
+            None => Ok(None),
+            Some(s) => match serde_json::from_str::<UiState>(&s) {
+                Ok(st) => Ok(Some(st)),
+                Err(e) => {
+                    tracing::warn!("discarding unreadable ui_state: {e}");
+                    Ok(None)
+                }
+            },
+        }
+    }
+
+    /// Persist the GUI session state as a single JSON blob (UPSERT on `id = 1`).
+    pub fn set_ui_state(&self, state: &UiState) -> Result<()> {
+        let json = serde_json::to_string(state).context("serialize ui_state")?;
+        let conn = self.pool.get().context("DB connection for set_ui_state")?;
+        conn.execute(
+            "INSERT INTO ui_state (id, state_json, updated_at)
+             VALUES (1, ?1, CURRENT_TIMESTAMP)
+             ON CONFLICT(id) DO UPDATE SET state_json = ?1, updated_at = CURRENT_TIMESTAMP",
+            params![json],
+        )?;
+        Ok(())
+    }
 }
 
-const LATEST_MIGRATION_VERSION: i32 = 2;
+const LATEST_MIGRATION_VERSION: i32 = 3;
 
 /// Apply any pending schema migrations, gated by SQLite's `PRAGMA user_version`.
 ///
@@ -94,6 +133,9 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     }
     if current < 2 {
         migration_002_models_and_userdata(conn).context("migration 2")?;
+    }
+    if current < 3 {
+        migration_003_ui_state(conn).context("migration 3 (ui_state)")?;
     }
     if current < LATEST_MIGRATION_VERSION {
         conn.execute_batch(&format!(
@@ -113,6 +155,18 @@ fn migration_002_models_and_userdata(conn: &Connection) -> Result<()> {
          CREATE TABLE IF NOT EXISTS image_tags (image_id INTEGER NOT NULL, tag_id INTEGER NOT NULL, PRIMARY KEY(image_id, tag_id), FOREIGN KEY(image_id) REFERENCES images(id) ON DELETE CASCADE, FOREIGN KEY(tag_id) REFERENCES tags(id) ON DELETE CASCADE);
          CREATE TABLE IF NOT EXISTS collections (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
          CREATE TABLE IF NOT EXISTS collection_images (collection_id INTEGER NOT NULL, image_id INTEGER NOT NULL, PRIMARY KEY(collection_id, image_id), FOREIGN KEY(collection_id) REFERENCES collections(id) ON DELETE CASCADE, FOREIGN KEY(image_id) REFERENCES images(id) ON DELETE CASCADE);",
+    )?;
+    Ok(())
+}
+
+/// Migration 3: single-row persisted GUI session state (JSON blob).
+fn migration_003_ui_state(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS ui_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            state_json TEXT NOT NULL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );",
     )?;
     Ok(())
 }
@@ -2381,6 +2435,46 @@ mod tests {
     fn rehydrate_empty_is_empty() {
         let (db, _tmp) = test_db_with_rows(&[("a.jpg", Some(1))]);
         assert!(db.rehydrate_rows(&[]).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn ui_state_round_trips_through_db() {
+        let (db, _tmp) = test_db_with_rows(&[("a.jpg", Some(1))]);
+        assert!(db.get_ui_state().unwrap().is_none());
+        let st = UiState {
+            search_text: "dog".into(),
+            result_ids: vec![1],
+            selected_index: Some(0),
+            ..Default::default()
+        };
+        db.set_ui_state(&st).unwrap();
+        assert_eq!(db.get_ui_state().unwrap().unwrap(), st);
+        // upsert overwrites the single row
+        let st2 = UiState {
+            search_text: "cat".into(),
+            result_ids: vec![1],
+            selected_index: Some(0),
+            ..Default::default()
+        };
+        db.set_ui_state(&st2).unwrap();
+        assert_eq!(db.get_ui_state().unwrap().unwrap().search_text, "cat");
+
+        let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn malformed_ui_state_is_none() {
+        let (db, _tmp) = test_db_with_rows(&[("a.jpg", Some(1))]);
+        let conn = db.pool.get().unwrap();
+        conn.execute(
+            "INSERT INTO ui_state (id, state_json) VALUES (1, '{not json')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        assert!(db.get_ui_state().unwrap().is_none());
+
         let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
     }
 }
