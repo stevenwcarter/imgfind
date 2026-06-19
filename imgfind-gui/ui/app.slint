@@ -392,39 +392,42 @@ export component MainWindow inherits Window {
     }
 
     // --- Lightbox overlay ---
-    if root.lightbox-open: Rectangle {
+    // The overlay IS a FocusScope (the utmost model): it WRAPS all the lightbox
+    // content as its parent, so children render on top and receive clicks
+    // naturally while this scope owns the keyboard. Nav uses TouchArea, not
+    // Button: a Button steals keyboard focus on click (which broke single-click
+    // nav and killed Esc/h/l), whereas a TouchArea never takes focus — so clicks
+    // work first time and the keyboard keeps working. No focus trickery needed.
+    if root.lightbox-open: FocusScope {
         width: root.width;
         height: root.height;
-        background: #000000dd;
-
-        forward-focus: lb-keys;
-
-        // Declared FIRST so it sits at the BOTTOM of the z-order. A focused
-        // FocusScope fills its parent and consumes pointer presses, so as the
-        // last child it would cover the overlay and swallow clicks meant for the
-        // < / > buttons and the click-to-close TouchArea (the bug where lightbox
-        // mouse buttons did nothing). Keyboard routing follows focus, not
-        // z-order, so it still receives keys from the bottom.
-        lb-keys := FocusScope {
-            // Grab keyboard focus when the lightbox opens; otherwise focus stays
-            // on the grid FocusScope and the lightbox's Esc / h / l do nothing.
-            init => { self.focus(); }
-            key-pressed(event) => {
-                if (event.text == Key.Escape) {
-                    root.lightbox-close();
-                    accept
-                } else if (event.text == Key.LeftArrow || event.text == "h" || event.text == "H") {
-                    root.lightbox-prev();
-                    accept
-                } else if (event.text == Key.RightArrow || event.text == "l" || event.text == "L") {
-                    root.lightbox-next();
-                    accept
-                } else {
-                    reject
-                }
+        // Grab focus when the lightbox opens; the grid scope regains it on close
+        // (Rust pulses grid-focus-pulse in on_lightbox_close).
+        init => { self.focus(); }
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.lightbox-close();
+                return accept;
             }
+            if (event.text == Key.LeftArrow || event.text == "h" || event.text == "H") {
+                root.lightbox-prev();
+                return accept;
+            }
+            if (event.text == Key.RightArrow || event.text == "l" || event.text == "L") {
+                root.lightbox-next();
+                return accept;
+            }
+            return reject;
         }
 
+        Rectangle {
+            background: #000000dd;
+            width: 100%;
+            height: 100%;
+        }
+
+        // Click anywhere (including the photo) to close. Below the nav arrows in
+        // z-order, so the arrows win their 60px edge strips.
         TouchArea {
             width: 100%;
             height: 100%;
@@ -440,23 +443,45 @@ export component MainWindow inherits Window {
             y: (parent.height - self.height) / 2;
         }
 
-        HorizontalLayout {
-            width: 100%;
+        // Prev / next arrows as TouchAreas pinned to the left/right edges.
+        prev-touch := TouchArea {
+            width: 60px;
             height: 100%;
-            alignment: space-between;
-
-            Button {
-                // ASCII < / > render in Slint's default font; the previous
-                // ‹ › (U+2039/203A) risk showing as tofu like the close button did.
-                text: "<";
-                // Re-grab keyboard focus: clicking a Button takes focus, which
-                // would otherwise stop Esc / h / l working after a button click.
-                clicked => { root.lightbox-prev(); lb-keys.focus(); }
+            x: 0;
+            y: 0;
+            clicked => { root.lightbox-prev(); }
+            Rectangle {
+                background: prev-touch.has-hover ? #00000080 : transparent;
+                width: 100%;
+                height: 100%;
+                // ASCII < / > render in the default font; ‹ › (U+2039/203A) tofu.
+                Text {
+                    text: "<";
+                    color: white;
+                    font-size: 28px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
             }
+        }
 
-            Button {
-                text: ">";
-                clicked => { root.lightbox-next(); lb-keys.focus(); }
+        next-touch := TouchArea {
+            width: 60px;
+            height: 100%;
+            x: root.width - self.width;
+            y: 0;
+            clicked => { root.lightbox-next(); }
+            Rectangle {
+                background: next-touch.has-hover ? #00000080 : transparent;
+                width: 100%;
+                height: 100%;
+                Text {
+                    text: ">";
+                    color: white;
+                    font-size: 28px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
             }
         }
     }
