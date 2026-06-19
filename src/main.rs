@@ -114,12 +114,20 @@ enum Commands {
         #[command(subcommand)]
         config_command: ConfigCommands,
     },
-    /// Generate thumbnails in batches
+    /// Generate thumbnails in batches.
+    ///
+    /// The GUI uses 300px (grid), 512px (detail panel), and 2048px (lightbox/preview).
+    /// Pass --gui-sizes to pre-generate exactly those three sizes.
     Thumbnails {
-        /// Thumbnail size (default: 300)
-        #[arg(short, long, default_value_t = 300)]
-        size: u32,
-        /// Number of thumbnails to generate in this batch (default: 50)
+        /// Thumbnail size(s) to generate. Repeat for multiple, e.g. -s 300 -s 512.
+        /// The GUI uses 300 (grid), 512 (detail panel), and 2048 (lightbox/preview);
+        /// pass --gui-sizes to pre-generate exactly those.
+        #[arg(short, long)]
+        size: Vec<u32>,
+        /// Generate the full set of sizes the GUI uses (300, 512, 2048).
+        #[arg(long)]
+        gui_sizes: bool,
+        /// Number of thumbnails to generate per size in this batch.
         #[arg(short, long, default_value_t = 50)]
         count: usize,
     },
@@ -265,10 +273,16 @@ async fn main() -> Result<()> {
         Commands::Config { config_command } => {
             handle_config_command(config_command)?;
         }
-        Commands::Thumbnails { size, count } => {
+        Commands::Thumbnails {
+            size,
+            count,
+            gui_sizes,
+        } => {
             let db_path = get_db_path(None)?;
             let mut db = Database::new(&db_path)?;
-            generate_thumbnails_batch(&mut db, size, count)?;
+            for s in resolve_thumbnail_sizes(&size, gui_sizes) {
+                generate_thumbnails_batch(&mut db, s, count)?;
+            }
         }
         Commands::Models { action } => {
             let db_path = get_db_path(None)?;
@@ -989,6 +1003,25 @@ fn handle_config_command(config_command: ConfigCommands) -> Result<()> {
     Ok(())
 }
 
+/// Resolve the set of thumbnail sizes to generate.
+///
+/// - `gui_sizes` → returns `GUI_THUMBNAIL_SIZES` (300, 512, 2048).
+/// - `sizes` non-empty → uses the provided list.
+/// - Both empty/false → defaults to `[300]`.
+///
+/// Duplicates are removed while preserving the first-occurrence order.
+fn resolve_thumbnail_sizes(sizes: &[u32], gui_sizes: bool) -> Vec<u32> {
+    let raw: Vec<u32> = if gui_sizes {
+        imgfind::thumbnail::GUI_THUMBNAIL_SIZES.to_vec()
+    } else if sizes.is_empty() {
+        vec![300]
+    } else {
+        sizes.to_vec()
+    };
+    let mut seen = std::collections::HashSet::new();
+    raw.into_iter().filter(|s| seen.insert(*s)).collect()
+}
+
 /// Generate thumbnails in batches for images that don't have cached thumbnails
 fn generate_thumbnails_batch(db: &mut Database, size: u32, count: usize) -> Result<()> {
     info!(
@@ -1050,6 +1083,24 @@ mod gui_cli_tests {
     fn existing_subcommand_still_parses() {
         let cli = Cli::try_parse_from(["imgfind", "tui"]).expect("parse");
         assert!(matches!(cli.command, Commands::Tui { .. }));
+    }
+
+    #[test]
+    fn resolve_sizes_default_is_300() {
+        assert_eq!(resolve_thumbnail_sizes(&[], false), vec![300]);
+    }
+
+    #[test]
+    fn resolve_sizes_gui_flag_expands() {
+        assert_eq!(resolve_thumbnail_sizes(&[], true), vec![300, 512, 2048]);
+    }
+
+    #[test]
+    fn resolve_sizes_explicit_dedup_preserves_order() {
+        assert_eq!(
+            resolve_thumbnail_sizes(&[512, 300, 512], false),
+            vec![512, 300]
+        );
     }
 }
 
