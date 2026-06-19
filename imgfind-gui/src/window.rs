@@ -66,29 +66,25 @@ pub fn window_range(first_row: usize, last_row: usize, cols: usize, total: usize
 ///
 /// A slide is triggered when the set of visible items comes within
 /// `SLIDE_TRIGGER_ROWS * cols` items of either end of `current`, **and**
-/// `current` is not already clamped at that boundary (i.e., there are more
-/// items before `current.start > 0`, or more items after when `current` does
-/// not reach `total`).
+/// `current` is not already clamped at that boundary — i.e. `current.start > 0`
+/// for the near-start edge, and `current.end < total` for the near-end edge.
 ///
-/// The `total` argument is implicit: the caller must already know whether
-/// `current.end` is the absolute end; pass `current` with `end == total` to
-/// signal the far-end clamp.  Since `need_slide` only checks
-/// `current.start > 0` (near-start boundary) and `current.end` against
-/// `visible_last_idx + buf` (near-end boundary), callers should pass the
-/// `current` window as returned by `window_range`.
+/// `total` is the absolute item count; passing `current.end == total` signals
+/// that the window already covers the far end and no further slide is needed.
 pub fn need_slide(
     current: &Range<usize>,
     visible_first_idx: usize,
     visible_last_idx: usize,
     cols: usize,
+    total: usize,
 ) -> bool {
     let buf = SLIDE_TRIGGER_ROWS * cols;
     // Near-start: visible window approaching the start of the render window,
     // and render window does not already begin at item 0.
-    let near_start = current.start > 0 && visible_first_idx < current.start + buf;
-    // Near-end: visible window approaching the end of the render window.
-    // `current.end` being the actual total signals the far-end clamp.
-    let near_end = visible_last_idx + buf > current.end && current.end > visible_last_idx;
+    let near_start = visible_first_idx < current.start + buf && current.start > 0;
+    // Near-end: visible window approaching the end of the render window,
+    // and the render window has not yet reached the absolute end of the list.
+    let near_end = visible_last_idx + buf > current.end && current.end < total;
     near_start || near_end
 }
 
@@ -210,26 +206,26 @@ mod tests {
     //
     // With SLIDE_TRIGGER_ROWS=4 and cols=4, buf = 16 items.
     //
-    // Setup: current = 100..500 (not at either clamp — start>0, end<total).
-    // Near-end trigger: visible_last_idx + buf > current.end
+    // Setup: current = 100..500, total = 1000 (not at either clamp).
+    // Near-end trigger: visible_last_idx + buf > current.end AND current.end < total
     //   → visible_last_idx > 500-16 = 484.
-    //   → e.g. visible_last at 485 → 485+16=501 > 500 → trigger.
-    // Near-start trigger: visible_first_idx < current.start + buf
+    //   → e.g. visible_last at 485 → 485+16=501 > 500, and 500 < 1000 → trigger.
+    // Near-start trigger: visible_first_idx < current.start + buf AND current.start > 0
     //   → visible_first_idx < 100+16 = 116.
-    //   → e.g. visible_first at 115 → 115 < 116 → trigger.
+    //   → e.g. visible_first at 115 → 115 < 116, and start(100) > 0 → trigger.
 
     #[test]
     fn need_slide_near_end_triggers() {
         let cur = 100..500_usize;
-        // visible_last=485 → 485+16=501 > 500, and current.end(500) > visible_last(485) → true.
-        assert!(need_slide(&cur, 460, 485, 4));
+        // visible_last=485 → 485+16=501 > 500, and current.end(500) < total(1000) → true.
+        assert!(need_slide(&cur, 460, 485, 4, 1000));
     }
 
     #[test]
     fn need_slide_near_start_triggers() {
         let cur = 100..500_usize;
         // visible_first=115 < 116, and current.start(100) > 0 → true.
-        assert!(need_slide(&cur, 115, 140, 4));
+        assert!(need_slide(&cur, 115, 140, 4, 1000));
     }
 
     #[test]
@@ -237,7 +233,7 @@ mod tests {
         let cur = 100..500_usize;
         // visible_first=200, visible_last=220: not near either edge.
         // near_start: 200 < 116? No. near_end: 220+16=236 > 500? No.
-        assert!(!need_slide(&cur, 200, 220, 4));
+        assert!(!need_slide(&cur, 200, 220, 4, 1000));
     }
 
     #[test]
@@ -245,22 +241,41 @@ mod tests {
         // current.start == 0 → already at the near-start clamp.
         let cur = 0..200_usize;
         // visible_first=5 would normally be near-start, but start==0 blocks it.
-        assert!(!need_slide(&cur, 5, 20, 4));
+        assert!(!need_slide(&cur, 5, 20, 4, 200));
     }
 
     #[test]
     fn need_slide_at_end_clamp_no_trigger() {
-        // current.end == visible_last_idx → at the far-end clamp boundary;
-        // near_end requires current.end > visible_last_idx, which is false.
+        // current.end == total → already at the far-end clamp; no slide needed.
         let cur = 800..1000_usize;
-        // visible_last=1000, current.end=1000 → current.end > visible_last? No → false.
-        assert!(!need_slide(&cur, 980, 1000, 4));
+        // visible_last=1000, current.end=total=1000 → current.end < total? No → false.
+        assert!(!need_slide(&cur, 980, 1000, 4, 1000));
+    }
+
+    /// Regression test: window already at absolute end, user near-but-not-at
+    /// the last item.  The old guard (`current.end > visible_last_idx`) was
+    /// satisfied here (1000 > 999), causing a spurious re-slide on every tick.
+    /// The fix uses `current.end < total` which is false (1000 == 1000).
+    #[test]
+    fn need_slide_at_end_clamp_near_last_item_no_spurious_slide() {
+        let cur = 800..1000_usize;
+        // visible_last=999 < total=1000, but current.end==total → no slide.
+        assert!(!need_slide(&cur, 980, 999, 4, 1000));
+    }
+
+    /// Positive companion: when the window is NOT at the absolute end and the
+    /// user is near the bottom, a slide must fire.
+    #[test]
+    fn need_slide_near_end_not_at_total_triggers() {
+        let cur = 0..200_usize;
+        // visible_last=185, buf=16 → 185+16=201 > 200, current.end(200) < total(1000) → true.
+        assert!(need_slide(&cur, 180, 185, 4, 1000));
     }
 
     #[test]
     fn need_slide_far_from_end_no_trigger() {
         let cur = 0..200_usize;
         // visible_last=50: 50+16=66 > 200? No → false. start==0 → near_start blocked.
-        assert!(!need_slide(&cur, 30, 50, 4));
+        assert!(!need_slide(&cur, 30, 50, 4, 200));
     }
 }
