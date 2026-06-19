@@ -50,7 +50,7 @@ export component MainWindow inherits Window {
     callback lightbox-close();
     callback lightbox-prev();
     callback lightbox-next();
-    // Filter-bar callbacks (no-op stubs in main.rs; wired in Task 6).
+    // Filter-bar callbacks.
     callback filters-changed();
     callback ext-toggled(string);
     callback gps-mode-changed(int);
@@ -58,8 +58,8 @@ export component MainWindow inherits Window {
     // Keyboard-navigation selection: index into `tiles` of the highlighted tile,
     // or -1 for none. Driven by Rust (mouse click + grid-nav handler).
     in property <int> selected-index: -1;
-    // Toggled by Rust after a search returns results, to move keyboard focus to
-    // the grid so hjkl/arrows work immediately.
+    // Written by Rust after results land. No longer drives focus (the single
+    // app-keys scope owns the keyboard); kept so the Rust call sites compile.
     in property <bool> grid-focus-pulse;
 
     // dir encoding: 0=Left, 1=Right, 2=Up, 3=Down. Second arg is the live column count.
@@ -78,6 +78,15 @@ export component MainWindow inherits Window {
     private property <int> row-count: ceil(tiles.length / cols);
     private property <length> grid-height: row-count * tile-stride;
 
+    // ALL keyboard shortcuts live in ONE place: the single `app-keys` FocusScope
+    // below, which wraps the whole window and uses `capture-key-pressed`. Slint
+    // offers each key event to ancestors (Window down to the focused element)
+    // BEFORE delivering it to whatever currently has focus, so these shortcuts
+    // fire no matter which control (tile, Button, slider) was last clicked — no
+    // per-scope focus juggling, no focus pulses. The only gate is the search
+    // field: while it has focus we let it type (Escape blurs back to app-keys).
+    forward-focus: app-keys;
+
     // Keep the selected tile within the scroll viewport.
     changed selected-index => {
         if (root.selected-index >= 0) {
@@ -90,414 +99,406 @@ export component MainWindow inherits Window {
         }
     }
 
-    VerticalLayout {
-        padding: 16px;
-        spacing: 12px;
-
-        HorizontalLayout {
-            spacing: 8px;
-            LineEdit {
-                placeholder-text: root.can-search ? "Search images..." : "Loading model...";
-                enabled: root.can-search;
-                accepted(text) => { root.search(text); }
-            }
-        }
-
-        // --- Filter bar ---
-        HorizontalLayout {
-            spacing: 12px;
-            alignment: start;
-
-            // Size range slider + label.
-            RangeSlider {
-                width: 180px;
-                lo <=> root.size-lo;
-                hi <=> root.size-hi;
-                range-changed(lo, hi) => {
-                    root.size-lo = lo;
-                    root.size-hi = hi;
-                    root.filters-changed();
-                }
-            }
-            Text {
-                text: root.size-label;
-                color: #9aa4b2;
-                vertical-alignment: center;
-            }
-
-            // File-type toggle chips (struct model: [{name, on}]).
-            for chip in root.type-chips: Rectangle {
-                width: chip-label.preferred-width + 16px;
-                height: 24px;
-                border-radius: 4px;
-                background: chip.on ? #3a6 : #2d3446;
-                border-width: 1px;
-                border-color: chip.on ? #3a6 : #3a4255;
-
-                chip-label := Text {
-                    text: chip.name;
-                    color: chip.on ? #fff : #9aa4b2;
-                    font-size: 12px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                    width: 100%;
-                    height: 100%;
-                }
-
-                TouchArea {
-                    width: 100%;
-                    height: 100%;
-                    clicked => { root.ext-toggled(chip.name); }
-                }
-            }
-
-            // GPS 3-way control: Any / Has GPS / No GPS.
-            HorizontalLayout {
-                spacing: 2px;
-
-                Rectangle {
-                    width: gps-any-text.preferred-width + 16px;
-                    height: 24px;
-                    border-radius: 4px;
-                    background: root.gps-mode == 0 ? #3a6 : #2d3446;
-                    border-width: 1px;
-                    border-color: root.gps-mode == 0 ? #3a6 : #3a4255;
-                    gps-any-text := Text {
-                        text: "Any";
-                        color: root.gps-mode == 0 ? #fff : #9aa4b2;
-                        font-size: 12px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                        width: 100%;
-                        height: 100%;
-                    }
-                    TouchArea {
-                        width: 100%;
-                        height: 100%;
-                        clicked => { root.gps-mode-changed(0); }
-                    }
-                }
-
-                Rectangle {
-                    width: gps-has-text.preferred-width + 16px;
-                    height: 24px;
-                    border-radius: 4px;
-                    background: root.gps-mode == 1 ? #3a6 : #2d3446;
-                    border-width: 1px;
-                    border-color: root.gps-mode == 1 ? #3a6 : #3a4255;
-                    gps-has-text := Text {
-                        text: "Has GPS";
-                        color: root.gps-mode == 1 ? #fff : #9aa4b2;
-                        font-size: 12px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                        width: 100%;
-                        height: 100%;
-                    }
-                    TouchArea {
-                        width: 100%;
-                        height: 100%;
-                        clicked => { root.gps-mode-changed(1); }
-                    }
-                }
-
-                Rectangle {
-                    width: gps-no-text.preferred-width + 16px;
-                    height: 24px;
-                    border-radius: 4px;
-                    background: root.gps-mode == 2 ? #3a6 : #2d3446;
-                    border-width: 1px;
-                    border-color: root.gps-mode == 2 ? #3a6 : #3a4255;
-                    gps-no-text := Text {
-                        text: "No GPS";
-                        color: root.gps-mode == 2 ? #fff : #9aa4b2;
-                        font-size: 12px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                        width: 100%;
-                        height: 100%;
-                    }
-                    TouchArea {
-                        width: 100%;
-                        height: 100%;
-                        clicked => { root.gps-mode-changed(2); }
-                    }
-                }
-            }
-        }
-
-        Text {
-            text: root.status;
-            color: #9aa4b2;
-            visible: root.status != "";
-        }
-
-        HorizontalLayout {
-            spacing: 0px;
-            vertical-stretch: 1;
-
-            // Grid area — grows to fill all available width when panel is closed.
-            grid-area := Rectangle {
-                horizontal-stretch: 1;
-                background: transparent;
-
-                grid-focus := FocusScope {
-                    init => { self.focus(); }
-                    // Re-grab focus whenever Rust pulses grid-focus-pulse (after a search).
-                    property <bool> pulse <=> root.grid-focus-pulse;
-                    changed pulse => { self.focus(); }
-
-                    key-pressed(event) => {
-                        if (event.text == "h" || event.text == "H" || event.text == Key.LeftArrow) {
-                            root.grid-nav(0, root.cols);
-                            return accept;
-                        }
-                        if (event.text == "l" || event.text == "L" || event.text == Key.RightArrow) {
-                            root.grid-nav(1, root.cols);
-                            return accept;
-                        }
-                        if (event.text == "k" || event.text == "K" || event.text == Key.UpArrow) {
-                            root.grid-nav(2, root.cols);
-                            return accept;
-                        }
-                        if (event.text == "j" || event.text == "J" || event.text == Key.DownArrow) {
-                            root.grid-nav(3, root.cols);
-                            return accept;
-                        }
-                        if (event.text == Key.Return) {
-                            root.grid-open-detail();
-                            return accept;
-                        }
-                        if (event.text == " ") {
-                            root.grid-open-lightbox();
-                            return accept;
-                        }
-                        if (event.text == Key.Escape && root.detail-open) {
-                            root.detail-close();
-                            return accept;
-                        }
-                        return reject;
-                    }
-                }
-
-                grid-scroll := ScrollView {
-                    width: 100%;
-                    height: 100%;
-                    viewport-height: root.grid-height + (root.show-load-more ? 60px : 0px);
-                    viewport-width: root.cols * root.tile-stride;
-
-                    for tile[i] in root.tiles: Rectangle {
-                        x: mod(i, root.cols) * root.tile-stride;
-                        y: floor(i / root.cols) * root.tile-stride;
-                        width: root.tile-size;
-                        height: root.tile-size;
-                        border-radius: 6px;
-                        clip: true;
-                        background: #2d3446;
-                        border-width: i == root.selected-index ? 3px : 0px;
-                        border-color: #5b8cff;
-
-                        Image {
-                            source: tile.image;
-                            image-fit: cover;
-                            width: 100%;
-                            height: 100%;
-                        }
-
-                        TouchArea {
-                            width: 100%;
-                            height: 100%;
-                            clicked => { root.tile-selected(i); }
-                            double-clicked => { root.tile-activated(i); }
-                            pointer-event(e) => {
-                                if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
-                                    root.tile-open-external(i);
-                                }
-                            }
-                        }
-                    }
-
-                    if root.show-load-more: Button {
-                        x: 0px;
-                        y: root.grid-height + 8px;
-                        text: "Load more";
-                        clicked => { root.load-more(); }
-                    }
-                }
-            }
-
-            // Detail panel — fixed 340 px, only present when detail-open.
-            if root.detail-open: Rectangle {
-                width: 340px;
-                background: #252b3a;
-
-                // Left border divider rendered as a thin child rectangle.
-                Rectangle {
-                    x: 0px;
-                    y: 0px;
-                    width: 1px;
-                    height: parent.height;
-                    background: #3a4255;
-                }
-
-                VerticalLayout {
-                    padding: 12px;
-                    spacing: 8px;
-
-                    HorizontalLayout {
-                        alignment: end;
-                        Button {
-                            // U+00D7 (×, Latin-1) renders in Slint's default font;
-                            // the previous ✕ (U+2715) had no glyph and showed as tofu.
-                            text: "×";
-                            clicked => { root.detail-close(); }
-                        }
-                    }
-
-                    Image {
-                        source: root.detail-image;
-                        image-fit: contain;
-                        height: 300px;
-                    }
-
-                    Text {
-                        text: root.detail-filename;
-                        color: #e0e4ed;
-                        font-size: 13px;
-                        wrap: word-wrap;
-                    }
-
-                    Text {
-                        text: root.detail-meta;
-                        color: #9aa4b2;
-                        font-size: 12px;
-                        wrap: word-wrap;
-                    }
-
-                    Button {
-                        text: "View full";
-                        // Opens the lightbox for the seed image by path, not by
-                        // grid index, so it stays valid after a similar-search
-                        // replaces the tile grid.
-                        clicked => { root.detail-view-full(); }
-                    }
-
-                    Button {
-                        text: "Search similar";
-                        clicked => { root.search-similar(); }
-                    }
-                }
-            }
-        }
-    }
-
-    // --- Lightbox overlay ---
-    // The overlay IS a FocusScope (the utmost model): it WRAPS all the lightbox
-    // content as its parent, so children render on top and receive clicks
-    // naturally while this scope owns the keyboard. Nav uses TouchArea, not
-    // Button: a Button steals keyboard focus on click (which broke single-click
-    // nav and killed Esc/h/l), whereas a TouchArea never takes focus — so clicks
-    // work first time and the keyboard keeps working. No focus trickery needed.
-    if root.lightbox-open: FocusScope {
-        width: root.width;
-        height: root.height;
-        // Grab focus when the lightbox opens; the grid scope regains it on close
-        // (Rust pulses grid-focus-pulse in on_lightbox_close).
+    app-keys := FocusScope {
+        // Hold focus from startup so key events flow; capture-key-pressed then
+        // intercepts them for the whole subtree regardless of inner focus.
         init => { self.focus(); }
-        key-pressed(event) => {
-            if (event.text == Key.Escape) {
-                root.lightbox-close();
+
+        capture-key-pressed(event) => {
+            // While the search field is being typed in, let it have the keys
+            // (Escape blurs it back to the app scope so navigation resumes).
+            if (search-input.has-focus) {
+                if (event.text == Key.Escape) {
+                    app-keys.focus();
+                    return accept;
+                }
+                return reject;
+            }
+            // The lightbox is modal: it owns the keyboard while open.
+            if (root.lightbox-open) {
+                if (event.text == Key.Escape) {
+                    root.lightbox-close();
+                    return accept;
+                }
+                if (event.text == Key.LeftArrow || event.text == "h" || event.text == "H") {
+                    root.lightbox-prev();
+                    return accept;
+                }
+                if (event.text == Key.RightArrow || event.text == "l" || event.text == "L") {
+                    root.lightbox-next();
+                    return accept;
+                }
                 return accept;
             }
-            if (event.text == Key.LeftArrow || event.text == "h" || event.text == "H") {
-                root.lightbox-prev();
+            // Grid navigation.
+            if (event.text == "h" || event.text == "H" || event.text == Key.LeftArrow) {
+                root.grid-nav(0, root.cols);
                 return accept;
             }
-            if (event.text == Key.RightArrow || event.text == "l" || event.text == "L") {
-                root.lightbox-next();
+            if (event.text == "l" || event.text == "L" || event.text == Key.RightArrow) {
+                root.grid-nav(1, root.cols);
+                return accept;
+            }
+            if (event.text == "k" || event.text == "K" || event.text == Key.UpArrow) {
+                root.grid-nav(2, root.cols);
+                return accept;
+            }
+            if (event.text == "j" || event.text == "J" || event.text == Key.DownArrow) {
+                root.grid-nav(3, root.cols);
+                return accept;
+            }
+            if (event.text == Key.Return) {
+                root.grid-open-detail();
+                return accept;
+            }
+            if (event.text == " ") {
+                root.grid-open-lightbox();
+                return accept;
+            }
+            if (event.text == Key.Escape && root.detail-open) {
+                root.detail-close();
                 return accept;
             }
             return reject;
         }
 
-        Rectangle {
-            background: #000000dd;
-            width: 100%;
-            height: 100%;
-        }
+        VerticalLayout {
+            padding: 16px;
+            spacing: 12px;
 
-        // Click anywhere (including the photo) to close. Below the nav arrows in
-        // z-order, so the arrows win their 60px edge strips.
-        TouchArea {
-            width: 100%;
-            height: 100%;
-            clicked => { root.lightbox-close(); }
-        }
+            HorizontalLayout {
+                spacing: 8px;
+                search-input := LineEdit {
+                    placeholder-text: root.can-search ? "Search images..." : "Loading model...";
+                    enabled: root.can-search;
+                    // Return focus to app-keys after submitting so grid keys work.
+                    accepted(text) => { root.search(text); app-keys.focus(); }
+                }
+            }
 
-        Image {
-            source: root.lightbox-image;
-            image-fit: contain;
-            width: 90%;
-            height: 90%;
-            x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
-        }
+            // --- Filter bar ---
+            HorizontalLayout {
+                spacing: 12px;
+                alignment: start;
 
-        // Prev / next arrows as TouchAreas pinned to the left/right edges.
-        prev-touch := TouchArea {
-            width: 60px;
-            height: 100%;
-            x: 0;
-            y: 0;
-            clicked => { root.lightbox-prev(); }
-            Rectangle {
-                background: prev-touch.has-hover ? #00000080 : transparent;
-                width: 100%;
-                height: 100%;
-                // ASCII < / > render in the default font; ‹ › (U+2039/203A) tofu.
+                // Size range slider + label.
+                RangeSlider {
+                    width: 180px;
+                    lo <=> root.size-lo;
+                    hi <=> root.size-hi;
+                    range-changed(lo, hi) => {
+                        root.size-lo = lo;
+                        root.size-hi = hi;
+                        root.filters-changed();
+                    }
+                }
                 Text {
-                    text: "<";
-                    color: white;
-                    font-size: 28px;
-                    horizontal-alignment: center;
+                    text: root.size-label;
+                    color: #9aa4b2;
                     vertical-alignment: center;
+                }
+
+                // File-type toggle chips (struct model: [{name, on}]).
+                for chip in root.type-chips: Rectangle {
+                    width: chip-label.preferred-width + 16px;
+                    height: 24px;
+                    border-radius: 4px;
+                    background: chip.on ? #3a6 : #2d3446;
+                    border-width: 1px;
+                    border-color: chip.on ? #3a6 : #3a4255;
+
+                    chip-label := Text {
+                        text: chip.name;
+                        color: chip.on ? #fff : #9aa4b2;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        width: 100%;
+                        height: 100%;
+                    }
+
+                    TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        clicked => { root.ext-toggled(chip.name); }
+                    }
+                }
+
+                // GPS 3-way control: Any / Has GPS / No GPS.
+                HorizontalLayout {
+                    spacing: 2px;
+
+                    Rectangle {
+                        width: gps-any-text.preferred-width + 16px;
+                        height: 24px;
+                        border-radius: 4px;
+                        background: root.gps-mode == 0 ? #3a6 : #2d3446;
+                        border-width: 1px;
+                        border-color: root.gps-mode == 0 ? #3a6 : #3a4255;
+                        gps-any-text := Text {
+                            text: "Any";
+                            color: root.gps-mode == 0 ? #fff : #9aa4b2;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            width: 100%;
+                            height: 100%;
+                        }
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            clicked => { root.gps-mode-changed(0); }
+                        }
+                    }
+
+                    Rectangle {
+                        width: gps-has-text.preferred-width + 16px;
+                        height: 24px;
+                        border-radius: 4px;
+                        background: root.gps-mode == 1 ? #3a6 : #2d3446;
+                        border-width: 1px;
+                        border-color: root.gps-mode == 1 ? #3a6 : #3a4255;
+                        gps-has-text := Text {
+                            text: "Has GPS";
+                            color: root.gps-mode == 1 ? #fff : #9aa4b2;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            width: 100%;
+                            height: 100%;
+                        }
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            clicked => { root.gps-mode-changed(1); }
+                        }
+                    }
+
+                    Rectangle {
+                        width: gps-no-text.preferred-width + 16px;
+                        height: 24px;
+                        border-radius: 4px;
+                        background: root.gps-mode == 2 ? #3a6 : #2d3446;
+                        border-width: 1px;
+                        border-color: root.gps-mode == 2 ? #3a6 : #3a4255;
+                        gps-no-text := Text {
+                            text: "No GPS";
+                            color: root.gps-mode == 2 ? #fff : #9aa4b2;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            width: 100%;
+                            height: 100%;
+                        }
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            clicked => { root.gps-mode-changed(2); }
+                        }
+                    }
+                }
+            }
+
+            Text {
+                text: root.status;
+                color: #9aa4b2;
+                visible: root.status != "";
+            }
+
+            HorizontalLayout {
+                spacing: 0px;
+                vertical-stretch: 1;
+
+                // Grid area — grows to fill all available width when panel is closed.
+                grid-area := Rectangle {
+                    horizontal-stretch: 1;
+                    background: transparent;
+
+                    grid-scroll := ScrollView {
+                        width: 100%;
+                        height: 100%;
+                        viewport-height: root.grid-height + (root.show-load-more ? 60px : 0px);
+                        viewport-width: root.cols * root.tile-stride;
+
+                        for tile[i] in root.tiles: Rectangle {
+                            x: mod(i, root.cols) * root.tile-stride;
+                            y: floor(i / root.cols) * root.tile-stride;
+                            width: root.tile-size;
+                            height: root.tile-size;
+                            border-radius: 6px;
+                            clip: true;
+                            background: #2d3446;
+                            border-width: i == root.selected-index ? 3px : 0px;
+                            border-color: #5b8cff;
+
+                            Image {
+                                source: tile.image;
+                                image-fit: cover;
+                                width: 100%;
+                                height: 100%;
+                            }
+
+                            TouchArea {
+                                width: 100%;
+                                height: 100%;
+                                // Return keyboard focus to app-keys when the user
+                                // clicks into the grid (e.g. after typing a query),
+                                // so vim/arrow navigation works immediately.
+                                clicked => { root.tile-selected(i); app-keys.focus(); }
+                                double-clicked => { root.tile-activated(i); }
+                                pointer-event(e) => {
+                                    if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                                        root.tile-open-external(i);
+                                    }
+                                }
+                            }
+                        }
+
+                        if root.show-load-more: Button {
+                            x: 0px;
+                            y: root.grid-height + 8px;
+                            text: "Load more";
+                            clicked => { root.load-more(); app-keys.focus(); }
+                        }
+                    }
+                }
+
+                // Detail panel — fixed 340 px, only present when detail-open.
+                if root.detail-open: Rectangle {
+                    width: 340px;
+                    background: #252b3a;
+
+                    // Left border divider rendered as a thin child rectangle.
+                    Rectangle {
+                        x: 0px;
+                        y: 0px;
+                        width: 1px;
+                        height: parent.height;
+                        background: #3a4255;
+                    }
+
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 8px;
+
+                        HorizontalLayout {
+                            alignment: end;
+                            Button {
+                                // U+00D7 (×, Latin-1) renders in Slint's default font;
+                                // the previous ✕ (U+2715) had no glyph and showed as tofu.
+                                text: "×";
+                                clicked => { root.detail-close(); app-keys.focus(); }
+                            }
+                        }
+
+                        Image {
+                            source: root.detail-image;
+                            image-fit: contain;
+                            height: 300px;
+                        }
+
+                        Text {
+                            text: root.detail-filename;
+                            color: #e0e4ed;
+                            font-size: 13px;
+                            wrap: word-wrap;
+                        }
+
+                        Text {
+                            text: root.detail-meta;
+                            color: #9aa4b2;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+
+                        Button {
+                            text: "View full";
+                            // Opens the lightbox for the seed image by path, not by
+                            // grid index, so it stays valid after a similar-search
+                            // replaces the tile grid.
+                            clicked => { root.detail-view-full(); app-keys.focus(); }
+                        }
+
+                        Button {
+                            text: "Search similar";
+                            clicked => { root.search-similar(); app-keys.focus(); }
+                        }
+                    }
                 }
             }
         }
 
-        next-touch := TouchArea {
-            width: 60px;
-            height: 100%;
-            x: root.width - self.width;
-            y: 0;
-            clicked => { root.lightbox-next(); }
+        // --- Lightbox overlay ---
+        // Pure visuals + TouchAreas, NO FocusScope of its own — app-keys'
+        // capture-key-pressed handles Esc / h / l / arrows while it's open.
+        // Nav uses TouchArea (a Button would steal keyboard focus on click).
+        if root.lightbox-open: Rectangle {
+            width: root.width;
+            height: root.height;
+
             Rectangle {
-                background: next-touch.has-hover ? #00000080 : transparent;
+                background: #000000dd;
                 width: 100%;
                 height: 100%;
-                Text {
-                    text: ">";
-                    color: white;
-                    font-size: 28px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
+            }
+
+            // Click anywhere (including the photo) to close. Below the nav arrows
+            // in z-order, so the arrows win their 60px edge strips.
+            TouchArea {
+                width: 100%;
+                height: 100%;
+                clicked => { root.lightbox-close(); }
+            }
+
+            Image {
+                source: root.lightbox-image;
+                image-fit: contain;
+                width: 90%;
+                height: 90%;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+            }
+
+            // Prev / next arrows as TouchAreas pinned to the left/right edges.
+            prev-touch := TouchArea {
+                width: 60px;
+                height: 100%;
+                x: 0;
+                y: 0;
+                clicked => { root.lightbox-prev(); }
+                Rectangle {
+                    background: prev-touch.has-hover ? #00000080 : transparent;
+                    width: 100%;
+                    height: 100%;
+                    // ASCII < / > render in the default font; ‹ › (U+2039/203A) tofu.
+                    Text {
+                        text: "<";
+                        color: white;
+                        font-size: 28px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
                 }
             }
-        }
-    }
 
-    // Default keyboard focus goes to the grid FocusScope so vim/arrow navigation
-    // works as soon as results exist — on initial load and after a filter-driven
-    // browse, not only after a text search's focus pulse. The grid FocusScope
-    // also owns Escape-closes-detail; `main-keys` remains as a fallback handler.
-    forward-focus: grid-focus;
-    main-keys := FocusScope {
-        key-pressed(event) => {
-            if (root.detail-open && !root.lightbox-open && event.text == Key.Escape) {
-                root.detail-close();
-                accept
-            } else {
-                reject
+            next-touch := TouchArea {
+                width: 60px;
+                height: 100%;
+                x: root.width - self.width;
+                y: 0;
+                clicked => { root.lightbox-next(); }
+                Rectangle {
+                    background: next-touch.has-hover ? #00000080 : transparent;
+                    width: 100%;
+                    height: 100%;
+                    Text {
+                        text: ">";
+                        color: white;
+                        font-size: 28px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
             }
         }
     }
