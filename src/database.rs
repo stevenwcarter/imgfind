@@ -1306,6 +1306,62 @@ impl Database {
         Ok(rows)
     }
 
+    /// Fetch [`crate::sort::RowMeta`] for an explicit ordered id list.
+    ///
+    /// Returns one `RowMeta` per id that exists in `images`, in the **same order
+    /// as `ids`**. Ids not found in the database are silently dropped. An empty
+    /// `ids` slice returns an empty `Vec` without touching the database.
+    pub fn rehydrate_rows(&self, ids: &[i64]) -> Result<Vec<crate::sort::RowMeta>> {
+        use std::collections::HashMap;
+
+        use crate::sort::RowMeta;
+
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let sql = format!(
+            "SELECT i.id, i.path, m.file_size
+               FROM images i
+               LEFT JOIN image_metadata m ON m.image_id = i.id
+              WHERE i.id IN ({placeholders})"
+        );
+        let conn = self
+            .pool
+            .get()
+            .context("DB connection for rehydrate_rows")?;
+        let mut stmt = conn.prepare(&sql)?;
+        let found: HashMap<i64, RowMeta> = stmt
+            .query_map(
+                params_from_iter(ids.iter().map(|i| Value::Integer(*i))),
+                |row| {
+                    let id: i64 = row.get(0)?;
+                    let path: String = row.get(1)?;
+                    let size: Option<i64> = row.get(2)?;
+                    Ok((id, path, size))
+                },
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|(id, path, size)| {
+                let ext = path
+                    .rsplit_once('.')
+                    .map(|(_, e)| e.to_lowercase())
+                    .unwrap_or_default();
+                (
+                    id,
+                    RowMeta {
+                        id,
+                        path,
+                        size,
+                        ext,
+                    },
+                )
+            })
+            .collect();
+        Ok(ids.iter().filter_map(|id| found.get(id).cloned()).collect())
+    }
+
     /// Distinct lowercased file extensions present across all indexed image paths.
     ///
     /// The extension is extracted Rust-side (via `rsplit_once('.')`) after
@@ -2302,6 +2358,29 @@ mod tests {
             )
             .unwrap();
         assert_eq!(rows[0].path, "b.jpg");
+        let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
+    }
+
+    // ── rehydrate_rows tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn rehydrate_preserves_order_and_drops_missing() {
+        let (db, _tmp) =
+            test_db_with_rows(&[("a.jpg", Some(1)), ("b.jpg", Some(2)), ("c.jpg", Some(3))]);
+        // ids are 1,2,3 in insert order; request reversed + a missing id 999
+        let want = vec![3i64, 999, 1];
+        let rows = db.rehydrate_rows(&want).unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
+            vec!["c.jpg", "a.jpg"] // 999 dropped, order preserved
+        );
+        let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn rehydrate_empty_is_empty() {
+        let (db, _tmp) = test_db_with_rows(&[("a.jpg", Some(1))]);
+        assert!(db.rehydrate_rows(&[]).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
     }
 }
