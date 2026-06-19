@@ -432,6 +432,9 @@ export component MainWindow inherits Window {
 
         forward-focus: lb-keys;
         lb-keys := FocusScope {
+            // Grab keyboard focus when the lightbox opens; otherwise focus stays
+            // on the grid FocusScope and the lightbox's Esc / h / l do nothing.
+            init => { self.focus(); }
             key-pressed(event) => {
                 if (event.text == Key.Escape) {
                     root.lightbox-close();
@@ -449,9 +452,11 @@ export component MainWindow inherits Window {
         }
     }
 
-    // Top-level key handler: Escape closes the detail panel when the lightbox
-    // is not open (the lightbox's own lb-keys FocusScope owns Escape when open).
-    forward-focus: main-keys;
+    // Default keyboard focus goes to the grid FocusScope so vim/arrow navigation
+    // works as soon as results exist — on initial load and after a filter-driven
+    // browse, not only after a text search's focus pulse. The grid FocusScope
+    // also owns Escape-closes-detail; `main-keys` remains as a fallback handler.
+    forward-focus: grid-focus;
     main-keys := FocusScope {
         key-pressed(event) => {
             if (root.detail-open && !root.lightbox-open && event.text == Key.Escape) {

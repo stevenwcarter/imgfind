@@ -606,10 +606,17 @@ fn main() -> Result<()> {
     {
         let weak = window.as_weak();
         let lb_ref = Arc::clone(&lb_index);
+        let gen_ref = Arc::clone(&lb_generation);
         window.on_lightbox_close(move || {
+            tracing::debug!("lightbox-close invoked");
             *lb_ref.lock().unwrap() = None;
+            // Invalidate any in-flight decode so its completion cannot re-assert
+            // lightbox-open = true and reopen the lightbox we just closed.
+            gen_ref.fetch_add(1, Ordering::SeqCst);
             if let Some(w) = weak.upgrade() {
                 w.set_lightbox_open(false);
+                // Return keyboard focus to the grid so vim/arrow keys resume.
+                w.set_grid_focus_pulse(!w.get_grid_focus_pulse());
             }
         });
     }
@@ -623,6 +630,7 @@ fn main() -> Result<()> {
         let backend_lb = backend.clone();
         let gen_ref = Arc::clone(&lb_generation);
         window.on_lightbox_prev(move || {
+            tracing::debug!("lightbox-prev invoked");
             let new_idx = {
                 let mut guard = lb_ref.lock().unwrap();
                 let current = guard.unwrap_or(0);
@@ -656,6 +664,7 @@ fn main() -> Result<()> {
         let backend_lb = backend.clone();
         let gen_ref = Arc::clone(&lb_generation);
         window.on_lightbox_next(move || {
+            tracing::debug!("lightbox-next invoked");
             let (new_idx, len) = {
                 let s = state_ref.lock().unwrap();
                 let len = s.results.len();
