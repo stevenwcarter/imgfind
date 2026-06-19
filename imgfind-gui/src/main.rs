@@ -19,12 +19,12 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use slint::{Image, ModelRc, SharedString, Timer, TimerMode, VecModel, Weak};
+use slint::{Image, Model, ModelRc, SharedString, Timer, TimerMode, VecModel, Weak};
 
 use backend::Backend;
 use detail::{DetailState, filename_of, format_metadata, select};
 use imgfind::filters::{Filters, GpsFilter};
-use imgfind::sort::RowMeta;
+use imgfind::sort::{RowMeta, Sort, SortDir, SortKey};
 use state::{SearchState, ViewState};
 
 /// Whether the current tile grid was populated by a text search or a
@@ -180,6 +180,10 @@ fn main() -> Result<()> {
     window.set_size_label("Size: all".into());
     window.set_type_chips(build_chips_model(&all_extensions, &HashSet::new()));
     window.set_gps_mode(0);
+    // Sort selector initial state — browse mode: Relevance not available.
+    window.set_sort_options(make_sort_options_model(false));
+    window.set_sort_index(0);
+    window.set_sort_desc(false);
 
     // State shared with background threads via Arc<Mutex<_>>.
     let state: Arc<Mutex<SearchState>> = Arc::new(Mutex::new(SearchState::new()));
@@ -275,7 +279,12 @@ fn main() -> Result<()> {
                         w.set_detail_open(false);
                         w.set_lightbox_open(false);
                         w.set_selected_index(-1);
+                        // Reset sort selector to browse mode (no Relevance option).
+                        w.set_sort_options(make_sort_options_model(false));
+                        w.set_sort_index(0);
+                        w.set_sort_desc(false);
                     }
+                    state_ref.lock().unwrap().sort = Sort::default();
                 } else {
                     // Empty query but filters active — browse with filters.
                     *lb_ref.lock().unwrap() = None;
@@ -817,6 +826,88 @@ fn main() -> Result<()> {
         });
     }
 
+    // --- sort-changed callback: user picked a different sort key ---
+    {
+        let weak = window.as_weak();
+        let state_ref = Arc::clone(&state);
+        let mode_ref = Arc::clone(&search_mode);
+        let filters_ref = Arc::clone(&filters);
+        let selected_ref = Arc::clone(&selected);
+        let grid_gen_ref = Arc::clone(&grid_generation);
+        let backend_sc = backend.clone();
+        window.on_sort_changed(move || {
+            let Some(w) = weak.upgrade() else { return };
+            let idx = w.get_sort_index() as usize;
+            let desc = w.get_sort_desc();
+            let option_str: String = {
+                let model = w.get_sort_options();
+                model
+                    .row_data(idx)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "Name".to_string())
+            };
+            let dir = if desc { SortDir::Desc } else { SortDir::Asc };
+            let mode = mode_ref.lock().unwrap().clone();
+            match mode {
+                SearchMode::Text(q) if q.is_empty() => {
+                    // Browse mode: re-issue the browse query with the new sort.
+                    let sort = Sort {
+                        key: option_str_to_sort_key(&option_str),
+                        dir,
+                    };
+                    state_ref.lock().unwrap().sort = sort;
+                    let current_filters = filters_ref.lock().unwrap().clone();
+                    spawn_browse(
+                        weak.clone(),
+                        Arc::clone(&state_ref),
+                        Arc::clone(&grid_gen_ref),
+                        backend_sc.clone(),
+                        current_filters,
+                        SelectionPolicy {
+                            selected: Arc::clone(&selected_ref),
+                            reset: false,
+                        },
+                    );
+                }
+                _ => {
+                    // Search/similar mode: in-memory resort (no backend round-trip).
+                    {
+                        let mut s = state_ref.lock().unwrap();
+                        if option_str == "Relevance" {
+                            s.resort_to_relevance();
+                            // Keep sort field as default placeholder — Relevance has
+                            // no SortKey equivalent; browse after a clear will reset.
+                            s.sort = Sort::default();
+                        } else {
+                            let sort = Sort {
+                                key: option_str_to_sort_key(&option_str),
+                                dir,
+                            };
+                            s.resort(&sort);
+                        }
+                    }
+                    // Bump generation so the loader timer rebuilds the tile model.
+                    loader::bump_generation(&grid_gen_ref);
+                    // Re-clamp selection to new order length.
+                    let len = state_ref.lock().unwrap().results.len();
+                    apply_selection_after_results(&w, &selected_ref, len, false);
+                }
+            }
+        });
+    }
+
+    // --- sort-dir-toggled callback: user clicked the Asc/Desc button ---
+    {
+        let weak = window.as_weak();
+        window.on_sort_dir_toggled(move || {
+            let Some(w) = weak.upgrade() else { return };
+            let new_desc = !w.get_sort_desc();
+            w.set_sort_desc(new_desc);
+            // Delegate to sort-changed to apply the new direction.
+            w.invoke_sort_changed();
+        });
+    }
+
     // --- moving-window thumbnail loader ---
     //
     // A single background worker decodes/persists thumbnails (one writer to
@@ -1169,6 +1260,7 @@ fn apply_fetch_result(
     grid_gen: Arc<AtomicU64>,
     res: Result<Vec<RowMeta>>,
     sel: SelectionPolicy,
+    is_search: bool,
 ) {
     slint::invoke_from_event_loop(move || {
         let Some(w) = weak.upgrade() else { return };
@@ -1176,7 +1268,12 @@ fn apply_fetch_result(
         let (vs, error_msg, results_len) = {
             let mut s = state_ref.lock().unwrap();
             match res {
-                Ok(rows) => s.apply_results(rows),
+                Ok(rows) => {
+                    if is_search {
+                        s.relevance_order = rows.clone();
+                    }
+                    s.apply_results(rows);
+                }
                 Err(e) => s.apply_error(e.to_string()),
             }
             (s.view_state(), s.error.clone(), s.results.len())
@@ -1196,6 +1293,15 @@ fn apply_fetch_result(
 
         w.set_status(status_text_for(vs, error_msg.as_deref()));
         w.set_can_search(true);
+
+        // Sync sort selector: search/similar results offer Relevance (default);
+        // browse results keep the existing sort options unchanged.
+        if is_search && matches!(vs, ViewState::Results | ViewState::Empty) {
+            w.set_sort_options(make_sort_options_model(true));
+            w.set_sort_index(0); // Relevance selected by default
+            w.set_sort_desc(false);
+            state_ref.lock().unwrap().sort = Sort::default();
+        }
     })
     .ok();
 }
@@ -1216,7 +1322,7 @@ fn spawn_search(
 ) {
     std::thread::spawn(move || {
         let res = backend.search(&query, &filters);
-        apply_fetch_result(weak, state_ref, grid_gen, res, sel);
+        apply_fetch_result(weak, state_ref, grid_gen, res, sel, true);
     });
 }
 
@@ -1236,7 +1342,7 @@ fn spawn_similar(
 ) {
     std::thread::spawn(move || {
         let res = backend.search_similar(&seed_path, &filters);
-        apply_fetch_result(weak, state_ref, grid_gen, res, sel);
+        apply_fetch_result(weak, state_ref, grid_gen, res, sel, true);
     });
 }
 
@@ -1256,7 +1362,7 @@ fn spawn_browse(
     std::thread::spawn(move || {
         let sort = state_ref.lock().unwrap().sort;
         let res = backend.browse(&filters, &sort);
-        apply_fetch_result(weak, state_ref, grid_gen, res, sel);
+        apply_fetch_result(weak, state_ref, grid_gen, res, sel, false);
     });
 }
 
@@ -1348,6 +1454,34 @@ fn load_lightbox_image(
         })
         .ok();
     });
+}
+
+/// Build a `ModelRc<SharedString>` for the sort selector.
+///
+/// When `with_relevance` is `true` (search/similar results), "Relevance" is
+/// prepended as the first option so it is selected by default.  For browse mode
+/// it is omitted because browse results have no relevance ranking.
+fn make_sort_options_model(with_relevance: bool) -> ModelRc<SharedString> {
+    let mut opts: Vec<SharedString> = Vec::new();
+    if with_relevance {
+        opts.push("Relevance".into());
+    }
+    opts.push("Name".into());
+    opts.push("Size".into());
+    opts.push("Type".into());
+    ModelRc::from(Rc::new(VecModel::from(opts)))
+}
+
+/// Map a sort-selector option string to a [`SortKey`].
+///
+/// "Relevance" is handled by the caller before this point; any other unknown
+/// string falls back to `SortKey::Name`.
+fn option_str_to_sort_key(s: &str) -> SortKey {
+    match s {
+        "Size" => SortKey::Size,
+        "Type" => SortKey::Type,
+        _ => SortKey::Name,
+    }
 }
 
 #[cfg(test)]

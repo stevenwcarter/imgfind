@@ -21,6 +21,10 @@ pub struct SearchState {
     pub error: Option<String>,
     /// Active sort order applied to `results`. Defaults to `Sort::default()`.
     pub sort: Sort,
+    /// Snapshot of `results` in relevance (backend) order, captured when a
+    /// search/similar result arrives. Used to restore the original ranking
+    /// when the user selects "Relevance" in the sort selector.
+    pub relevance_order: Vec<RowMeta>,
     has_searched: bool,
 }
 
@@ -56,11 +60,15 @@ impl SearchState {
     }
 
     /// Re-sort the current results in memory and remember the new sort order.
-    // Wiring-pending: invoked by the sort selector (T16).
-    #[allow(dead_code)]
     pub fn resort(&mut self, sort: &Sort) {
         sort_rows(&mut self.results, sort);
         self.sort = *sort;
+    }
+
+    /// Restore `results` to the original relevance (backend) order captured
+    /// when the search/similar result last arrived.
+    pub fn resort_to_relevance(&mut self) {
+        self.results = self.relevance_order.clone();
     }
 
     pub fn view_state(&self) -> ViewState {
@@ -178,6 +186,29 @@ mod tests {
         assert_eq!(
             s.results.iter().map(|r| r.id).collect::<Vec<_>>(),
             vec![2, 1]
+        );
+    }
+
+    #[test]
+    fn resort_to_relevance_restores_original_order() {
+        let mut s = SearchState::new();
+        let rows = vec![rm(1, "z.jpg", Some(2)), rm(2, "a.jpg", Some(1))];
+        s.relevance_order = rows.clone();
+        s.results = rows.clone();
+        s.resort(&Sort {
+            key: SortKey::Name,
+            dir: SortDir::Asc,
+        });
+        // After sort by name ascending: a.jpg (id=2) before z.jpg (id=1)
+        assert_eq!(
+            s.results.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+        // Restore to relevance order (original: z.jpg=1, a.jpg=2)
+        s.resort_to_relevance();
+        assert_eq!(
+            s.results.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![1, 2]
         );
     }
 }
