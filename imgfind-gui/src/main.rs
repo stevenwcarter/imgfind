@@ -1411,12 +1411,16 @@ fn is_current_generation(captured: u64, latest: u64) -> bool {
     captured == latest
 }
 
-/// Load the full-size image for `rel_path` on a background thread, then set the
+/// Load the lightbox image for `rel_path` on a background thread, then set the
 /// lightbox image and open the overlay on the UI thread.
 ///
-/// File I/O and decoding are both off the UI thread so large originals don't
-/// freeze the window. `slint::Image` is non-Send, so it is constructed inside
-/// the `invoke_from_event_loop` closure where we are on the UI thread.
+/// Fetches (or generates and persists) the `LIGHTBOX_SIZE`-pixel cached thumbnail
+/// via the backend, so RAW files are demosaiced at most once per image — subsequent
+/// opens of the same image are served from the DB thumbnail cache.
+///
+/// The thumbnail bytes are decoded to `DynamicImage` on the background thread so a
+/// slow first-time decode never freezes the UI. `slint::Image` is non-Send, so it
+/// is constructed inside the `invoke_from_event_loop` closure on the UI thread.
 ///
 /// `generation` is a shared monotonic counter: this call claims the next value and
 /// only applies its result if no newer lightbox load has been requested in the
@@ -1430,18 +1434,26 @@ fn load_lightbox_image(
 ) {
     let my_gen = generation.fetch_add(1, Ordering::SeqCst) + 1;
     std::thread::spawn(move || {
-        let abs = backend.abs_path(&rel_path);
-        // Full-resolution, RAW-aware, orientation-corrected decode — on this background
-        // thread so a slow RAW demosaic never freezes the UI.
-        let img = match imgfind::decode::decode_full_image(&abs) {
-            Ok(img) => img,
+        // Fetch (or generate+persist) the 2048-pixel thumbnail — on this background
+        // thread so a slow first-time RAW demosaic never freezes the UI.
+        let bytes = match backend.thumbnail(&rel_path, imgfind::thumbnail::LIGHTBOX_SIZE) {
+            Ok(b) => b,
             Err(e) => {
-                tracing::warn!("Lightbox: failed to decode {abs:?}: {e}");
+                tracing::warn!("Lightbox: failed to load thumbnail for {rel_path}: {e}");
                 return;
             }
         };
 
+        // Decode JPEG bytes → DynamicImage here (still off the UI thread).
         // `DynamicImage` is Send; move it to the UI thread and build the (!Send) Image there.
+        let img = match image::load_from_memory(&bytes) {
+            Ok(img) => img,
+            Err(e) => {
+                tracing::warn!("Lightbox: failed to decode thumbnail bytes for {rel_path}: {e}");
+                return;
+            }
+        };
+
         slint::invoke_from_event_loop(move || {
             // Drop this result if a newer lightbox load superseded it while we decoded.
             if !is_current_generation(my_gen, generation.load(Ordering::SeqCst)) {
