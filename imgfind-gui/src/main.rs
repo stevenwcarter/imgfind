@@ -7,7 +7,7 @@ mod state;
 
 use std::collections::HashSet;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -161,6 +161,11 @@ fn main() -> Result<()> {
 
     // Current lightbox index. None when the lightbox is closed.
     let lb_index: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
+
+    // Monotonic counter bumped on every lightbox load request. A background decode
+    // only applies its result if its captured generation is still the latest, so a
+    // slow decode can't land after the user has already navigated to another image.
+    let lb_generation: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
 
     // Currently selected detail image. None when the panel is closed.
     let detail: Arc<Mutex<Option<DetailState>>> = Arc::new(Mutex::new(None));
@@ -401,6 +406,7 @@ fn main() -> Result<()> {
         let state_ref = Arc::clone(&state);
         let lb_ref = Arc::clone(&lb_index);
         let backend_lb = backend.clone();
+        let gen_ref = Arc::clone(&lb_generation);
         window.on_tile_activated(move |index| {
             let idx = index as usize;
             let path = state_ref
@@ -411,7 +417,7 @@ fn main() -> Result<()> {
                 .map(|r| r.path.clone());
             let Some(rel) = path else { return };
             *lb_ref.lock().unwrap() = Some(idx);
-            load_lightbox_image(weak.clone(), backend_lb.clone(), rel);
+            load_lightbox_image(weak.clone(), backend_lb.clone(), rel, gen_ref.clone());
         });
     }
 
@@ -456,6 +462,7 @@ fn main() -> Result<()> {
         let state_ref = Arc::clone(&state);
         let lb_ref = Arc::clone(&lb_index);
         let backend_vf = backend.clone();
+        let gen_ref = Arc::clone(&lb_generation);
         window.on_detail_view_full(move || {
             let seed_path = {
                 let d = detail_ref.lock().unwrap();
@@ -474,7 +481,7 @@ fn main() -> Result<()> {
             };
             *lb_ref.lock().unwrap() = idx;
 
-            load_lightbox_image(weak.clone(), backend_vf.clone(), rel);
+            load_lightbox_image(weak.clone(), backend_vf.clone(), rel, gen_ref.clone());
         });
     }
 
@@ -543,6 +550,7 @@ fn main() -> Result<()> {
         let state_ref = Arc::clone(&state);
         let lb_ref = Arc::clone(&lb_index);
         let backend_lb = backend.clone();
+        let gen_ref = Arc::clone(&lb_generation);
         window.on_lightbox_prev(move || {
             let new_idx = {
                 let mut guard = lb_ref.lock().unwrap();
@@ -558,7 +566,7 @@ fn main() -> Result<()> {
                 .get(new_idx)
                 .map(|r| r.path.clone());
             if let Some(rel) = path {
-                load_lightbox_image(weak.clone(), backend_lb.clone(), rel);
+                load_lightbox_image(weak.clone(), backend_lb.clone(), rel, gen_ref.clone());
             }
         });
     }
@@ -569,6 +577,7 @@ fn main() -> Result<()> {
         let state_ref = Arc::clone(&state);
         let lb_ref = Arc::clone(&lb_index);
         let backend_lb = backend.clone();
+        let gen_ref = Arc::clone(&lb_generation);
         window.on_lightbox_next(move || {
             let (new_idx, len) = {
                 let s = state_ref.lock().unwrap();
@@ -589,7 +598,7 @@ fn main() -> Result<()> {
                 .get(new_idx)
                 .map(|r| r.path.clone());
             if let Some(rel) = path {
-                load_lightbox_image(weak.clone(), backend_lb.clone(), rel);
+                load_lightbox_image(weak.clone(), backend_lb.clone(), rel, gen_ref.clone());
             }
         });
     }
@@ -1010,13 +1019,31 @@ fn clamp_next(current: usize, len: usize) -> usize {
     (current + 1).min(len - 1)
 }
 
+/// True when a background lightbox decode should still be applied: its captured
+/// generation must equal the latest generation requested. A stale (superseded) load
+/// is dropped so a slow decode can't overwrite an image the user has navigated to.
+fn is_current_generation(captured: u64, latest: u64) -> bool {
+    captured == latest
+}
+
 /// Load the full-size image for `rel_path` on a background thread, then set the
 /// lightbox image and open the overlay on the UI thread.
 ///
 /// File I/O and decoding are both off the UI thread so large originals don't
 /// freeze the window. `slint::Image` is non-Send, so it is constructed inside
 /// the `invoke_from_event_loop` closure where we are on the UI thread.
-fn load_lightbox_image(weak: Weak<MainWindow>, backend: Backend, rel_path: String) {
+///
+/// `generation` is a shared monotonic counter: this call claims the next value and
+/// only applies its result if no newer lightbox load has been requested in the
+/// meantime (latest-wins), preventing a slow decode from landing after the user has
+/// already navigated to another image.
+fn load_lightbox_image(
+    weak: Weak<MainWindow>,
+    backend: Backend,
+    rel_path: String,
+    generation: Arc<AtomicU64>,
+) {
+    let my_gen = generation.fetch_add(1, Ordering::SeqCst) + 1;
     std::thread::spawn(move || {
         let abs = backend.abs_path(&rel_path);
         // Full-resolution, RAW-aware, orientation-corrected decode — on this background
@@ -1031,6 +1058,10 @@ fn load_lightbox_image(weak: Weak<MainWindow>, backend: Backend, rel_path: Strin
 
         // `DynamicImage` is Send; move it to the UI thread and build the (!Send) Image there.
         slint::invoke_from_event_loop(move || {
+            // Drop this result if a newer lightbox load superseded it while we decoded.
+            if !is_current_generation(my_gen, generation.load(Ordering::SeqCst)) {
+                return;
+            }
             let Some(w) = weak.upgrade() else { return };
             let slint_img = image_util::dynamic_to_slint_image(&img);
             w.set_lightbox_image(slint_img);
@@ -1064,7 +1095,17 @@ mod arg_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_size_label, clamp_next, clamp_prev, format_bytes, fraction_to_bytes};
+    use super::{
+        build_size_label, clamp_next, clamp_prev, format_bytes, fraction_to_bytes,
+        is_current_generation,
+    };
+
+    #[test]
+    fn latest_generation_applies_stale_is_dropped() {
+        assert!(is_current_generation(3, 3)); // newest request -> apply
+        assert!(!is_current_generation(2, 3)); // superseded by a newer request -> drop
+        assert!(!is_current_generation(1, 5));
+    }
 
     #[test]
     fn clamp_prev_at_zero_stays_zero() {
