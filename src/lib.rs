@@ -14,6 +14,7 @@ pub mod logging;
 pub mod metadata;
 pub mod models;
 pub mod search;
+pub mod sort;
 pub mod thumbnail;
 pub mod tui;
 
