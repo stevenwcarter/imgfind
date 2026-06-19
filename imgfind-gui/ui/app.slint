@@ -397,6 +397,34 @@ export component MainWindow inherits Window {
         height: root.height;
         background: #000000dd;
 
+        forward-focus: lb-keys;
+
+        // Declared FIRST so it sits at the BOTTOM of the z-order. A focused
+        // FocusScope fills its parent and consumes pointer presses, so as the
+        // last child it would cover the overlay and swallow clicks meant for the
+        // < / > buttons and the click-to-close TouchArea (the bug where lightbox
+        // mouse buttons did nothing). Keyboard routing follows focus, not
+        // z-order, so it still receives keys from the bottom.
+        lb-keys := FocusScope {
+            // Grab keyboard focus when the lightbox opens; otherwise focus stays
+            // on the grid FocusScope and the lightbox's Esc / h / l do nothing.
+            init => { self.focus(); }
+            key-pressed(event) => {
+                if (event.text == Key.Escape) {
+                    root.lightbox-close();
+                    accept
+                } else if (event.text == Key.LeftArrow || event.text == "h" || event.text == "H") {
+                    root.lightbox-prev();
+                    accept
+                } else if (event.text == Key.RightArrow || event.text == "l" || event.text == "L") {
+                    root.lightbox-next();
+                    accept
+                } else {
+                    reject
+                }
+            }
+        }
+
         TouchArea {
             width: 100%;
             height: 100%;
@@ -421,33 +449,14 @@ export component MainWindow inherits Window {
                 // ASCII < / > render in Slint's default font; the previous
                 // ‹ › (U+2039/203A) risk showing as tofu like the close button did.
                 text: "<";
-                clicked => { root.lightbox-prev(); }
+                // Re-grab keyboard focus: clicking a Button takes focus, which
+                // would otherwise stop Esc / h / l working after a button click.
+                clicked => { root.lightbox-prev(); lb-keys.focus(); }
             }
 
             Button {
                 text: ">";
-                clicked => { root.lightbox-next(); }
-            }
-        }
-
-        forward-focus: lb-keys;
-        lb-keys := FocusScope {
-            // Grab keyboard focus when the lightbox opens; otherwise focus stays
-            // on the grid FocusScope and the lightbox's Esc / h / l do nothing.
-            init => { self.focus(); }
-            key-pressed(event) => {
-                if (event.text == Key.Escape) {
-                    root.lightbox-close();
-                    accept
-                } else if (event.text == Key.LeftArrow || event.text == "h" || event.text == "H") {
-                    root.lightbox-prev();
-                    accept
-                } else if (event.text == Key.RightArrow || event.text == "l" || event.text == "L") {
-                    root.lightbox-next();
-                    accept
-                } else {
-                    reject
-                }
+                clicked => { root.lightbox-next(); lb-keys.focus(); }
             }
         }
     }
