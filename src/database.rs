@@ -1258,6 +1258,54 @@ impl Database {
         Ok(rows)
     }
 
+    /// Browse **all** matching images in the given sort order, with no LIMIT/OFFSET.
+    ///
+    /// Returns lightweight [`crate::sort::RowMeta`] rows (id, path, size, ext).
+    /// `ext` is derived Rust-side as the lowercased substring after the last `.`
+    /// (empty string when there is no dot), matching [`crate::sort::ext_sql_expr`]
+    /// used for SQL-level ordering.
+    pub fn browse_all(
+        &self,
+        f: &Filters,
+        sort: &crate::sort::Sort,
+    ) -> Result<Vec<crate::sort::RowMeta>> {
+        use crate::sort::RowMeta;
+        let (clause, values) = build_filter_clause(f);
+        let order = crate::sort::order_by_clause(sort);
+        let sql = format!(
+            "SELECT i.id, i.path, m.file_size
+               FROM images i
+               LEFT JOIN image_metadata m ON m.image_id = i.id
+              WHERE 1=1{clause}
+              ORDER BY {order}"
+        );
+        let conn = self.pool.get().context("DB connection for browse_all")?;
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(params_from_iter(values), |row| {
+                let id: i64 = row.get(0)?;
+                let path: String = row.get(1)?;
+                let size: Option<i64> = row.get(2)?;
+                Ok((id, path, size))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|(id, path, size)| {
+                let ext = path
+                    .rsplit_once('.')
+                    .map(|(_, e)| e.to_lowercase())
+                    .unwrap_or_default();
+                RowMeta {
+                    id,
+                    path,
+                    size,
+                    ext,
+                }
+            })
+            .collect();
+        Ok(rows)
+    }
+
     /// Distinct lowercased file extensions present across all indexed image paths.
     ///
     /// The extension is extracted Rust-side (via `rsplit_once('.')`) after
@@ -2155,5 +2203,105 @@ mod tests {
             md.camera_make.is_some() || md.camera_model.is_some() || md.datetime_taken.is_some(),
             "some EXIF field populated"
         );
+    }
+
+    // ── browse_all helpers & tests ────────────────────────────────────────────
+
+    /// Build an isolated test `Database` pre-populated with `(path, file_size)` rows.
+    ///
+    /// Rows are inserted with sequential ids (1, 2, 3 …). An `image_metadata` row is
+    /// always written for each image so the LEFT JOIN sees a match; `file_size` is set
+    /// to the given `Option<i64>` (NULL when `None`).
+    fn test_db_with_rows(rows: &[(&str, Option<i64>)]) -> (Database, std::path::PathBuf) {
+        let db_path = temp_db_path();
+        let db = Database::new(&db_path).expect("create test db");
+        {
+            let conn = db.pool.get().expect("get conn");
+            for (id, (path, size)) in rows.iter().enumerate() {
+                let id = (id + 1) as i64;
+                conn.execute(
+                    "INSERT INTO images (id, path, hash) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![id, path, format!("h{id}")],
+                )
+                .expect("insert image");
+                conn.execute(
+                    "INSERT INTO image_metadata (image_id, file_size) VALUES (?1, ?2)",
+                    rusqlite::params![id, size],
+                )
+                .expect("insert metadata");
+            }
+        }
+        (db, db_path)
+    }
+
+    #[test]
+    fn browse_all_sorts_by_size_then_name_nulls_last() {
+        use crate::filters::Filters;
+        use crate::sort::{Sort, SortDir, SortKey};
+
+        let (db, _tmp) = test_db_with_rows(&[
+            ("b.jpg", Some(10)),
+            ("a.jpg", None),
+            ("c.jpg", Some(10)),
+            ("d.jpg", Some(5)),
+        ]);
+        let rows = db
+            .browse_all(
+                &Filters::default(),
+                &Sort {
+                    key: SortKey::Size,
+                    dir: SortDir::Asc,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
+            vec!["d.jpg", "b.jpg", "c.jpg", "a.jpg"]
+        );
+        let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn browse_all_sorts_by_type_then_name() {
+        use crate::filters::Filters;
+        use crate::sort::{Sort, SortDir, SortKey};
+
+        let (db, _tmp) = test_db_with_rows(&[("z.PNG", None), ("a.png", None), ("m.jpg", None)]);
+        let rows = db
+            .browse_all(
+                &Filters::default(),
+                &Sort {
+                    key: SortKey::Type,
+                    dir: SortDir::Asc,
+                },
+            )
+            .unwrap();
+        // jpg < png; within png, path asc
+        assert_eq!(
+            rows.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
+            vec!["m.jpg", "a.png", "z.PNG"]
+        );
+        // ext is lowercased (derived Rust-side from the raw path)
+        assert_eq!(rows[2].ext, "png");
+        let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn browse_all_name_desc() {
+        use crate::filters::Filters;
+        use crate::sort::{Sort, SortDir, SortKey};
+
+        let (db, _tmp) = test_db_with_rows(&[("a.jpg", None), ("b.jpg", None)]);
+        let rows = db
+            .browse_all(
+                &Filters::default(),
+                &Sort {
+                    key: SortKey::Name,
+                    dir: SortDir::Desc,
+                },
+            )
+            .unwrap();
+        assert_eq!(rows[0].path, "b.jpg");
+        let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
     }
 }
