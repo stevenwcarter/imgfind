@@ -1079,14 +1079,15 @@ fn main() -> Result<()> {
 
 /// Map a [`SortKey`] to its index in the browse-mode sort selector.
 ///
-/// The browse sort options model is `["Name", "Size", "Type"]` (no "Relevance"),
-/// so Name→0, Size→1, Type→2. Used to seed the selector UI at startup and after
-/// returning to browse mode from a search.
+/// The index order is fixed to match `make_sort_options_model(false)`:
+/// `["Name", "Size", "Type"]` → Name=0, Size=1, Type=2.  A future reorder of
+/// that model must keep these indices in sync.
 fn sort_key_to_browse_index(key: SortKey) -> i32 {
+    // Keep in sync with make_sort_options_model(false) = ["Name", "Size", "Type"].
     match key {
+        SortKey::Name => 0,
         SortKey::Size => 1,
         SortKey::Type => 2,
-        SortKey::Name => 0,
     }
 }
 
@@ -1108,8 +1109,15 @@ fn start_default_browse(
     selected_ref: Arc<Mutex<Option<usize>>>,
     sort: Sort,
 ) {
-    // Install the configured sort so spawn_browse reads it from state.
-    state_ref.lock().unwrap().sort = sort;
+    // Install sort and mark has_searched=true so view_state() returns Results
+    // (not Idle) when results arrive, causing apply_fetch_result to call
+    // set_total_items and render the grid. Mirror the pattern used by every
+    // other browse/search caller (lines ~318, ~1217).
+    {
+        let mut s = state_ref.lock().unwrap();
+        s.sort = sort;
+        s.start_search(String::new());
+    }
     // Pre-seed the selection to 0; apply_fetch_result re-clamps it to 0 when
     // results are non-empty (reset=false keeps an in-range index). A freshly
     // opened DB with zero images clears it to None via the filter.
@@ -1434,6 +1442,12 @@ fn apply_fetch_result(
     res: Result<Vec<RowMeta>>,
     sel: SelectionPolicy,
     is_search: bool,
+    // Whether the CLIP model was ready at the moment the background thread
+    // finished. For text/similar searches the model is always ready (can_search
+    // was false until it became ready). For a startup browse that races the
+    // model load, this may be false — in that case leave can_search=false so
+    // the model_timer transition is the sole owner of that flag.
+    model_ready: bool,
 ) {
     slint::invoke_from_event_loop(move || {
         let Some(w) = weak.upgrade() else { return };
@@ -1465,7 +1479,12 @@ fn apply_fetch_result(
         apply_selection_after_results(&w, &sel.selected, results_len, sel.reset);
 
         w.set_status(status_text_for(vs, error_msg.as_deref()));
-        w.set_can_search(true);
+        // Only unlock the search box if the CLIP model is already ready.
+        // For a startup browse that races the model load, the model_timer
+        // is the sole owner of the false→true transition.
+        if model_ready {
+            w.set_can_search(true);
+        }
 
         // Sync sort selector: search/similar results offer Relevance (default);
         // browse results keep the existing sort options unchanged.
@@ -1495,7 +1514,9 @@ fn spawn_search(
 ) {
     std::thread::spawn(move || {
         let res = backend.search(&query, &filters);
-        apply_fetch_result(weak, state_ref, grid_gen, res, sel, true);
+        // Text search requires the model to be ready (can_search was false
+        // until the model became ready), so model_ready is always true here.
+        apply_fetch_result(weak, state_ref, grid_gen, res, sel, true, true);
     });
 }
 
@@ -1515,7 +1536,9 @@ fn spawn_similar(
 ) {
     std::thread::spawn(move || {
         let res = backend.search_similar(&seed_path, &filters);
-        apply_fetch_result(weak, state_ref, grid_gen, res, sel, true);
+        // Similarity search uses stored embeddings (no text model needed), but
+        // the UI only allows it after the model is ready, so model_ready=true.
+        apply_fetch_result(weak, state_ref, grid_gen, res, sel, true, true);
     });
 }
 
@@ -1535,7 +1558,11 @@ fn spawn_browse(
     std::thread::spawn(move || {
         let sort = state_ref.lock().unwrap().sort;
         let res = backend.browse(&filters, &sort);
-        apply_fetch_result(weak, state_ref, grid_gen, res, sel, false);
+        // Check model readiness just before marshalling back to the UI thread.
+        // For the startup browse this races the model load; the model_timer owns
+        // the false→true transition when the model isn't ready yet.
+        let model_ready = backend.model_ready();
+        apply_fetch_result(weak, state_ref, grid_gen, res, sel, false, model_ready);
     });
 }
 
