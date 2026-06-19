@@ -38,6 +38,37 @@ enum SearchMode {
     Similar(String),
 }
 
+/// How the grid selection should be updated after a result set is installed
+/// or reordered.
+enum SelectAfter {
+    /// Clear the selection to `None` (new text/browse that replaces the grid).
+    Clear,
+    /// Re-clamp the prior index to the new length (load-more, similarity).
+    KeepIndex,
+    /// Select index 0 if results are non-empty, else `None` (sort-key change).
+    First,
+    /// Select the row whose `id` equals the given id; `None` id or not found
+    /// yields `None` (sort-direction toggle — follow the item to its new position).
+    ById(Option<i64>),
+}
+
+/// Resolve the post-results selection index.
+///
+/// `prev` is the prior selected index (only used by `KeepIndex`).
+fn resolve_selection(
+    after: &SelectAfter,
+    results: &[RowMeta],
+    prev: Option<usize>,
+) -> Option<usize> {
+    match after {
+        SelectAfter::Clear => None,
+        SelectAfter::KeepIndex => prev.filter(|&i| i < results.len()),
+        SelectAfter::First => (!results.is_empty()).then_some(0),
+        SelectAfter::ById(Some(id)) => results.iter().position(|r| r.id == *id),
+        SelectAfter::ById(None) => None,
+    }
+}
+
 /// Selection-update policy forwarded to the three `spawn_*` helpers.
 ///
 /// Bundling into a struct keeps the helpers under clippy's `too_many_arguments`
@@ -45,11 +76,8 @@ enum SearchMode {
 struct SelectionPolicy {
     /// Shared selection state to update when results land.
     selected: Arc<Mutex<Option<usize>>>,
-    /// If `true`, clear the selection to `None` (new text/browse search that
-    /// replaces the entire grid).  If `false`, re-clamp the stored index to
-    /// the new grid length — leaves it in place when it's still valid, clears
-    /// it when it falls off the end (load-more, similarity searches).
-    reset: bool,
+    /// Controls how the selection is updated when results land.
+    after: SelectAfter,
 }
 
 #[derive(Parser)]
@@ -344,7 +372,7 @@ fn main() -> Result<()> {
                         current_filters,
                         SelectionPolicy {
                             selected: Arc::clone(&selected_ref),
-                            reset: true,
+                            after: SelectAfter::Clear,
                         },
                     );
                 }
@@ -376,7 +404,7 @@ fn main() -> Result<()> {
                 current_filters,
                 SelectionPolicy {
                     selected: Arc::clone(&selected_ref),
-                    reset: true,
+                    after: SelectAfter::Clear,
                 },
             );
         });
@@ -630,7 +658,7 @@ fn main() -> Result<()> {
                 current_filters,
                 SelectionPolicy {
                     selected: Arc::clone(&selected_ref),
-                    reset: false,
+                    after: SelectAfter::KeepIndex,
                 },
             );
         });
@@ -960,75 +988,49 @@ fn main() -> Result<()> {
         let grid_gen_ref = Arc::clone(&grid_generation);
         let backend_sc = backend.clone();
         window.on_sort_changed(move || {
-            let Some(w) = weak.upgrade() else { return };
-            let idx = w.get_sort_index() as usize;
-            let desc = w.get_sort_desc();
-            let option_str: String = {
-                let model = w.get_sort_options();
-                model
-                    .row_data(idx)
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| "Name".to_string())
-            };
-            let dir = if desc { SortDir::Desc } else { SortDir::Asc };
-            let mode = mode_ref.lock().unwrap().clone();
-            match mode {
-                SearchMode::Text(q) if q.is_empty() => {
-                    // Browse mode: re-issue the browse query with the new sort.
-                    let sort = Sort {
-                        key: option_str_to_sort_key(&option_str),
-                        dir,
-                    };
-                    state_ref.lock().unwrap().sort = sort;
-                    let current_filters = filters_ref.lock().unwrap().clone();
-                    spawn_browse(
-                        weak.clone(),
-                        Arc::clone(&state_ref),
-                        Arc::clone(&grid_gen_ref),
-                        backend_sc.clone(),
-                        current_filters,
-                        SelectionPolicy {
-                            selected: Arc::clone(&selected_ref),
-                            reset: false,
-                        },
-                    );
-                }
-                _ => {
-                    // Search/similar mode: in-memory resort (no backend round-trip).
-                    {
-                        let mut s = state_ref.lock().unwrap();
-                        if option_str == "Relevance" {
-                            s.resort_to_relevance();
-                            // Keep sort field as default placeholder — Relevance has
-                            // no SortKey equivalent; browse after a clear will reset.
-                            s.sort = Sort::default();
-                        } else {
-                            let sort = Sort {
-                                key: option_str_to_sort_key(&option_str),
-                                dir,
-                            };
-                            s.resort(&sort);
-                        }
-                    }
-                    // Bump generation so the loader timer rebuilds the tile model.
-                    loader::bump_generation(&grid_gen_ref);
-                    // Re-clamp selection to new order length.
-                    let len = state_ref.lock().unwrap().results.len();
-                    apply_selection_after_results(&w, &selected_ref, len, false);
-                }
-            }
+            apply_sort_change(
+                weak.clone(),
+                Arc::clone(&mode_ref),
+                Arc::clone(&state_ref),
+                Arc::clone(&filters_ref),
+                Arc::clone(&selected_ref),
+                Arc::clone(&grid_gen_ref),
+                backend_sc.clone(),
+                SelectAfter::First,
+            );
         });
     }
 
     // --- sort-dir-toggled callback: user clicked the Asc/Desc button ---
     {
         let weak = window.as_weak();
+        let state_ref = Arc::clone(&state);
+        let mode_ref = Arc::clone(&search_mode);
+        let filters_ref = Arc::clone(&filters);
+        let selected_ref = Arc::clone(&selected);
+        let grid_gen_ref = Arc::clone(&grid_generation);
+        let backend_sc = backend.clone();
         window.on_sort_dir_toggled(move || {
             let Some(w) = weak.upgrade() else { return };
             let new_desc = !w.get_sort_desc();
             w.set_sort_desc(new_desc);
-            // Delegate to sort-changed to apply the new direction.
-            w.invoke_sort_changed();
+            // Capture the currently selected item's id BEFORE the resort,
+            // so we can follow it to its new position after the direction flip.
+            let prev_id: Option<i64> = {
+                let sel = *selected_ref.lock().unwrap();
+                let s = state_ref.lock().unwrap();
+                sel.and_then(|i| s.results.get(i)).map(|r| r.id)
+            };
+            apply_sort_change(
+                weak.clone(),
+                Arc::clone(&mode_ref),
+                Arc::clone(&state_ref),
+                Arc::clone(&filters_ref),
+                Arc::clone(&selected_ref),
+                Arc::clone(&grid_gen_ref),
+                backend_sc.clone(),
+                SelectAfter::ById(prev_id),
+            );
         });
     }
 
@@ -1190,7 +1192,7 @@ fn start_default_browse(
         Filters::default(),
         SelectionPolicy {
             selected: selected_for_policy,
-            reset: false,
+            after: SelectAfter::KeepIndex,
         },
     );
 }
@@ -1512,6 +1514,79 @@ fn start_debounce(
     );
 }
 
+/// Apply a sort change, using `after` to control post-sort selection.
+///
+/// Called by both `on_sort_changed` (key change → `SelectAfter::First`) and
+/// `on_sort_dir_toggled` (direction flip → `SelectAfter::ById(prev_id)`).
+#[allow(clippy::too_many_arguments)]
+fn apply_sort_change(
+    weak: Weak<MainWindow>,
+    mode_ref: Arc<Mutex<SearchMode>>,
+    state_ref: Arc<Mutex<SearchState>>,
+    filters_ref: Arc<Mutex<Filters>>,
+    selected_ref: Arc<Mutex<Option<usize>>>,
+    grid_gen_ref: Arc<AtomicU64>,
+    backend: Backend,
+    after: SelectAfter,
+) {
+    let Some(w) = weak.upgrade() else { return };
+    let idx = w.get_sort_index() as usize;
+    let desc = w.get_sort_desc();
+    let option_str: String = {
+        let model = w.get_sort_options();
+        model
+            .row_data(idx)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "Name".to_string())
+    };
+    let dir = if desc { SortDir::Desc } else { SortDir::Asc };
+    let mode = mode_ref.lock().unwrap().clone();
+    match mode {
+        SearchMode::Text(q) if q.is_empty() => {
+            // Browse mode: re-issue the browse query with the new sort.
+            let sort = Sort {
+                key: option_str_to_sort_key(&option_str),
+                dir,
+            };
+            state_ref.lock().unwrap().sort = sort;
+            let current_filters = filters_ref.lock().unwrap().clone();
+            spawn_browse(
+                weak,
+                state_ref,
+                grid_gen_ref,
+                backend,
+                current_filters,
+                SelectionPolicy {
+                    selected: selected_ref,
+                    after,
+                },
+            );
+        }
+        _ => {
+            // Search/similar mode: in-memory resort (no backend round-trip).
+            {
+                let mut s = state_ref.lock().unwrap();
+                if option_str == "Relevance" {
+                    s.resort_to_relevance();
+                    // Keep sort field as default placeholder — Relevance has
+                    // no SortKey equivalent; browse after a clear will reset.
+                    s.sort = Sort::default();
+                } else {
+                    let sort = Sort {
+                        key: option_str_to_sort_key(&option_str),
+                        dir,
+                    };
+                    s.resort(&sort);
+                }
+            }
+            // Bump generation so the loader timer rebuilds the tile model.
+            loader::bump_generation(&grid_gen_ref);
+            let results = state_ref.lock().unwrap().results.clone();
+            apply_selection_after_results(&w, &selected_ref, &results, &after);
+        }
+    }
+}
+
 /// Called from all three debounce closures after rebuilding `Filters`.
 ///
 /// Reads `search_mode` and either runs a text search, similarity search, or
@@ -1544,7 +1619,7 @@ fn fire_debounced_query(
                 filters,
                 SelectionPolicy {
                     selected: selected_ref,
-                    reset: true,
+                    after: SelectAfter::Clear,
                 },
             );
         }
@@ -1576,7 +1651,7 @@ fn fire_debounced_query(
                 filters,
                 SelectionPolicy {
                     selected: selected_ref,
-                    reset: true,
+                    after: SelectAfter::Clear,
                 },
             );
         }
@@ -1596,7 +1671,7 @@ fn fire_debounced_query(
                 filters,
                 SelectionPolicy {
                     selected: selected_ref,
-                    reset: false,
+                    after: SelectAfter::KeepIndex,
                 },
             );
         }
@@ -1793,7 +1868,7 @@ fn apply_fetch_result(
     slint::invoke_from_event_loop(move || {
         let Some(w) = weak.upgrade() else { return };
 
-        let (vs, error_msg, results_len) = {
+        let (vs, error_msg, results) = {
             let mut s = state_ref.lock().unwrap();
             match res {
                 Ok(rows) => {
@@ -1804,7 +1879,7 @@ fn apply_fetch_result(
                 }
                 Err(e) => s.apply_error(e.to_string()),
             }
-            (s.view_state(), s.error.clone(), s.results.len())
+            (s.view_state(), s.error.clone(), s.results.clone())
         };
 
         // A new result set is installed: bump the generation and clear the
@@ -1814,10 +1889,10 @@ fn apply_fetch_result(
         loader::bump_generation(&grid_gen);
         if matches!(vs, ViewState::Results | ViewState::Empty) {
             w.set_tiles(ModelRc::default());
-            w.set_total_items(results_len as i32);
+            w.set_total_items(results.len() as i32);
         }
 
-        apply_selection_after_results(&w, &sel.selected, results_len, sel.reset);
+        apply_selection_after_results(&w, &sel.selected, &results, &sel.after);
 
         w.set_status(status_text_for(vs, error_msg.as_deref()));
         // Only unlock the search box if the CLIP model is already ready.
@@ -1910,23 +1985,15 @@ fn spawn_browse(
 /// Update the shared grid selection and the Slint `selected-index` property
 /// after a page of results is applied.
 ///
-/// - `reset`: if `true`, clear the selection to `None` / `-1` (new text /
-///   browse search that replaces the grid).  If `false`, re-clamp the stored
-///   index to the new grid length — if it is now out-of-range, clear it;
-///   otherwise leave it (load-more and similarity searches that keep the
-///   highlighted tile visible).
+/// `after` controls the selection strategy; see [`SelectAfter`].
 fn apply_selection_after_results(
     w: &MainWindow,
     selected_ref: &Arc<Mutex<Option<usize>>>,
-    new_len: usize,
-    reset: bool,
+    results: &[RowMeta],
+    after: &SelectAfter,
 ) {
-    let new_sel = if reset {
-        None
-    } else {
-        let cur = *selected_ref.lock().unwrap();
-        cur.filter(|&i| i < new_len)
-    };
+    let prev = *selected_ref.lock().unwrap();
+    let new_sel = resolve_selection(after, results, prev);
     *selected_ref.lock().unwrap() = new_sel;
     w.set_selected_index(new_sel.map(|i| i as i32).unwrap_or(-1));
 }
@@ -2283,5 +2350,80 @@ mod restore_tests {
         // max <= min: any concrete value collapses to the slider extreme.
         assert_eq!(bytes_to_fraction(Some(5), 10, 10, true), 0.0);
         assert_eq!(bytes_to_fraction(Some(5), 10, 10, false), 1.0);
+    }
+}
+
+#[cfg(test)]
+mod sort_sel_tests {
+    use super::{RowMeta, SelectAfter, resolve_selection};
+
+    fn make_row(id: i64) -> RowMeta {
+        RowMeta {
+            id,
+            path: format!("img{id}.jpg"),
+            size: Some(100),
+            ext: "jpg".to_string(),
+        }
+    }
+
+    #[test]
+    fn resolve_clear_is_none() {
+        let rows = vec![make_row(1), make_row(2)];
+        assert_eq!(resolve_selection(&SelectAfter::Clear, &rows, Some(0)), None);
+    }
+
+    #[test]
+    fn resolve_keep_index_in_range() {
+        let rows = vec![make_row(1), make_row(2), make_row(3)];
+        assert_eq!(
+            resolve_selection(&SelectAfter::KeepIndex, &rows, Some(1)),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn resolve_keep_index_out_of_range() {
+        let rows = vec![make_row(1)];
+        assert_eq!(resolve_selection(&SelectAfter::KeepIndex, &rows, Some(5)), None);
+    }
+
+    #[test]
+    fn resolve_keep_index_empty() {
+        assert_eq!(resolve_selection(&SelectAfter::KeepIndex, &[], Some(0)), None);
+    }
+
+    #[test]
+    fn resolve_first_non_empty() {
+        let rows = vec![make_row(10), make_row(20)];
+        assert_eq!(resolve_selection(&SelectAfter::First, &rows, None), Some(0));
+    }
+
+    #[test]
+    fn resolve_first_empty() {
+        assert_eq!(resolve_selection(&SelectAfter::First, &[], None), None);
+    }
+
+    #[test]
+    fn resolve_by_id_found() {
+        let rows = vec![make_row(10), make_row(20), make_row(30)];
+        assert_eq!(
+            resolve_selection(&SelectAfter::ById(Some(20)), &rows, None),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn resolve_by_id_not_found() {
+        let rows = vec![make_row(10), make_row(20)];
+        assert_eq!(
+            resolve_selection(&SelectAfter::ById(Some(99)), &rows, None),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_by_id_none() {
+        let rows = vec![make_row(10)];
+        assert_eq!(resolve_selection(&SelectAfter::ById(None), &rows, None), None);
     }
 }
