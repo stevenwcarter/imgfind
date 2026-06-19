@@ -91,14 +91,27 @@ imgfind-gui                   # or run the GUI binary directly (uses the DB foun
 imgfind-gui --dir ~/Pictures  # --dir / -d target a specific directory's database
 ```
 
-The GUI shows a search box; press Enter to run a query. Results appear as a scrollable thumbnail grid. Click a thumbnail to open a lightbox (prev/next navigation, Esc to close); right-click a thumbnail to open the original file in the OS viewer. Use "Load more" to page through additional results. Note: the map view is not yet ported to the GUI.
+The GUI launches directly into a browse-all view (or restores the previous session). Results appear as a **virtualized scrollable grid** — the full result set is held in memory and only a bounded window of tiles is decoded at a time, so scrolling stays smooth over arbitrarily large libraries. Thumbnails are generated and persisted on first view; subsequent views load instantly.
+
+A **sort selector** beside the filter bar lets you order by Name, Size, or Type (with an asc/desc toggle); while a semantic query is active, Relevance is also offered. Browse re-queries the DB; search re-sorts in memory.
+
+Click a thumbnail to open a **detail panel** on the right (512px thumbnail + metadata + "Search similar"). Double-click (or "View full") opens the full-screen **lightbox** (prev/next navigation, Esc to close); the lightbox uses a persisted 2048px cached thumbnail. Right-click a thumbnail to open the original file in the OS viewer.
+
+Keyboard navigation: `h/j/k/l` or arrow keys move the selection; `Enter` opens the detail panel; `Space` opens the lightbox; `Esc` closes the panel.
+
+Note: the map view is not yet ported to the GUI.
 
 ### 5. Generate Thumbnails
 
 Generate thumbnails in batches (also done automatically during indexing unless `--no-thumbnails`):
 ```bash
-imgfind thumbnails --size 300 --count 50
+imgfind thumbnails                    # generate missing 300px thumbnails (default, batch of 50)
+imgfind thumbnails --size 300 --size 512 --size 2048  # one or more explicit sizes
+imgfind thumbnails --gui-sizes        # shorthand for all three GUI sizes (300, 512, 2048)
+imgfind thumbnails --gui-sizes --count 200  # larger batch per size
 ```
+
+The GUI uses three thumbnail sizes: **300px** (grid tiles), **512px** (detail panel), and **2048px** (lightbox/preview, long-edge). All three are persisted in the DB so repeat views load instantly. Pass `--gui-sizes` to pre-generate all three before the first launch to avoid per-image decode on first view.
 
 ### 6. Manage Embedding Models
 
@@ -182,6 +195,11 @@ batch_size = 32          # images embedded per CLIP batch
 [search]
 distance_threshold = 1.3 # max cosine distance to include (lower = stricter)
 max_k = 100              # upper bound on the vec0 `k` result-set ceiling
+
+[gui]
+preload_neighbors = 2        # neighbors to preload when lightbox/detail panel opens (default 2)
+default_sort = "name"        # initial sort for browse-all: "name" | "size" | "type"
+default_sort_direction = "asc"  # "asc" | "desc"
 ```
 
 Manage ignore patterns from the CLI:
