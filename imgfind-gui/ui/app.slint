@@ -58,10 +58,6 @@ export component MainWindow inherits Window {
     // Keyboard-navigation selection: index into `tiles` of the highlighted tile,
     // or -1 for none. Driven by Rust (mouse click + grid-nav handler).
     in property <int> selected-index: -1;
-    // Written by Rust after results land. No longer drives focus (the single
-    // app-keys scope owns the keyboard); kept so the Rust call sites compile.
-    in property <bool> grid-focus-pulse;
-
     // dir encoding: 0=Left, 1=Right, 2=Up, 3=Down. Second arg is the live column count.
     callback grid-nav(int, int);
     callback grid-open-detail();

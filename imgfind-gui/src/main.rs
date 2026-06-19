@@ -43,10 +43,6 @@ struct SelectionPolicy {
     /// the new grid length — leaves it in place when it's still valid, clears
     /// it when it falls off the end (load-more, similarity searches).
     reset: bool,
-    /// If `true`, toggle `grid-focus-pulse` so the grid `FocusScope` re-grabs
-    /// keyboard focus.  `false` for load-more to avoid yanking focus while the
-    /// user may be scrolling.
-    pulse: bool,
 }
 
 #[derive(Parser)]
@@ -285,7 +281,6 @@ fn main() -> Result<()> {
                         SelectionPolicy {
                             selected: Arc::clone(&selected_ref),
                             reset: true,
-                            pulse: true,
                         },
                     );
                 }
@@ -319,7 +314,6 @@ fn main() -> Result<()> {
                 SelectionPolicy {
                     selected: Arc::clone(&selected_ref),
                     reset: true,
-                    pulse: true,
                 },
             );
         });
@@ -356,7 +350,6 @@ fn main() -> Result<()> {
                         SelectionPolicy {
                             selected: Arc::clone(&selected_ref),
                             reset: false,
-                            pulse: false,
                         },
                     );
                 }
@@ -371,7 +364,6 @@ fn main() -> Result<()> {
                         SelectionPolicy {
                             selected: Arc::clone(&selected_ref),
                             reset: false,
-                            pulse: false,
                         },
                     );
                 }
@@ -386,7 +378,6 @@ fn main() -> Result<()> {
                         SelectionPolicy {
                             selected: Arc::clone(&selected_ref),
                             reset: false,
-                            pulse: false,
                         },
                     );
                 }
@@ -600,7 +591,6 @@ fn main() -> Result<()> {
                 SelectionPolicy {
                     selected: Arc::clone(&selected_ref),
                     reset: false,
-                    pulse: true,
                 },
             );
         });
@@ -612,15 +602,14 @@ fn main() -> Result<()> {
         let lb_ref = Arc::clone(&lb_index);
         let gen_ref = Arc::clone(&lb_generation);
         window.on_lightbox_close(move || {
-            tracing::info!("lightbox-close invoked");
+            tracing::debug!("lightbox-close invoked");
             *lb_ref.lock().unwrap() = None;
             // Invalidate any in-flight decode so its completion cannot re-assert
             // lightbox-open = true and reopen the lightbox we just closed.
             gen_ref.fetch_add(1, Ordering::SeqCst);
             if let Some(w) = weak.upgrade() {
                 w.set_lightbox_open(false);
-                // Return keyboard focus to the grid so vim/arrow keys resume.
-                w.set_grid_focus_pulse(!w.get_grid_focus_pulse());
+                // Keyboard focus returns to the grid via the app-keys capture scope.
             }
         });
     }
@@ -634,7 +623,7 @@ fn main() -> Result<()> {
         let backend_lb = backend.clone();
         let gen_ref = Arc::clone(&lb_generation);
         window.on_lightbox_prev(move || {
-            tracing::info!("lightbox-prev invoked");
+            tracing::debug!("lightbox-prev invoked");
             let new_idx = {
                 let mut guard = lb_ref.lock().unwrap();
                 let current = guard.unwrap_or(0);
@@ -668,7 +657,7 @@ fn main() -> Result<()> {
         let backend_lb = backend.clone();
         let gen_ref = Arc::clone(&lb_generation);
         window.on_lightbox_next(move || {
-            tracing::info!("lightbox-next invoked");
+            tracing::debug!("lightbox-next invoked");
             let (new_idx, len) = {
                 let s = state_ref.lock().unwrap();
                 let len = s.results.len();
@@ -925,8 +914,7 @@ fn start_debounce(
 ///
 /// Reads `search_mode` and either runs a text search, similarity search, or
 /// browse, starting from offset 0.  The filter change is treated as a fresh
-/// search (reset for text/browse, re-clamp for similar), with a focus pulse so
-/// the grid FocusScope re-grabs keyboard focus when results land.
+/// search (reset for text/browse, re-clamp for similar).
 fn fire_debounced_query(
     weak: Weak<MainWindow>,
     state_ref: Arc<Mutex<SearchState>>,
@@ -954,7 +942,6 @@ fn fire_debounced_query(
                 SelectionPolicy {
                     selected: selected_ref,
                     reset: true,
-                    pulse: true,
                 },
             );
         }
@@ -986,7 +973,6 @@ fn fire_debounced_query(
                 SelectionPolicy {
                     selected: selected_ref,
                     reset: true,
-                    pulse: true,
                 },
             );
         }
@@ -1008,7 +994,6 @@ fn fire_debounced_query(
                 SelectionPolicy {
                     selected: selected_ref,
                     reset: false,
-                    pulse: true,
                 },
             );
         }
@@ -1094,7 +1079,7 @@ fn spawn_search(
                 w.set_tiles(model);
             }
 
-            apply_selection_after_results(&w, &sel.selected, results.len(), sel.reset, sel.pulse && !results.is_empty());
+            apply_selection_after_results(&w, &sel.selected, results.len(), sel.reset);
 
             w.set_status(status_text_for(vs, error_msg.as_deref()));
             w.set_show_load_more(has_more && vs == ViewState::Results);
@@ -1153,7 +1138,7 @@ fn spawn_similar(
                 w.set_tiles(model);
             }
 
-            apply_selection_after_results(&w, &sel.selected, results.len(), sel.reset, sel.pulse && !results.is_empty());
+            apply_selection_after_results(&w, &sel.selected, results.len(), sel.reset);
 
             w.set_status(status_text_for(vs, error_msg.as_deref()));
             w.set_show_load_more(has_more && vs == ViewState::Results);
@@ -1209,7 +1194,7 @@ fn spawn_browse(
                 w.set_tiles(model);
             }
 
-            apply_selection_after_results(&w, &sel.selected, results.len(), sel.reset, sel.pulse && !results.is_empty());
+            apply_selection_after_results(&w, &sel.selected, results.len(), sel.reset);
 
             w.set_status(status_text_for(vs, error_msg.as_deref()));
             w.set_show_load_more(has_more && vs == ViewState::Results);
@@ -1227,15 +1212,11 @@ fn spawn_browse(
 ///   index to the new grid length — if it is now out-of-range, clear it;
 ///   otherwise leave it (load-more and similarity searches that keep the
 ///   highlighted tile visible).
-/// - `pulse`: if `true`, toggle `grid-focus-pulse` so the grid `FocusScope`
-///   re-grabs keyboard focus.  Pass `false` for load-more to avoid yanking
-///   focus while the user may be scrolling.
 fn apply_selection_after_results(
     w: &MainWindow,
     selected_ref: &Arc<Mutex<Option<usize>>>,
     new_len: usize,
     reset: bool,
-    pulse: bool,
 ) {
     let new_sel = if reset {
         None
@@ -1245,9 +1226,6 @@ fn apply_selection_after_results(
     };
     *selected_ref.lock().unwrap() = new_sel;
     w.set_selected_index(new_sel.map(|i| i as i32).unwrap_or(-1));
-    if pulse {
-        w.set_grid_focus_pulse(!w.get_grid_focus_pulse());
-    }
 }
 
 /// Previous lightbox index, clamped at 0 (no wrap).
