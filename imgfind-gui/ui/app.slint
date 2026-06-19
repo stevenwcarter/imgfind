@@ -1,10 +1,11 @@
-import { LineEdit, Button, ScrollView } from "std-widgets.slint";
+import { LineEdit, Button, ScrollView, ComboBox } from "std-widgets.slint";
 import { RangeSlider } from "range_slider.slint";
 
 export struct Tile {
     path: string,
     image: image,
     size-kb: int,
+    index: int,
 }
 
 export component MainWindow inherits Window {
@@ -15,9 +16,13 @@ export component MainWindow inherits Window {
 
     // Properties set from Rust.
     in property <[Tile]> tiles;
+    in property <int> total-items;
     in property <string> status;
-    in property <bool> show-load-more;
     in property <bool> can-search: false;
+    // Two-way-bound to the search field's text so Rust can pre-fill it on
+    // session restore. Setting it does NOT trigger `search` — that callback
+    // fires only on the LineEdit's `accepted` (Enter).
+    in-out property <string> query-text;
 
     // Lightbox state set from Rust.
     in property <bool> lightbox-open: false;
@@ -40,7 +45,6 @@ export component MainWindow inherits Window {
     in property <int> gps-mode: 0;
 
     callback search(string);
-    callback load-more();
     callback tile-selected(int);
     callback tile-activated(int);
     callback tile-open-external(int);
@@ -54,6 +58,14 @@ export component MainWindow inherits Window {
     callback filters-changed();
     callback ext-toggled(string);
     callback gps-mode-changed(int);
+
+    // Sort selector (set from Rust; see sort-changed / sort-dir-toggled callbacks).
+    // ASCII "Asc"/"Desc" for the direction button — no arrow glyphs (tofu in Slint's default font).
+    in property <[string]> sort-options;
+    in-out property <int> sort-index: 0;
+    in property <bool> sort-desc: false;
+    callback sort-changed();
+    callback sort-dir-toggled();
 
     // Keyboard-navigation selection: index into `tiles` of the highlighted tile,
     // or -1 for none. Driven by Rust (mouse click + grid-nav handler).
@@ -69,10 +81,20 @@ export component MainWindow inherits Window {
     private property <length> tile-stride: tile-size + tile-gap;
     // Number of columns that fit in the grid area (not root width — the panel
     // narrows the available space when open, so we bind to grid-area.width).
-    private property <int> cols: max(1, floor((grid-area.width - 16px) / tile-stride));
-    // Total grid height: enough rows * stride.
-    private property <int> row-count: ceil(tiles.length / cols);
+    // Exposed as `out` so Rust can read it for the T14 windowed loader.
+    out property <int> cols: max(1, floor((grid-area.width - 16px) / tile-stride));
+    // Total grid height: driven by total-items (full result set), not tiles.length
+    // (the capped render window), so the scrollbar spans the complete library.
+    private property <int> row-count: ceil(root.total-items / cols);
     private property <length> grid-height: row-count * tile-stride;
+    // Scroll offset exposed for the T14 viewport-driven window loader, two-way
+    // bound to the ScrollView below so Rust can ALSO restore it on session
+    // launch (T20). NOTE the sign: viewport-y is <= 0 and grows MORE NEGATIVE as
+    // you scroll down, so the Rust side negates it (`scroll_px = (-vy).max(0)`).
+    in-out property <length> grid-viewport-y;
+    // Visible height of the scroll viewport, for the T14 windowed loader's
+    // `visible_rows` computation.
+    out property <length> grid-viewport-h: grid-scroll.visible-height;
 
     // ALL keyboard shortcuts live in ONE place: the single `app-keys` FocusScope
     // below, which wraps the whole window and uses `capture-key-pressed`. Slint
@@ -165,6 +187,7 @@ export component MainWindow inherits Window {
             HorizontalLayout {
                 spacing: 8px;
                 search-input := LineEdit {
+                    text <=> root.query-text;
                     placeholder-text: root.can-search ? "Search images..." : "Loading model...";
                     enabled: root.can-search;
                     // Return focus to app-keys after submitting so grid keys work.
@@ -295,6 +318,43 @@ export component MainWindow inherits Window {
                 }
             }
 
+            // --- Sort bar ---
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                Text {
+                    text: "Sort:";
+                    color: #9aa4b2;
+                    vertical-alignment: center;
+                }
+                ComboBox {
+                    model: root.sort-options;
+                    current-index <=> root.sort-index;
+                    selected(_) => { root.sort-changed(); }
+                }
+                // ASCII "Asc"/"Desc" — no arrow glyphs (tofu in the default Slint font).
+                sort-dir-btn := TouchArea {
+                    width: sort-dir-text.preferred-width + 16px;
+                    height: 28px;
+                    clicked => { root.sort-dir-toggled(); }
+                    Rectangle {
+                        background: sort-dir-btn.has-hover ? #3a4a65 : #2d3446;
+                        border-radius: 4px;
+                        border-width: 1px;
+                        border-color: #3a4255;
+                        width: 100%;
+                        height: 100%;
+                        sort-dir-text := Text {
+                            text: root.sort-desc ? "Desc" : "Asc";
+                            color: #e0e4ed;
+                            font-size: 13px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+
             Text {
                 text: root.status;
                 color: #9aa4b2;
@@ -313,18 +373,22 @@ export component MainWindow inherits Window {
                     grid-scroll := ScrollView {
                         width: 100%;
                         height: 100%;
-                        viewport-height: root.grid-height + (root.show-load-more ? 60px : 0px);
+                        viewport-height: root.grid-height;
                         viewport-width: root.cols * root.tile-stride;
+                        viewport-y <=> root.grid-viewport-y;
 
-                        for tile[i] in root.tiles: Rectangle {
-                            x: mod(i, root.cols) * root.tile-stride;
-                            y: floor(i / root.cols) * root.tile-stride;
+                        for tile in root.tiles: Rectangle {
+                            // Position by global index so the tile lands in the
+                            // correct row/col even when the window doesn't start
+                            // at 0 (T14 will deliver a non-zero-offset slice).
+                            x: mod(tile.index, root.cols) * root.tile-stride;
+                            y: floor(tile.index / root.cols) * root.tile-stride;
                             width: root.tile-size;
                             height: root.tile-size;
                             border-radius: 6px;
                             clip: true;
                             background: #2d3446;
-                            border-width: i == root.selected-index ? 3px : 0px;
+                            border-width: tile.index == root.selected-index ? 3px : 0px;
                             border-color: #5b8cff;
 
                             Image {
@@ -340,21 +404,14 @@ export component MainWindow inherits Window {
                                 // Return keyboard focus to app-keys when the user
                                 // clicks into the grid (e.g. after typing a query),
                                 // so vim/arrow navigation works immediately.
-                                clicked => { root.tile-selected(i); app-keys.focus(); }
-                                double-clicked => { root.tile-activated(i); }
+                                clicked => { root.tile-selected(tile.index); app-keys.focus(); }
+                                double-clicked => { root.tile-activated(tile.index); }
                                 pointer-event(e) => {
                                     if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
-                                        root.tile-open-external(i);
+                                        root.tile-open-external(tile.index);
                                     }
                                 }
                             }
-                        }
-
-                        if root.show-load-more: Button {
-                            x: 0px;
-                            y: root.grid-height + 8px;
-                            text: "Load more";
-                            clicked => { root.load-more(); app-keys.focus(); }
                         }
                     }
                 }

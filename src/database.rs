@@ -1,4 +1,5 @@
 use crate::filters::{Filters, build_filter_clause};
+use crate::ui_state::UiState;
 use crate::{AbsolutePath, RelativePath, get_db_parent_dir};
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose};
@@ -26,6 +27,11 @@ pub struct Database {
 const MAX_JITTER: f64 = 0.000001;
 
 pub type ImageSearchResult = Result<Vec<(String, f32, Option<Vec<u8>>)>>;
+
+/// One ranked metadata-search row: `(image id, relative path, distance,
+/// file_size)`. The `id` lets callers build stable [`crate::sort::RowMeta`]
+/// rows from ranked (relevance-ordered) results.
+pub type RankedMetaRow = (i64, String, f32, Option<i64>);
 
 impl Database {
     pub fn new(db_path: &Path) -> Result<Self> {
@@ -77,9 +83,47 @@ impl Database {
             .context("wal_checkpoint(RESTART)")?;
         Ok(())
     }
+
+    /// Retrieve the persisted GUI session state from the `ui_state` table.
+    ///
+    /// Returns `Ok(None)` when no row exists yet, and also when the stored JSON
+    /// cannot be deserialised (e.g. after a schema evolution that changed field
+    /// types). In the latter case a `tracing::warn!` is emitted so the problem
+    /// is visible in logs without crashing the GUI.
+    pub fn get_ui_state(&self) -> Result<Option<UiState>> {
+        let conn = self.pool.get().context("DB connection for get_ui_state")?;
+        let json: Option<String> = conn
+            .query_row("SELECT state_json FROM ui_state WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        match json {
+            None => Ok(None),
+            Some(s) => match serde_json::from_str::<UiState>(&s) {
+                Ok(st) => Ok(Some(st)),
+                Err(e) => {
+                    tracing::warn!("discarding unreadable ui_state: {e}");
+                    Ok(None)
+                }
+            },
+        }
+    }
+
+    /// Persist the GUI session state as a single JSON blob (UPSERT on `id = 1`).
+    pub fn set_ui_state(&self, state: &UiState) -> Result<()> {
+        let json = serde_json::to_string(state).context("serialize ui_state")?;
+        let conn = self.pool.get().context("DB connection for set_ui_state")?;
+        conn.execute(
+            "INSERT INTO ui_state (id, state_json, updated_at)
+             VALUES (1, ?1, CURRENT_TIMESTAMP)
+             ON CONFLICT(id) DO UPDATE SET state_json = ?1, updated_at = CURRENT_TIMESTAMP",
+            params![json],
+        )?;
+        Ok(())
+    }
 }
 
-const LATEST_MIGRATION_VERSION: i32 = 2;
+const LATEST_MIGRATION_VERSION: i32 = 3;
 
 /// Apply any pending schema migrations, gated by SQLite's `PRAGMA user_version`.
 ///
@@ -94,6 +138,9 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     }
     if current < 2 {
         migration_002_models_and_userdata(conn).context("migration 2")?;
+    }
+    if current < 3 {
+        migration_003_ui_state(conn).context("migration 3 (ui_state)")?;
     }
     if current < LATEST_MIGRATION_VERSION {
         conn.execute_batch(&format!(
@@ -113,6 +160,18 @@ fn migration_002_models_and_userdata(conn: &Connection) -> Result<()> {
          CREATE TABLE IF NOT EXISTS image_tags (image_id INTEGER NOT NULL, tag_id INTEGER NOT NULL, PRIMARY KEY(image_id, tag_id), FOREIGN KEY(image_id) REFERENCES images(id) ON DELETE CASCADE, FOREIGN KEY(tag_id) REFERENCES tags(id) ON DELETE CASCADE);
          CREATE TABLE IF NOT EXISTS collections (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
          CREATE TABLE IF NOT EXISTS collection_images (collection_id INTEGER NOT NULL, image_id INTEGER NOT NULL, PRIMARY KEY(collection_id, image_id), FOREIGN KEY(collection_id) REFERENCES collections(id) ON DELETE CASCADE, FOREIGN KEY(image_id) REFERENCES images(id) ON DELETE CASCADE);",
+    )?;
+    Ok(())
+}
+
+/// Migration 3: single-row persisted GUI session state (JSON blob).
+fn migration_003_ui_state(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS ui_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            state_json TEXT NOT NULL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );",
     )?;
     Ok(())
 }
@@ -764,9 +823,11 @@ impl Database {
         Ok(search_results)
     }
 
-    /// Metadata-first search: returns (relative path, distance, file_size) with
-    /// no thumbnail join. Joins `image_metadata` for `file_size`. Mirrors the
-    /// embedding-binding + execution idiom of `search_similar_images_with_raw_blob`.
+    /// Metadata-first search: returns `(image id, relative path, distance,
+    /// file_size)` with no thumbnail join. Joins `image_metadata` for
+    /// `file_size`. Mirrors the embedding-binding + execution idiom of
+    /// `search_similar_images_with_raw_blob`. The `id` lets callers build stable
+    /// [`crate::sort::RowMeta`] rows from ranked results.
     pub fn search_similar_images_meta(
         &self,
         query_embedding: &[f32],
@@ -775,7 +836,7 @@ impl Database {
         distance_threshold: f32,
         max_k: usize,
         filters: &Filters,
-    ) -> Result<Vec<(String, f32, Option<i64>)>> {
+    ) -> Result<Vec<RankedMetaRow>> {
         // k must cover offset+limit AFTER filtering; raise to max_k so a full
         // page can survive post-MATCH filtering. `k` and the distance threshold
         // are interpolated as the vec0 MATCH/k syntax requires literal values
@@ -786,7 +847,7 @@ impl Database {
         let (clause, fvalues) = build_filter_clause(filters);
 
         let query = format!(
-            "SELECT i.path, v.distance, m.file_size
+            "SELECT i.id, i.path, v.distance, m.file_size
                FROM {vt} v
                JOIN images i ON i.id = v.rowid
                LEFT JOIN image_metadata m ON m.image_id = i.id
@@ -810,9 +871,10 @@ impl Database {
         values.extend(fvalues);
         let results = stmt.query_map(params_from_iter(values), |row| {
             Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, f32>(1)?,
-                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, f32>(2)?,
+                row.get::<_, Option<i64>>(3)?,
             ))
         })?;
 
@@ -827,7 +889,7 @@ impl Database {
     /// Find images similar to an already-indexed image, using its STORED
     /// embedding from the active model's vec0 table (no re-embedding). The seed
     /// itself is typically the nearest neighbour (distance ~0); callers may filter
-    /// it out. Returns `(relative_path, distance, file_size)` rows.
+    /// it out. Returns `(image id, relative_path, distance, file_size)` rows.
     pub fn find_similar_to_path(
         &self,
         path: &RelativePath,
@@ -836,7 +898,7 @@ impl Database {
         distance_threshold: f32,
         max_k: usize,
         filters: &crate::filters::Filters,
-    ) -> Result<Vec<(String, f32, Option<i64>)>> {
+    ) -> Result<Vec<RankedMetaRow>> {
         let vt = self.vectors_table()?;
         let rel = path.as_str();
         let conn = self
@@ -1256,6 +1318,110 @@ impl Database {
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// Browse **all** matching images in the given sort order, with no LIMIT/OFFSET.
+    ///
+    /// Returns lightweight [`crate::sort::RowMeta`] rows (id, path, size, ext).
+    /// `ext` is derived Rust-side as the lowercased substring after the last `.`
+    /// (empty string when there is no dot), matching [`crate::sort::ext_sql_expr`]
+    /// used for SQL-level ordering.
+    pub fn browse_all(
+        &self,
+        f: &Filters,
+        sort: &crate::sort::Sort,
+    ) -> Result<Vec<crate::sort::RowMeta>> {
+        use crate::sort::RowMeta;
+        let (clause, values) = build_filter_clause(f);
+        let order = crate::sort::order_by_clause(sort);
+        let sql = format!(
+            "SELECT i.id, i.path, m.file_size
+               FROM images i
+               LEFT JOIN image_metadata m ON m.image_id = i.id
+              WHERE 1=1{clause}
+              ORDER BY {order}"
+        );
+        let conn = self.pool.get().context("DB connection for browse_all")?;
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(params_from_iter(values), |row| {
+                let id: i64 = row.get(0)?;
+                let path: String = row.get(1)?;
+                let size: Option<i64> = row.get(2)?;
+                Ok((id, path, size))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|(id, path, size)| {
+                let ext = path
+                    .rsplit_once('.')
+                    .map(|(_, e)| e.to_lowercase())
+                    .unwrap_or_default();
+                RowMeta {
+                    id,
+                    path,
+                    size,
+                    ext,
+                }
+            })
+            .collect();
+        Ok(rows)
+    }
+
+    /// Fetch [`crate::sort::RowMeta`] for an explicit ordered id list.
+    ///
+    /// Returns one `RowMeta` per id that exists in `images`, in the **same order
+    /// as `ids`**. Ids not found in the database are silently dropped. An empty
+    /// `ids` slice returns an empty `Vec` without touching the database.
+    pub fn rehydrate_rows(&self, ids: &[i64]) -> Result<Vec<crate::sort::RowMeta>> {
+        use std::collections::HashMap;
+
+        use crate::sort::RowMeta;
+
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let sql = format!(
+            "SELECT i.id, i.path, m.file_size
+               FROM images i
+               LEFT JOIN image_metadata m ON m.image_id = i.id
+              WHERE i.id IN ({placeholders})"
+        );
+        let conn = self
+            .pool
+            .get()
+            .context("DB connection for rehydrate_rows")?;
+        let mut stmt = conn.prepare(&sql)?;
+        let found: HashMap<i64, RowMeta> = stmt
+            .query_map(
+                params_from_iter(ids.iter().map(|i| Value::Integer(*i))),
+                |row| {
+                    let id: i64 = row.get(0)?;
+                    let path: String = row.get(1)?;
+                    let size: Option<i64> = row.get(2)?;
+                    Ok((id, path, size))
+                },
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|(id, path, size)| {
+                let ext = path
+                    .rsplit_once('.')
+                    .map(|(_, e)| e.to_lowercase())
+                    .unwrap_or_default();
+                (
+                    id,
+                    RowMeta {
+                        id,
+                        path,
+                        size,
+                        ext,
+                    },
+                )
+            })
+            .collect();
+        Ok(ids.iter().filter_map(|id| found.get(id).cloned()).collect())
     }
 
     /// Distinct lowercased file extensions present across all indexed image paths.
@@ -1719,8 +1885,8 @@ mod tests {
         assert_eq!(page1.len(), 4, "page 1 should be full");
         assert_eq!(page2.len(), 4, "page 2 should return the next slice");
 
-        let p1_paths: Vec<&str> = page1.iter().map(|(p, ..)| p.as_str()).collect();
-        let p2_paths: Vec<&str> = page2.iter().map(|(p, ..)| p.as_str()).collect();
+        let p1_paths: Vec<&str> = page1.iter().map(|(_, p, ..)| p.as_str()).collect();
+        let p2_paths: Vec<&str> = page2.iter().map(|(_, p, ..)| p.as_str()).collect();
         assert_eq!(p1_paths, ["img1.jpg", "img2.jpg", "img3.jpg", "img4.jpg"]);
         assert_eq!(p2_paths, ["img5.jpg", "img6.jpg", "img7.jpg", "img8.jpg"]);
 
@@ -1963,7 +2129,7 @@ mod tests {
                 &crate::filters::Filters::default(),
             )
             .expect("similar");
-        let paths: Vec<&str> = rows.iter().map(|(p, _, _)| p.as_str()).collect();
+        let paths: Vec<&str> = rows.iter().map(|(_, p, _, _)| p.as_str()).collect();
         assert!(
             paths.contains(&"a.jpg"),
             "seed should appear among neighbours"
@@ -1973,7 +2139,7 @@ mod tests {
             "other image should appear among neighbours"
         );
         // a.jpg (the seed) is closest to itself.
-        assert_eq!(rows[0].0, "a.jpg");
+        assert_eq!(rows[0].1, "a.jpg");
 
         let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
     }
@@ -2128,7 +2294,7 @@ mod tests {
         let rows = db
             .search_similar_images_meta(&q, 80, 0, 1.3, 100, &jpg_only)
             .unwrap();
-        let paths: Vec<&str> = rows.iter().map(|(p, _, _)| p.as_str()).collect();
+        let paths: Vec<&str> = rows.iter().map(|(_, p, _, _)| p.as_str()).collect();
         assert!(paths.contains(&"a.jpg"));
         assert!(
             !paths.contains(&"b.png"),
@@ -2155,5 +2321,168 @@ mod tests {
             md.camera_make.is_some() || md.camera_model.is_some() || md.datetime_taken.is_some(),
             "some EXIF field populated"
         );
+    }
+
+    // ── browse_all helpers & tests ────────────────────────────────────────────
+
+    /// Build an isolated test `Database` pre-populated with `(path, file_size)` rows.
+    ///
+    /// Rows are inserted with sequential ids (1, 2, 3 …). An `image_metadata` row is
+    /// always written for each image so the LEFT JOIN sees a match; `file_size` is set
+    /// to the given `Option<i64>` (NULL when `None`).
+    fn test_db_with_rows(rows: &[(&str, Option<i64>)]) -> (Database, std::path::PathBuf) {
+        let db_path = temp_db_path();
+        let db = Database::new(&db_path).expect("create test db");
+        {
+            let conn = db.pool.get().expect("get conn");
+            for (id, (path, size)) in rows.iter().enumerate() {
+                let id = (id + 1) as i64;
+                conn.execute(
+                    "INSERT INTO images (id, path, hash) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![id, path, format!("h{id}")],
+                )
+                .expect("insert image");
+                conn.execute(
+                    "INSERT INTO image_metadata (image_id, file_size) VALUES (?1, ?2)",
+                    rusqlite::params![id, size],
+                )
+                .expect("insert metadata");
+            }
+        }
+        (db, db_path)
+    }
+
+    #[test]
+    fn browse_all_sorts_by_size_then_name_nulls_last() {
+        use crate::filters::Filters;
+        use crate::sort::{Sort, SortDir, SortKey};
+
+        let (db, _tmp) = test_db_with_rows(&[
+            ("b.jpg", Some(10)),
+            ("a.jpg", None),
+            ("c.jpg", Some(10)),
+            ("d.jpg", Some(5)),
+        ]);
+        let rows = db
+            .browse_all(
+                &Filters::default(),
+                &Sort {
+                    key: SortKey::Size,
+                    dir: SortDir::Asc,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
+            vec!["d.jpg", "b.jpg", "c.jpg", "a.jpg"]
+        );
+        let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn browse_all_sorts_by_type_then_name() {
+        use crate::filters::Filters;
+        use crate::sort::{Sort, SortDir, SortKey};
+
+        let (db, _tmp) = test_db_with_rows(&[("z.PNG", None), ("a.png", None), ("m.jpg", None)]);
+        let rows = db
+            .browse_all(
+                &Filters::default(),
+                &Sort {
+                    key: SortKey::Type,
+                    dir: SortDir::Asc,
+                },
+            )
+            .unwrap();
+        // jpg < png; within png, path asc
+        assert_eq!(
+            rows.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
+            vec!["m.jpg", "a.png", "z.PNG"]
+        );
+        // ext is lowercased (derived Rust-side from the raw path)
+        assert_eq!(rows[2].ext, "png");
+        let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn browse_all_name_desc() {
+        use crate::filters::Filters;
+        use crate::sort::{Sort, SortDir, SortKey};
+
+        let (db, _tmp) = test_db_with_rows(&[("a.jpg", None), ("b.jpg", None)]);
+        let rows = db
+            .browse_all(
+                &Filters::default(),
+                &Sort {
+                    key: SortKey::Name,
+                    dir: SortDir::Desc,
+                },
+            )
+            .unwrap();
+        assert_eq!(rows[0].path, "b.jpg");
+        let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
+    }
+
+    // ── rehydrate_rows tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn rehydrate_preserves_order_and_drops_missing() {
+        let (db, _tmp) =
+            test_db_with_rows(&[("a.jpg", Some(1)), ("b.jpg", Some(2)), ("c.jpg", Some(3))]);
+        // ids are 1,2,3 in insert order; request reversed + a missing id 999
+        let want = vec![3i64, 999, 1];
+        let rows = db.rehydrate_rows(&want).unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
+            vec!["c.jpg", "a.jpg"] // 999 dropped, order preserved
+        );
+        let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn rehydrate_empty_is_empty() {
+        let (db, _tmp) = test_db_with_rows(&[("a.jpg", Some(1))]);
+        assert!(db.rehydrate_rows(&[]).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn ui_state_round_trips_through_db() {
+        let (db, _tmp) = test_db_with_rows(&[("a.jpg", Some(1))]);
+        assert!(db.get_ui_state().unwrap().is_none());
+        let st = UiState {
+            search_text: "dog".into(),
+            result_ids: vec![1],
+            selected_index: Some(0),
+            ..Default::default()
+        };
+        db.set_ui_state(&st).unwrap();
+        assert_eq!(db.get_ui_state().unwrap().unwrap(), st);
+        // upsert overwrites the single row
+        let st2 = UiState {
+            search_text: "cat".into(),
+            result_ids: vec![1],
+            selected_index: Some(0),
+            ..Default::default()
+        };
+        db.set_ui_state(&st2).unwrap();
+        assert_eq!(db.get_ui_state().unwrap().unwrap().search_text, "cat");
+
+        let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn malformed_ui_state_is_none() {
+        let (db, _tmp) = test_db_with_rows(&[("a.jpg", Some(1))]);
+        let conn = db.pool.get().unwrap();
+        conn.execute(
+            "INSERT INTO ui_state (id, state_json) VALUES (1, '{not json')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        assert!(db.get_ui_state().unwrap().is_none());
+
+        let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
     }
 }

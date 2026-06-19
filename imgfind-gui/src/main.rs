@@ -3,28 +3,35 @@ slint::include_modules!();
 mod backend;
 mod detail;
 mod image_util;
+mod loader;
 mod nav;
+mod preload;
 mod state;
+mod window;
 
 use std::collections::HashSet;
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use slint::{ModelRc, SharedString, Timer, TimerMode, VecModel, Weak};
+use slint::{Image, Model, ModelRc, SharedString, Timer, TimerMode, VecModel, Weak};
 
 use backend::Backend;
 use detail::{DetailState, filename_of, format_metadata, select};
 use imgfind::filters::{Filters, GpsFilter};
-use state::{SearchResult, SearchState, ViewState};
+use imgfind::sort::{RowMeta, Sort, SortDir, SortKey};
+use imgfind::ui_state::{PersistedMode, UiState};
+use state::{SearchState, ViewState};
 
 /// Whether the current tile grid was populated by a text search or a
 /// vector-similarity search.  Stored in an `Arc<Mutex<_>>` so both the
-/// `on_search` / `on_search_similar` closures (which set it) and
-/// `on_load_more` (which reads it) share the same value across threads.
+/// `on_search` / `on_search_similar` closures (which set it) and the
+/// `fire_debounced_query` path (which reads it) share the same value across threads.
 #[derive(Clone)]
 enum SearchMode {
     Text(String),
@@ -153,6 +160,16 @@ fn main() -> Result<()> {
     let backend = Backend::open(args.dir.as_deref()).context("Failed to open imgfind database")?;
     backend.start_loading_model();
 
+    // Load config early — T19 and later tasks can reuse `gui_config` without
+    // calling Config::load() again.
+    let gui_config = imgfind::config::Config::load()
+        .map(|c| c.gui)
+        .unwrap_or_else(|e| {
+            tracing::warn!("Failed to load config, using defaults: {e}");
+            imgfind::config::GuiConfig::default()
+        });
+    let preload_n = gui_config.preload_neighbors;
+
     // Fetch size bounds once at startup for the [0,1]↔bytes mapping.
     let size_bounds = backend.size_bounds().unwrap_or((0, 0));
 
@@ -164,8 +181,8 @@ fn main() -> Result<()> {
     // Initial UI state: model loading, search disabled.
     window.set_can_search(false);
     window.set_status("Loading model...".into());
-    window.set_show_load_more(false);
     window.set_tiles(ModelRc::default());
+    window.set_total_items(0);
     window.set_lightbox_open(false);
     window.set_detail_open(false);
     // Filter-bar initial state.
@@ -174,6 +191,15 @@ fn main() -> Result<()> {
     window.set_size_label("Size: all".into());
     window.set_type_chips(build_chips_model(&all_extensions, &HashSet::new()));
     window.set_gps_mode(0);
+    // Sort selector initial state — browse mode: Relevance not available.
+    // Seed the selector to the configured default sort so the UI matches the
+    // initial browse order from the moment results appear.
+    {
+        let default_sort = gui_config.resolved_sort();
+        window.set_sort_options(make_sort_options_model(false));
+        window.set_sort_index(sort_key_to_browse_index(default_sort.key));
+        window.set_sort_desc(matches!(default_sort.dir, SortDir::Desc));
+    }
 
     // State shared with background threads via Arc<Mutex<_>>.
     let state: Arc<Mutex<SearchState>> = Arc::new(Mutex::new(SearchState::new()));
@@ -190,11 +216,23 @@ fn main() -> Result<()> {
     // slow decode can't land after the user has already navigated to another image.
     let lb_generation: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
 
+    // Monotonic counter bumped at the start of every preload dispatch.
+    // Bumping before spawning ensures stale in-flight preloads stop when the
+    // user moves on to a different focus image.
+    let preload_generation: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+
+    // Monotonic counter bumped every time a NEW result set is installed (each
+    // search/similar/browse, and reset paths). The thumbnail worker tags each
+    // response with the generation its request was issued under; the loader
+    // timer drops responses whose generation no longer matches, so thumbnails
+    // from a superseded search can't leak into the current grid.
+    let grid_generation: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+
     // Currently selected detail image. None when the panel is closed.
     let detail: Arc<Mutex<Option<DetailState>>> = Arc::new(Mutex::new(None));
 
     // Tracks whether the tile grid was populated by a text or similarity search,
-    // so `on_load_more` knows which backend method to call.
+    // so the filter-bar debounce (`fire_debounced_query`) knows which backend method to call.
     let search_mode: Arc<Mutex<SearchMode>> = Arc::new(Mutex::new(SearchMode::Text(String::new())));
 
     // Live filter state, shared with every query closure.
@@ -202,6 +240,12 @@ fn main() -> Result<()> {
 
     // Currently-selected extension set (drives chip `on` state + Filters.extensions).
     let selected_exts: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+
+    // True only while `restore_session` is pre-filling the UI from a persisted
+    // session. The `search` callback bails out while set so that programmatically
+    // setting the search field (or any restore side effect) can never kick off a
+    // re-query — the restored result list must survive verbatim.
+    let restoring: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
     // Poll for model readiness every 250 ms.  The timer performs exactly ONE
     // job: detect the loading→ready transition, enable the search box, and
@@ -220,7 +264,12 @@ fn main() -> Result<()> {
             if backend_poll.model_ready() {
                 if let Some(w) = weak.upgrade() {
                     w.set_can_search(true);
-                    w.set_status("Enter a search query to find images.".into());
+                    // Only show the empty-state hint when the grid has no
+                    // results yet (the startup browse may have already filled
+                    // it while the model was loading in parallel).
+                    if w.get_total_items() == 0 {
+                        w.set_status("Enter a search query to find images.".into());
+                    }
                 }
                 // Mark handled *before* stopping so a hypothetical reentrant
                 // tick that fires during stop() is also a no-op.
@@ -238,8 +287,16 @@ fn main() -> Result<()> {
         let mode_ref = Arc::clone(&search_mode);
         let filters_ref = Arc::clone(&filters);
         let selected_ref = Arc::clone(&selected);
+        let grid_gen_ref = Arc::clone(&grid_generation);
+        let restoring_ref = Arc::clone(&restoring);
         let backend_search = backend.clone();
         window.on_search(move |query| {
+            // Never run a query while restoring a persisted session: the restored
+            // result list (rehydrated by id) must be shown verbatim, with no
+            // "Searching…" flash and no re-query.
+            if restoring_ref.load(Ordering::SeqCst) {
+                return;
+            }
             let query = query.trim().to_string();
             let current_filters = filters_ref.lock().unwrap().clone();
 
@@ -251,14 +308,22 @@ fn main() -> Result<()> {
                     *lb_ref.lock().unwrap() = None;
                     *selected_ref.lock().unwrap() = None;
                     *mode_ref.lock().unwrap() = SearchMode::Text(String::new());
+                    // Bump the generation so the loader timer resets its
+                    // in-flight set / last range and stops loading the old set.
+                    loader::bump_generation(&grid_gen_ref);
                     if let Some(w) = weak.upgrade() {
                         w.set_status("Enter a search query to find images.".into());
-                        w.set_show_load_more(false);
                         w.set_tiles(ModelRc::default());
+                        w.set_total_items(0);
                         w.set_detail_open(false);
                         w.set_lightbox_open(false);
                         w.set_selected_index(-1);
+                        // Reset sort selector to browse mode (no Relevance option).
+                        w.set_sort_options(make_sort_options_model(false));
+                        w.set_sort_index(0);
+                        w.set_sort_desc(false);
                     }
+                    state_ref.lock().unwrap().sort = Sort::default();
                 } else {
                     // Empty query but filters active — browse with filters.
                     *lb_ref.lock().unwrap() = None;
@@ -269,15 +334,14 @@ fn main() -> Result<()> {
                         w.set_lightbox_open(false);
                         w.set_detail_open(false);
                         w.set_status("Searching\u{2026}".into());
-                        w.set_show_load_more(false);
                         w.set_can_search(false);
                     }
                     spawn_browse(
                         weak.clone(),
                         Arc::clone(&state_ref),
+                        Arc::clone(&grid_gen_ref),
                         backend_search.clone(),
                         current_filters,
-                        0,
                         SelectionPolicy {
                             selected: Arc::clone(&selected_ref),
                             reset: true,
@@ -300,95 +364,21 @@ fn main() -> Result<()> {
             state_ref.lock().unwrap().start_search(query.clone());
             if let Some(w) = weak.upgrade() {
                 w.set_status("Searching\u{2026}".into());
-                w.set_show_load_more(false);
                 w.set_can_search(false);
             }
 
             spawn_search(
                 weak.clone(),
                 Arc::clone(&state_ref),
+                Arc::clone(&grid_gen_ref),
                 backend_search.clone(),
                 query,
-                0,
                 current_filters,
                 SelectionPolicy {
                     selected: Arc::clone(&selected_ref),
                     reset: true,
                 },
             );
-        });
-    }
-
-    // --- load-more callback ---
-    {
-        let weak = window.as_weak();
-        let state_ref = Arc::clone(&state);
-        let mode_ref = Arc::clone(&search_mode);
-        let filters_ref = Arc::clone(&filters);
-        let selected_ref = Arc::clone(&selected);
-        let backend_more = backend.clone();
-        window.on_load_more(move || {
-            let offset = state_ref.lock().unwrap().next_offset();
-            let mode = mode_ref.lock().unwrap().clone();
-            let current_filters = filters_ref.lock().unwrap().clone();
-
-            if let Some(w) = weak.upgrade() {
-                w.set_status("Searching\u{2026}".into());
-                w.set_show_load_more(false);
-                w.set_can_search(false);
-            }
-
-            match mode {
-                SearchMode::Text(query) if !query.is_empty() => {
-                    spawn_search(
-                        weak.clone(),
-                        Arc::clone(&state_ref),
-                        backend_more.clone(),
-                        query,
-                        offset,
-                        current_filters,
-                        SelectionPolicy {
-                            selected: Arc::clone(&selected_ref),
-                            reset: false,
-                        },
-                    );
-                }
-                SearchMode::Similar(seed) if !seed.is_empty() => {
-                    spawn_similar(
-                        weak.clone(),
-                        Arc::clone(&state_ref),
-                        backend_more.clone(),
-                        seed,
-                        offset,
-                        current_filters,
-                        SelectionPolicy {
-                            selected: Arc::clone(&selected_ref),
-                            reset: false,
-                        },
-                    );
-                }
-                // Text("") means we're in browse mode.
-                SearchMode::Text(_) => {
-                    spawn_browse(
-                        weak.clone(),
-                        Arc::clone(&state_ref),
-                        backend_more.clone(),
-                        current_filters,
-                        offset,
-                        SelectionPolicy {
-                            selected: Arc::clone(&selected_ref),
-                            reset: false,
-                        },
-                    );
-                }
-                _ => {
-                    // No active search — restore UI to idle.
-                    if let Some(w) = weak.upgrade() {
-                        w.set_can_search(true);
-                        w.set_show_load_more(false);
-                    }
-                }
-            }
         });
     }
 
@@ -399,6 +389,7 @@ fn main() -> Result<()> {
         let detail_ref = Arc::clone(&detail);
         let selected_ref = Arc::clone(&selected);
         let backend_detail = backend.clone();
+        let preload_gen_detail = Arc::clone(&preload_generation);
         window.on_tile_selected(move |index| {
             let idx = index as usize;
             // Keep the shared selection in sync so keyboard and mouse share one highlight.
@@ -450,6 +441,22 @@ fn main() -> Result<()> {
                 })
                 .ok();
             });
+
+            // Preload neighbors at 512px for fast detail-panel switching.
+            {
+                let my_gen = preload_gen_detail.fetch_add(1, Ordering::SeqCst) + 1;
+                let paths = {
+                    let s = state_ref.lock().unwrap();
+                    neighbor_paths(&s.results, idx, preload_n)
+                };
+                spawn_preload(
+                    backend_detail.clone(),
+                    paths,
+                    512,
+                    Arc::clone(&preload_gen_detail),
+                    my_gen,
+                );
+            }
         });
     }
 
@@ -461,6 +468,7 @@ fn main() -> Result<()> {
         let selected_ref = Arc::clone(&selected);
         let backend_lb = backend.clone();
         let gen_ref = Arc::clone(&lb_generation);
+        let preload_gen_ta = Arc::clone(&preload_generation);
         window.on_tile_activated(move |index| {
             let idx = index as usize;
             let path = state_ref
@@ -477,6 +485,22 @@ fn main() -> Result<()> {
                 w.set_selected_index(index);
             }
             load_lightbox_image(weak.clone(), backend_lb.clone(), rel, gen_ref.clone());
+
+            // Preload neighbors at LIGHTBOX_SIZE so prev/next navigation is instant.
+            {
+                let my_gen = preload_gen_ta.fetch_add(1, Ordering::SeqCst) + 1;
+                let paths = {
+                    let s = state_ref.lock().unwrap();
+                    neighbor_paths(&s.results, idx, preload_n)
+                };
+                spawn_preload(
+                    backend_lb.clone(),
+                    paths,
+                    imgfind::thumbnail::LIGHTBOX_SIZE,
+                    Arc::clone(&preload_gen_ta),
+                    my_gen,
+                );
+            }
         });
     }
 
@@ -522,6 +546,7 @@ fn main() -> Result<()> {
         let lb_ref = Arc::clone(&lb_index);
         let backend_vf = backend.clone();
         let gen_ref = Arc::clone(&lb_generation);
+        let preload_gen_vf = Arc::clone(&preload_generation);
         window.on_detail_view_full(move || {
             let seed_path = {
                 let d = detail_ref.lock().unwrap();
@@ -541,6 +566,22 @@ fn main() -> Result<()> {
             *lb_ref.lock().unwrap() = idx;
 
             load_lightbox_image(weak.clone(), backend_vf.clone(), rel, gen_ref.clone());
+
+            // Preload neighbors when a valid grid position is known.
+            if let Some(center) = idx {
+                let my_gen = preload_gen_vf.fetch_add(1, Ordering::SeqCst) + 1;
+                let paths = {
+                    let s = state_ref.lock().unwrap();
+                    neighbor_paths(&s.results, center, preload_n)
+                };
+                spawn_preload(
+                    backend_vf.clone(),
+                    paths,
+                    imgfind::thumbnail::LIGHTBOX_SIZE,
+                    Arc::clone(&preload_gen_vf),
+                    my_gen,
+                );
+            }
         });
     }
 
@@ -555,6 +596,7 @@ fn main() -> Result<()> {
         let mode_ref = Arc::clone(&search_mode);
         let filters_ref = Arc::clone(&filters);
         let selected_ref = Arc::clone(&selected);
+        let grid_gen_ref = Arc::clone(&grid_generation);
         let backend_sim = backend.clone();
         window.on_search_similar(move || {
             let seed_path = {
@@ -567,16 +609,14 @@ fn main() -> Result<()> {
             let current_filters = filters_ref.lock().unwrap().clone();
             *mode_ref.lock().unwrap() = SearchMode::Similar(seed_path.clone());
 
-            // `start_search` records the seed path as the "committed query" so
-            // `apply_page` / `apply_error` work correctly for offset tracking.
-            // NOTE: `committed_query` holds a file path here, NOT a text query.
-            // load-more reads `search_mode` (not this field) to dispatch the
-            // next page, and `committed_query` is never displayed — do NOT rely
-            // on it being a real text query during a similarity search.
+            // `start_search` records the seed path as the "committed query".
+            // NOTE: `committed_query` holds a file path here, NOT a text query;
+            // `search_mode` (not this field) drives dispatch, and
+            // `committed_query` is never displayed — do NOT rely on it being a
+            // real text query during a similarity search.
             state_ref.lock().unwrap().start_search(seed_path.clone());
             if let Some(w) = weak.upgrade() {
                 w.set_status(format!("Similar to {filename}").into());
-                w.set_show_load_more(false);
                 w.set_can_search(false);
                 // detail-open stays TRUE — panel remains on the seed.
             }
@@ -584,9 +624,9 @@ fn main() -> Result<()> {
             spawn_similar(
                 weak.clone(),
                 Arc::clone(&state_ref),
+                Arc::clone(&grid_gen_ref),
                 backend_sim.clone(),
                 seed_path,
-                0,
                 current_filters,
                 SelectionPolicy {
                     selected: Arc::clone(&selected_ref),
@@ -622,6 +662,7 @@ fn main() -> Result<()> {
         let selected_ref = Arc::clone(&selected);
         let backend_lb = backend.clone();
         let gen_ref = Arc::clone(&lb_generation);
+        let preload_gen_prev = Arc::clone(&preload_generation);
         window.on_lightbox_prev(move || {
             tracing::debug!("lightbox-prev invoked");
             let new_idx = {
@@ -645,6 +686,22 @@ fn main() -> Result<()> {
             if let Some(rel) = path {
                 load_lightbox_image(weak.clone(), backend_lb.clone(), rel, gen_ref.clone());
             }
+
+            // Preload neighbors in arc order so the next likely images are warm.
+            {
+                let my_gen = preload_gen_prev.fetch_add(1, Ordering::SeqCst) + 1;
+                let paths = {
+                    let s = state_ref.lock().unwrap();
+                    neighbor_paths(&s.results, new_idx, preload_n)
+                };
+                spawn_preload(
+                    backend_lb.clone(),
+                    paths,
+                    imgfind::thumbnail::LIGHTBOX_SIZE,
+                    Arc::clone(&preload_gen_prev),
+                    my_gen,
+                );
+            }
         });
     }
 
@@ -656,6 +713,7 @@ fn main() -> Result<()> {
         let selected_ref = Arc::clone(&selected);
         let backend_lb = backend.clone();
         let gen_ref = Arc::clone(&lb_generation);
+        let preload_gen_next = Arc::clone(&preload_generation);
         window.on_lightbox_next(move || {
             tracing::debug!("lightbox-next invoked");
             let (new_idx, len) = {
@@ -683,6 +741,22 @@ fn main() -> Result<()> {
                 .map(|r| r.path.clone());
             if let Some(rel) = path {
                 load_lightbox_image(weak.clone(), backend_lb.clone(), rel, gen_ref.clone());
+            }
+
+            // Preload neighbors in arc order so the next likely images are warm.
+            {
+                let my_gen = preload_gen_next.fetch_add(1, Ordering::SeqCst) + 1;
+                let paths = {
+                    let s = state_ref.lock().unwrap();
+                    neighbor_paths(&s.results, new_idx, preload_n)
+                };
+                spawn_preload(
+                    backend_lb.clone(),
+                    paths,
+                    imgfind::thumbnail::LIGHTBOX_SIZE,
+                    Arc::clone(&preload_gen_next),
+                    my_gen,
+                );
             }
         });
     }
@@ -767,6 +841,7 @@ fn main() -> Result<()> {
         let filters_ref = Arc::clone(&filters);
         let selected_exts_ref = Arc::clone(&selected_exts);
         let selected_ref = Arc::clone(&selected);
+        let grid_gen_ref = Arc::clone(&grid_generation);
         let backend_fc = backend.clone();
         let timer = Rc::clone(&debounce_timer);
         window.on_filters_changed(move || {
@@ -786,6 +861,7 @@ fn main() -> Result<()> {
                 weak.clone(),
                 Arc::clone(&state_ref),
                 Arc::clone(&mode_ref),
+                Arc::clone(&grid_gen_ref),
                 backend_fc.clone(),
                 new_filters,
                 Arc::clone(&selected_ref),
@@ -801,6 +877,7 @@ fn main() -> Result<()> {
         let filters_ref = Arc::clone(&filters);
         let selected_exts_ref = Arc::clone(&selected_exts);
         let selected_ref = Arc::clone(&selected);
+        let grid_gen_ref = Arc::clone(&grid_generation);
         let all_exts_et = all_extensions.clone();
         let backend_et = backend.clone();
         let timer = Rc::clone(&debounce_timer);
@@ -830,6 +907,7 @@ fn main() -> Result<()> {
                 weak.clone(),
                 Arc::clone(&state_ref),
                 Arc::clone(&mode_ref),
+                Arc::clone(&grid_gen_ref),
                 backend_et.clone(),
                 new_filters,
                 Arc::clone(&selected_ref),
@@ -845,6 +923,7 @@ fn main() -> Result<()> {
         let filters_ref = Arc::clone(&filters);
         let selected_exts_ref = Arc::clone(&selected_exts);
         let selected_ref = Arc::clone(&selected);
+        let grid_gen_ref = Arc::clone(&grid_generation);
         let backend_gps = backend.clone();
         let timer = Rc::clone(&debounce_timer);
         window.on_gps_mode_changed(move |mode| {
@@ -863,6 +942,7 @@ fn main() -> Result<()> {
                 weak.clone(),
                 Arc::clone(&state_ref),
                 Arc::clone(&mode_ref),
+                Arc::clone(&grid_gen_ref),
                 backend_gps.clone(),
                 new_filters,
                 Arc::clone(&selected_ref),
@@ -870,12 +950,531 @@ fn main() -> Result<()> {
         });
     }
 
-    // Keep the model timer and debounce timer alive for the entire event loop.
+    // --- sort-changed callback: user picked a different sort key ---
+    {
+        let weak = window.as_weak();
+        let state_ref = Arc::clone(&state);
+        let mode_ref = Arc::clone(&search_mode);
+        let filters_ref = Arc::clone(&filters);
+        let selected_ref = Arc::clone(&selected);
+        let grid_gen_ref = Arc::clone(&grid_generation);
+        let backend_sc = backend.clone();
+        window.on_sort_changed(move || {
+            let Some(w) = weak.upgrade() else { return };
+            let idx = w.get_sort_index() as usize;
+            let desc = w.get_sort_desc();
+            let option_str: String = {
+                let model = w.get_sort_options();
+                model
+                    .row_data(idx)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "Name".to_string())
+            };
+            let dir = if desc { SortDir::Desc } else { SortDir::Asc };
+            let mode = mode_ref.lock().unwrap().clone();
+            match mode {
+                SearchMode::Text(q) if q.is_empty() => {
+                    // Browse mode: re-issue the browse query with the new sort.
+                    let sort = Sort {
+                        key: option_str_to_sort_key(&option_str),
+                        dir,
+                    };
+                    state_ref.lock().unwrap().sort = sort;
+                    let current_filters = filters_ref.lock().unwrap().clone();
+                    spawn_browse(
+                        weak.clone(),
+                        Arc::clone(&state_ref),
+                        Arc::clone(&grid_gen_ref),
+                        backend_sc.clone(),
+                        current_filters,
+                        SelectionPolicy {
+                            selected: Arc::clone(&selected_ref),
+                            reset: false,
+                        },
+                    );
+                }
+                _ => {
+                    // Search/similar mode: in-memory resort (no backend round-trip).
+                    {
+                        let mut s = state_ref.lock().unwrap();
+                        if option_str == "Relevance" {
+                            s.resort_to_relevance();
+                            // Keep sort field as default placeholder — Relevance has
+                            // no SortKey equivalent; browse after a clear will reset.
+                            s.sort = Sort::default();
+                        } else {
+                            let sort = Sort {
+                                key: option_str_to_sort_key(&option_str),
+                                dir,
+                            };
+                            s.resort(&sort);
+                        }
+                    }
+                    // Bump generation so the loader timer rebuilds the tile model.
+                    loader::bump_generation(&grid_gen_ref);
+                    // Re-clamp selection to new order length.
+                    let len = state_ref.lock().unwrap().results.len();
+                    apply_selection_after_results(&w, &selected_ref, len, false);
+                }
+            }
+        });
+    }
+
+    // --- sort-dir-toggled callback: user clicked the Asc/Desc button ---
+    {
+        let weak = window.as_weak();
+        window.on_sort_dir_toggled(move || {
+            let Some(w) = weak.upgrade() else { return };
+            let new_desc = !w.get_sort_desc();
+            w.set_sort_desc(new_desc);
+            // Delegate to sort-changed to apply the new direction.
+            w.invoke_sort_changed();
+        });
+    }
+
+    // --- moving-window thumbnail loader ---
+    //
+    // A single background worker decodes/persists thumbnails (one writer to
+    // dodge SQLITE_BUSY); the loader timer below runs on the UI thread, drains
+    // decoded bytes into a bounded LRU, and rebuilds the tile model for only the
+    // currently-visible window whenever the window or result set changes.
+    let (req_tx, req_rx) = mpsc::channel::<loader::ThumbRequest>();
+    let (resp_tx, resp_rx) = mpsc::channel::<loader::ThumbResponse>();
+    loader::spawn_thumb_worker(backend.clone(), req_rx, resp_tx);
+
+    let loader_timer = Timer::default();
+    {
+        let weak = window.as_weak();
+        let state_ref = Arc::clone(&state);
+        let grid_gen_ref = Arc::clone(&grid_generation);
+        // These are all !Send and owned solely by this UI-thread closure: never
+        // wrap them in Arc/Mutex. `last_gen` lets the closure detect a new
+        // result set (generation bumped elsewhere) and reset its window state.
+        let mut cache = loader::new_cache();
+        let mut in_flight = loader::InFlight::default();
+        let mut last_range: Option<Range<usize>> = None;
+        let mut last_gen: u64 = loader::current_generation(&grid_gen_ref);
+        loader_timer.start(TimerMode::Repeated, Duration::from_millis(100), move || {
+            let Some(w) = weak.upgrade() else { return };
+            loader_tick(LoaderTick {
+                window: &w,
+                state_ref: &state_ref,
+                grid_gen: &grid_gen_ref,
+                req_tx: &req_tx,
+                resp_rx: &resp_rx,
+                cache: &mut cache,
+                in_flight: &mut in_flight,
+                last_range: &mut last_range,
+                last_gen: &mut last_gen,
+            });
+        });
+    }
+
+    // Keep the model, debounce, and loader timers alive for the event loop.
     let _ = model_timer;
     let _ = debounce_timer;
+    let _ = loader_timer;
+
+    // T20: Startup gate — restore the persisted session if one exists, else
+    // fall back to the T19 default browse-all. A malformed blob reads as
+    // `Ok(None)`; a hard read error is logged and also falls back to default.
+    match backend.get_ui_state() {
+        Ok(Some(st)) => {
+            let ctx = RestoreCtx {
+                weak: window.as_weak(),
+                state: Arc::clone(&state),
+                grid_gen: Arc::clone(&grid_generation),
+                backend: backend.clone(),
+                selected: Arc::clone(&selected),
+                filters: Arc::clone(&filters),
+                selected_exts: Arc::clone(&selected_exts),
+                search_mode: Arc::clone(&search_mode),
+                detail: Arc::clone(&detail),
+                restoring: Arc::clone(&restoring),
+                all_extensions: &all_extensions,
+                size_bounds,
+            };
+            restore_session(st, ctx);
+        }
+        Ok(None) => start_default_browse(
+            window.as_weak(),
+            Arc::clone(&state),
+            Arc::clone(&grid_generation),
+            backend.clone(),
+            Arc::clone(&selected),
+            gui_config.resolved_sort(),
+        ),
+        Err(e) => {
+            tracing::warn!("Failed to read persisted session, starting fresh: {e:#}");
+            start_default_browse(
+                window.as_weak(),
+                Arc::clone(&state),
+                Arc::clone(&grid_generation),
+                backend.clone(),
+                Arc::clone(&selected),
+                gui_config.resolved_sort(),
+            );
+        }
+    }
 
     window.run().context("Event loop failed")?;
+
+    // T20: Persist the session AFTER the event loop returns. `window` and every
+    // Arc<Mutex<…>> holder are still in scope; reading the live `grid-viewport-y`
+    // captures the final scroll position. Persistence must never crash exit, so a
+    // failure is logged and swallowed.
+    persist_session(
+        &window,
+        &state,
+        &filters,
+        &selected,
+        &detail,
+        &search_mode,
+        &backend,
+    );
+
     Ok(())
+}
+
+/// Map a [`SortKey`] to its index in the browse-mode sort selector.
+///
+/// The index order is fixed to match `make_sort_options_model(false)`:
+/// `["Name", "Size", "Type"]` → Name=0, Size=1, Type=2.  A future reorder of
+/// that model must keep these indices in sync.
+fn sort_key_to_browse_index(key: SortKey) -> i32 {
+    // Keep in sync with make_sort_options_model(false) = ["Name", "Size", "Type"].
+    match key {
+        SortKey::Name => 0,
+        SortKey::Size => 1,
+        SortKey::Type => 2,
+    }
+}
+
+/// Trigger the default startup browse-all in the configured sort order.
+///
+/// Sets `state.sort` to `sort`, pre-seeds the shared selection to index 0 so
+/// [`apply_selection_after_results`] re-clamps to it when results land (selecting
+/// the first tile for non-empty DBs), then spawns the browse. Does NOT touch the
+/// model or lightbox — the window stays in loading state until results arrive.
+///
+/// **T20 seam:** T20 should call this in the `else`-branch of its
+/// "if persisted UiState exists → restore; else → start_default_browse(…)" gate.
+/// The exact call site is just before `window.run()` in `main`.
+fn start_default_browse(
+    weak: Weak<MainWindow>,
+    state_ref: Arc<Mutex<SearchState>>,
+    grid_gen: Arc<AtomicU64>,
+    backend: Backend,
+    selected_ref: Arc<Mutex<Option<usize>>>,
+    sort: Sort,
+) {
+    // Install sort and mark has_searched=true so view_state() returns Results
+    // (not Idle) when results arrive, causing apply_fetch_result to call
+    // set_total_items and render the grid. Mirror the pattern used by every
+    // other browse/search caller (lines ~318, ~1217).
+    {
+        let mut s = state_ref.lock().unwrap();
+        s.sort = sort;
+        s.start_search(String::new());
+    }
+    // Pre-seed the selection to 0; apply_fetch_result re-clamps it to 0 when
+    // results are non-empty (reset=false keeps an in-range index). A freshly
+    // opened DB with zero images clears it to None via the filter.
+    let selected_for_policy = Arc::clone(&selected_ref);
+    *selected_ref.lock().unwrap() = Some(0);
+    spawn_browse(
+        weak,
+        state_ref,
+        grid_gen,
+        backend,
+        Filters::default(),
+        SelectionPolicy {
+            selected: selected_for_policy,
+            reset: false,
+        },
+    );
+}
+
+/// Shared-state handles `restore_session` needs to rebuild the UI from a
+/// persisted [`UiState`]. Bundled into a struct to stay under clippy's
+/// argument limit and keep the single call site readable.
+struct RestoreCtx<'a> {
+    weak: Weak<MainWindow>,
+    state: Arc<Mutex<SearchState>>,
+    grid_gen: Arc<AtomicU64>,
+    backend: Backend,
+    selected: Arc<Mutex<Option<usize>>>,
+    filters: Arc<Mutex<Filters>>,
+    selected_exts: Arc<Mutex<HashSet<String>>>,
+    search_mode: Arc<Mutex<SearchMode>>,
+    detail: Arc<Mutex<Option<DetailState>>>,
+    restoring: Arc<AtomicBool>,
+    all_extensions: &'a [String],
+    size_bounds: (i64, i64),
+}
+
+/// Whether a persisted [`PersistedMode`] is a search (text or similarity), as
+/// opposed to a plain browse. Search modes get a Relevance option in the sort
+/// selector and have a relevance ordering to restore.
+fn mode_is_search(mode: &PersistedMode) -> bool {
+    matches!(mode, PersistedMode::Text(_) | PersistedMode::Similar(_))
+}
+
+/// Index of `sort.key` within the sort-selector options for `mode`.
+///
+/// In search mode the options are `["Relevance", "Name", "Size", "Type"]`, so
+/// concrete keys are offset by one and Relevance (index 0) is the default
+/// reflection — `UiState` stores only a concrete `Sort`, so we cannot tell
+/// "Relevance was selected" apart from a real key and default to Relevance
+/// (the restored display order is faithful either way). In browse mode the
+/// options are `["Name", "Size", "Type"]` and the key maps directly.
+fn sort_to_selector_index(sort: Sort, mode: &PersistedMode) -> i32 {
+    if mode_is_search(mode) {
+        0
+    } else {
+        sort_key_to_browse_index(sort.key)
+    }
+}
+
+/// Map a [`GpsFilter`] back to the `gps-mode` widget int (inverse of the match
+/// in [`build_filters`]): Any=0, HasGps=1, NoGps=2.
+fn gps_to_mode(gps: GpsFilter) -> i32 {
+    match gps {
+        GpsFilter::Any => 0,
+        GpsFilter::HasGps => 1,
+        GpsFilter::NoGps => 2,
+    }
+}
+
+/// Invert a byte threshold back to a [0, 1] slider fraction (inverse of
+/// [`fraction_to_bytes`]). `None` (unbounded) maps to the matching extreme.
+fn bytes_to_fraction(bytes: Option<i64>, min: i64, max: i64, is_lo: bool) -> f32 {
+    match bytes {
+        None => {
+            if is_lo {
+                0.0
+            } else {
+                1.0
+            }
+        }
+        Some(b) => {
+            if max <= min {
+                if is_lo { 0.0 } else { 1.0 }
+            } else {
+                (((b - min) as f64) / ((max - min) as f64)).clamp(0.0, 1.0) as f32
+            }
+        }
+    }
+}
+
+/// Restore the GUI from a persisted [`UiState`] on the main thread, BEFORE the
+/// event loop runs. No query is executed: the result list is rehydrated by id
+/// (display order preserved) and installed directly, then window properties are
+/// set so the loader timer fills thumbnails at the restored scroll position once
+/// `run()` starts. Mirrors the install path of `apply_fetch_result` minus the
+/// background fetch. Restore side effects can never trigger a re-query: the
+/// `restoring` flag is held for the duration and the `search` callback honors it.
+fn restore_session(st: UiState, ctx: RestoreCtx<'_>) {
+    ctx.restoring.store(true, Ordering::SeqCst);
+
+    let Some(w) = ctx.weak.upgrade() else {
+        ctx.restoring.store(false, Ordering::SeqCst);
+        return;
+    };
+
+    // 1. Result list — rehydrate by id (verbatim display order), install into
+    //    SearchState as a completed "search" so view_state() == Results.
+    let rows = ctx.backend.rehydrate(&st.result_ids).unwrap_or_default();
+    let results_len = rows.len();
+    let is_search = mode_is_search(&st.mode);
+    {
+        let mut s = ctx.state.lock().unwrap();
+        s.start_search(String::new());
+        s.sort = st.sort;
+        if is_search {
+            s.relevance_order = rows.clone();
+        }
+        s.apply_results(rows);
+    }
+
+    // Restore the search-mode holder so the filter-bar debounce dispatches the
+    // right backend method on the user's next filter change.
+    let restored_mode = match &st.mode {
+        PersistedMode::Browse => SearchMode::Text(String::new()),
+        PersistedMode::Text(q) => SearchMode::Text(q.clone()),
+        PersistedMode::Similar(seed_id) => {
+            // Resolve the seed id back to its relative path (the holder stores a
+            // path). If the row is gone, fall back to browse mode.
+            match ctx.backend.rehydrate(&[*seed_id]).ok().and_then(|mut v| {
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v.remove(0).path)
+                }
+            }) {
+                Some(path) => SearchMode::Similar(path),
+                None => SearchMode::Text(String::new()),
+            }
+        }
+    };
+    *ctx.search_mode.lock().unwrap() = restored_mode;
+
+    // Install the grid: total-items spans the full set, clearing tiles + bumping
+    // the generation makes the loader timer rebuild the visible window.
+    w.set_total_items(results_len as i32);
+    w.set_tiles(ModelRc::default());
+    loader::bump_generation(&ctx.grid_gen);
+
+    // 2. Search text — programmatic set does NOT fire `search` (only `accepted`
+    //    on Enter does), and `restoring` guards the callback regardless.
+    w.set_query_text(st.search_text.clone().into());
+
+    // 3. Selection — clamp the stored index to the restored length.
+    let sel = st.selected_index.filter(|&i| i < results_len);
+    *ctx.selected.lock().unwrap() = sel;
+    w.set_selected_index(sel.map(|i| i as i32).unwrap_or(-1));
+
+    // 4. Scroll — the stored value is the raw (<= 0) viewport-y; the loader timer
+    //    then loads the window at that offset.
+    w.set_grid_viewport_y(st.scroll_y);
+
+    // 5. Sort selector — Relevance present iff search mode; index reflects the
+    //    stored key (Relevance default for search), direction from the dir.
+    w.set_sort_options(make_sort_options_model(is_search));
+    w.set_sort_index(sort_to_selector_index(st.sort, &st.mode));
+    w.set_sort_desc(matches!(st.sort.dir, SortDir::Desc));
+
+    // 7. Filters (best-effort cosmetic sync; the result list already reflects
+    //    them since it is the persisted id set). Set the shared holders and the
+    //    filter widgets back to the persisted state.
+    {
+        let exts: HashSet<String> = st.filters.extensions.iter().cloned().collect();
+        *ctx.filters.lock().unwrap() = st.filters.clone();
+        *ctx.selected_exts.lock().unwrap() = exts.clone();
+        let lo = bytes_to_fraction(
+            st.filters.size_min,
+            ctx.size_bounds.0,
+            ctx.size_bounds.1,
+            true,
+        );
+        let hi = bytes_to_fraction(
+            st.filters.size_max,
+            ctx.size_bounds.0,
+            ctx.size_bounds.1,
+            false,
+        );
+        w.set_size_lo(lo);
+        w.set_size_hi(hi);
+        w.set_size_label(build_size_label(lo, hi, ctx.size_bounds));
+        w.set_type_chips(build_chips_model(ctx.all_extensions, &exts));
+        w.set_gps_mode(gps_to_mode(st.filters.gps));
+    }
+
+    // 6. Detail panel — open it for the selected image (best-effort). Mirror
+    //    on_tile_selected: show the panel immediately with a placeholder, then
+    //    load the 512 thumb + metadata on a background thread.
+    if st.detail_open
+        && let Some(idx) = sel
+    {
+        let path = {
+            let s = ctx.state.lock().unwrap();
+            s.results.get(idx).map(|r| r.path.clone())
+        };
+        if let Some(path) = path {
+            let ds = select(path.clone());
+            *ctx.detail.lock().unwrap() = Some(ds.clone());
+            w.set_detail_open(true);
+            w.set_detail_filename(ds.filename.into());
+            w.set_detail_image(Default::default());
+            w.set_detail_meta("Loading\u{2026}".into());
+
+            let weak2 = ctx.weak.clone();
+            let backend2 = ctx.backend.clone();
+            std::thread::spawn(move || {
+                let meta_result = backend2.metadata(&path);
+                let thumb_result = backend2.thumbnail(&path, 512);
+                slint::invoke_from_event_loop(move || {
+                    let Some(w) = weak2.upgrade() else { return };
+                    match thumb_result {
+                        Ok(bytes) => match image_util::jpeg_to_slint_image(&bytes) {
+                            Ok(img) => w.set_detail_image(img),
+                            Err(e) => tracing::warn!("restore detail thumb decode failed: {e}"),
+                        },
+                        Err(e) => tracing::warn!("restore detail thumbnail failed: {e}"),
+                    }
+                    match meta_result {
+                        Ok(meta) => w.set_detail_meta(format_metadata(&meta).into()),
+                        Err(e) => {
+                            tracing::warn!("restore detail metadata failed: {e}");
+                            w.set_detail_meta("".into());
+                        }
+                    }
+                })
+                .ok();
+            });
+        }
+    }
+
+    ctx.restoring.store(false, Ordering::SeqCst);
+}
+
+/// Persist the current session to the DB after the event loop returns. Reads
+/// the live window scroll position plus the shared state holders. Any failure
+/// is logged and swallowed so it can never crash process exit.
+fn persist_session(
+    window: &MainWindow,
+    state: &Arc<Mutex<SearchState>>,
+    filters: &Arc<Mutex<Filters>>,
+    selected: &Arc<Mutex<Option<usize>>>,
+    detail: &Arc<Mutex<Option<DetailState>>>,
+    search_mode: &Arc<Mutex<SearchMode>>,
+    backend: &Backend,
+) {
+    let (result_ids, sort) = {
+        let s = state.lock().unwrap();
+        (s.results.iter().map(|r| r.id).collect::<Vec<i64>>(), s.sort)
+    };
+    let search_text;
+    let mode = {
+        let m = search_mode.lock().unwrap().clone();
+        match m {
+            SearchMode::Text(q) if q.is_empty() => {
+                search_text = String::new();
+                PersistedMode::Browse
+            }
+            SearchMode::Text(q) => {
+                search_text = q.clone();
+                PersistedMode::Text(q)
+            }
+            SearchMode::Similar(seed_path) => {
+                search_text = String::new();
+                // Resolve the seed path back to its id; on failure fall back to
+                // Browse (the result list restores either way).
+                match backend.id_for_rel_path(&seed_path) {
+                    Ok(id) => PersistedMode::Similar(id),
+                    Err(e) => {
+                        tracing::warn!("could not resolve similar-seed id, persisting Browse: {e}");
+                        PersistedMode::Browse
+                    }
+                }
+            }
+        }
+    };
+
+    let st = UiState {
+        search_text,
+        mode,
+        sort,
+        filters: filters.lock().unwrap().clone(),
+        result_ids,
+        selected_index: *selected.lock().unwrap(),
+        detail_open: detail.lock().unwrap().is_some(),
+        scroll_y: window.get_grid_viewport_y(),
+    };
+
+    if let Err(e) = backend.set_ui_state(&st) {
+        tracing::warn!("Failed to persist session: {e:#}");
+    }
 }
 
 /// Restart the debounce timer with a fresh 250 ms single-shot callback.
@@ -885,11 +1484,13 @@ fn main() -> Result<()> {
 /// `Timer::start` accepts `FnMut + 'static` and we cannot move non-`Copy`
 /// values out of an outer `FnMut` callback, we allocate a new closure per
 /// restart — which is fine for a 250 ms debounce rate.
+#[allow(clippy::too_many_arguments)]
 fn start_debounce(
     timer: &Timer,
     weak: Weak<MainWindow>,
     state_ref: Arc<Mutex<SearchState>>,
     mode_ref: Arc<Mutex<SearchMode>>,
+    grid_gen: Arc<AtomicU64>,
     backend: Backend,
     filters: Filters,
     selected_ref: Arc<Mutex<Option<usize>>>,
@@ -902,6 +1503,7 @@ fn start_debounce(
                 weak.clone(),
                 Arc::clone(&state_ref),
                 Arc::clone(&mode_ref),
+                Arc::clone(&grid_gen),
                 backend.clone(),
                 filters.clone(),
                 Arc::clone(&selected_ref),
@@ -915,10 +1517,12 @@ fn start_debounce(
 /// Reads `search_mode` and either runs a text search, similarity search, or
 /// browse, starting from offset 0.  The filter change is treated as a fresh
 /// search (reset for text/browse, re-clamp for similar).
+#[allow(clippy::too_many_arguments)]
 fn fire_debounced_query(
     weak: Weak<MainWindow>,
     state_ref: Arc<Mutex<SearchState>>,
     mode_ref: Arc<Mutex<SearchMode>>,
+    grid_gen: Arc<AtomicU64>,
     backend: Backend,
     filters: Filters,
     selected_ref: Arc<Mutex<Option<usize>>>,
@@ -929,15 +1533,14 @@ fn fire_debounced_query(
             state_ref.lock().unwrap().start_search(query.clone());
             if let Some(w) = weak.upgrade() {
                 w.set_status("Searching\u{2026}".into());
-                w.set_show_load_more(false);
                 w.set_can_search(false);
             }
             spawn_search(
                 weak,
                 state_ref,
+                grid_gen,
                 backend,
                 query,
-                0,
                 filters,
                 SelectionPolicy {
                     selected: selected_ref,
@@ -949,10 +1552,12 @@ fn fire_debounced_query(
         // Text("") with default filters — restore idle state, nothing to browse.
         SearchMode::Text(_) if filters == Filters::default() => {
             *selected_ref.lock().unwrap() = None;
+            // Bump the generation so the loader timer resets and stops loading.
+            loader::bump_generation(&grid_gen);
             if let Some(w) = weak.upgrade() {
                 w.set_status("Enter a search query to find images.".into());
-                w.set_show_load_more(false);
                 w.set_tiles(ModelRc::default());
+                w.set_total_items(0);
                 w.set_selected_index(-1);
             }
         }
@@ -961,15 +1566,14 @@ fn fire_debounced_query(
             state_ref.lock().unwrap().start_search(String::new());
             if let Some(w) = weak.upgrade() {
                 w.set_status("Searching\u{2026}".into());
-                w.set_show_load_more(false);
                 w.set_can_search(false);
             }
             spawn_browse(
                 weak,
                 state_ref,
+                grid_gen,
                 backend,
                 filters,
-                0,
                 SelectionPolicy {
                     selected: selected_ref,
                     reset: true,
@@ -981,15 +1585,14 @@ fn fire_debounced_query(
             if let Some(w) = weak.upgrade() {
                 let filename = filename_of(&seed);
                 w.set_status(format!("Similar to {filename}").into());
-                w.set_show_load_more(false);
                 w.set_can_search(false);
             }
             spawn_similar(
                 weak,
                 state_ref,
+                grid_gen,
                 backend,
                 seed,
-                0,
                 filters,
                 SelectionPolicy {
                     selected: selected_ref,
@@ -1000,24 +1603,159 @@ fn fire_debounced_query(
     }
 }
 
-/// Decode raw JPEG bytes (already on the UI thread) into Slint `Image` tiles.
-fn build_tiles_model(results: &[SearchResult], raw_thumbs: Vec<Option<Vec<u8>>>) -> ModelRc<Tile> {
+/// Build the tile model for one render window from already-decoded images.
+///
+/// `results` is the window slice; `images[i]` is the decoded thumbnail for
+/// `results[i]` (looked up from the LRU by the caller), or `None` for a tile
+/// whose thumbnail has not yet been decoded — those render with a placeholder
+/// image until the loader fills them in. `offset` is the global index of
+/// `results[0]` in the full result list, used to set each `Tile.index` for
+/// correct absolute positioning in the virtualized grid.
+fn build_tiles_model(
+    results: &[RowMeta],
+    images: Vec<Option<Image>>,
+    offset: usize,
+) -> ModelRc<Tile> {
     let tiles: Vec<Tile> = results
         .iter()
-        .zip(raw_thumbs)
-        .map(|(r, maybe_bytes)| {
-            let img = maybe_bytes
-                .and_then(|bytes| image_util::jpeg_to_slint_image(&bytes).ok())
-                .unwrap_or_default();
-            let size_kb = r.file_size.unwrap_or(0) / 1024;
+        .zip(images)
+        .enumerate()
+        .map(|(i, (r, maybe_img))| {
+            let size_kb = r.size.unwrap_or(0) / 1024;
             Tile {
                 path: r.path.clone().into(),
-                image: img,
+                image: maybe_img.unwrap_or_default(),
                 size_kb: size_kb as i32,
+                // Global index: window offset + position within this slice.
+                index: (offset + i) as i32,
             }
         })
         .collect();
-    ModelRc::from(std::rc::Rc::new(VecModel::from(tiles)))
+    ModelRc::from(Rc::new(VecModel::from(tiles)))
+}
+
+/// Borrowed bundle of the loader timer's UI-thread state, passed to
+/// [`loader_tick`] once per tick. Grouping these into a struct keeps the timer
+/// closure tidy and the tick function under clippy's argument limit.
+struct LoaderTick<'a> {
+    window: &'a MainWindow,
+    state_ref: &'a Arc<Mutex<SearchState>>,
+    grid_gen: &'a Arc<AtomicU64>,
+    req_tx: &'a mpsc::Sender<loader::ThumbRequest>,
+    resp_rx: &'a mpsc::Receiver<loader::ThumbResponse>,
+    cache: &'a mut loader::ThumbCache,
+    in_flight: &'a mut loader::InFlight,
+    last_range: &'a mut Option<Range<usize>>,
+    last_gen: &'a mut u64,
+}
+
+/// One tick of the moving-window thumbnail loader, on the UI thread.
+///
+/// 1. Drain the worker's response channel, decoding current-generation bytes
+///    into the LRU (stale-generation responses are dropped).
+/// 2. Compute the visible item range from the live scroll geometry.
+/// 3. Rebuild the tile model only when the range or generation changed.
+/// 4. Request any visible thumbnails not yet cached or in-flight.
+///
+/// Cheap when idle: an empty channel plus an unchanged range/generation does no
+/// work beyond the geometry read.
+fn loader_tick(t: LoaderTick<'_>) {
+    let current_gen = loader::current_generation(t.grid_gen);
+
+    // A new result set was installed since the last tick: reset window state so
+    // the grid rebuilds from the top with this generation's thumbnails.
+    let gen_changed = *t.last_gen != current_gen;
+    if gen_changed {
+        *t.last_gen = current_gen;
+        *t.last_range = None;
+        t.in_flight.clear();
+    }
+
+    // 1. Drain decoded bytes into the cache (drop stale generations). Track
+    // whether any current-gen thumbnail landed, so an unchanged window still
+    // refreshes to show progressive loads.
+    let mut cached_new = false;
+    while let Ok((generation, path, result)) = t.resp_rx.try_recv() {
+        if generation != current_gen {
+            continue;
+        }
+        t.in_flight.remove(&path);
+        match result {
+            Ok(bytes) => match loader::decode_thumb_bytes(&bytes) {
+                Some(img) => {
+                    t.cache.put(path, img);
+                    cached_new = true;
+                }
+                None => tracing::warn!("thumb decode failed for {path}"),
+            },
+            Err(e) => tracing::warn!("thumbnail fetch failed for {path}: {e}"),
+        }
+    }
+
+    // 2. Visible window from scroll geometry. viewport-y is <= 0 (more negative
+    // scrolling down), so negate it for the pixels-from-top.
+    let cols = t.window.get_cols().max(0) as usize;
+    let viewport_h = t.window.get_grid_viewport_h();
+    let scroll_px = (-t.window.get_grid_viewport_y()).max(0.0);
+    let total = t.state_ref.lock().unwrap().results.len();
+    let (first_row, last_row) = window::visible_rows(scroll_px, viewport_h, window::TILE_PITCH_Y);
+    let range = window::window_range(first_row, last_row, cols, total);
+
+    // 3. Rebuild only when the window/generation changed, or when a freshly
+    // decoded thumbnail in the current window needs to appear. Otherwise the
+    // tick does no UI work (cheap when idle).
+    let range_changed = t.last_range.as_ref() != Some(&range);
+    if range_changed || gen_changed || cached_new {
+        rebuild_window(t.window, t.state_ref, t.cache, &range);
+        if range_changed || gen_changed {
+            tracing::debug!(
+                start = range.start,
+                end = range.end,
+                "loader: window changed"
+            );
+        }
+        *t.last_range = Some(range.clone());
+    }
+
+    // 4. Request missing thumbnails for the visible window.
+    let paths: Vec<String> = {
+        let s = t.state_ref.lock().unwrap();
+        s.results
+            .get(range.clone())
+            .map(|slice| slice.iter().map(|r| r.path.clone()).collect())
+            .unwrap_or_default()
+    };
+    for path in paths {
+        if t.cache.contains(&path) || t.in_flight.contains(&path) {
+            continue;
+        }
+        t.in_flight.insert(&path);
+        // A send error means the worker has gone away (shutdown); ignore it.
+        if t.req_tx.send((current_gen, path)).is_err() {
+            break;
+        }
+    }
+}
+
+/// Build and install the tile model for `range`, taking each tile's image from
+/// the LRU cache (placeholder when absent). `range.start` becomes the tile
+/// offset so each tile's global `index` positions it correctly in the grid.
+fn rebuild_window(
+    window: &MainWindow,
+    state_ref: &Arc<Mutex<SearchState>>,
+    cache: &mut loader::ThumbCache,
+    range: &Range<usize>,
+) {
+    let slice: Vec<RowMeta> = {
+        let s = state_ref.lock().unwrap();
+        s.results
+            .get(range.clone())
+            .map(<[_]>::to_vec)
+            .unwrap_or_default()
+    };
+    let images: Vec<Option<Image>> = slice.iter().map(|r| cache.get(&r.path).cloned()).collect();
+    let model = build_tiles_model(&slice, images, range.start);
+    window.set_tiles(model);
 }
 
 fn status_text_for(vs: ViewState, error_msg: Option<&str>) -> slint::SharedString {
@@ -1030,177 +1768,142 @@ fn status_text_for(vs: ViewState, error_msg: Option<&str>) -> slint::SharedStrin
     }
 }
 
-/// Spawn a background search thread and marshal results back to the UI thread.
+/// Marshal a fetched result set back onto the UI thread: install it into the
+/// state, bump the grid generation, set `total-items`, update selection and
+/// status. The tile grid itself is NOT built here — the loader timer renders
+/// only the visible window once it observes the new generation.
 ///
-/// DB and disk I/O (thumbnail fetches) happen on the worker thread; only the
-/// non-`Send` `slint::Image` decode runs inside `invoke_from_event_loop`.
-/// `sel` controls how the keyboard selection is updated when results land.
+/// Bumping `grid_generation` invalidates any in-flight thumbnail responses from
+/// the previous result set and signals the loader timer to reset its in-flight
+/// set and last-rendered range, rebuilding from the top on its next tick.
+fn apply_fetch_result(
+    weak: Weak<MainWindow>,
+    state_ref: Arc<Mutex<SearchState>>,
+    grid_gen: Arc<AtomicU64>,
+    res: Result<Vec<RowMeta>>,
+    sel: SelectionPolicy,
+    is_search: bool,
+    // Whether the CLIP model was ready at the moment the background thread
+    // finished. For text/similar searches the model is always ready (can_search
+    // was false until it became ready). For a startup browse that races the
+    // model load, this may be false — in that case leave can_search=false so
+    // the model_timer transition is the sole owner of that flag.
+    model_ready: bool,
+) {
+    slint::invoke_from_event_loop(move || {
+        let Some(w) = weak.upgrade() else { return };
+
+        let (vs, error_msg, results_len) = {
+            let mut s = state_ref.lock().unwrap();
+            match res {
+                Ok(rows) => {
+                    if is_search {
+                        s.relevance_order = rows.clone();
+                    }
+                    s.apply_results(rows);
+                }
+                Err(e) => s.apply_error(e.to_string()),
+            }
+            (s.view_state(), s.error.clone(), s.results.len())
+        };
+
+        // A new result set is installed: bump the generation and clear the
+        // visible grid so the loader timer rebuilds the window from the top.
+        // `total-items` is always the full result count so the scrollbar spans
+        // the complete library even though only a window of tiles is rendered.
+        loader::bump_generation(&grid_gen);
+        if matches!(vs, ViewState::Results | ViewState::Empty) {
+            w.set_tiles(ModelRc::default());
+            w.set_total_items(results_len as i32);
+        }
+
+        apply_selection_after_results(&w, &sel.selected, results_len, sel.reset);
+
+        w.set_status(status_text_for(vs, error_msg.as_deref()));
+        // Only unlock the search box if the CLIP model is already ready.
+        // For a startup browse that races the model load, the model_timer
+        // is the sole owner of the false→true transition.
+        if model_ready {
+            w.set_can_search(true);
+        }
+
+        // Sync sort selector: search/similar results offer Relevance (default);
+        // browse results keep the existing sort options unchanged.
+        if is_search && matches!(vs, ViewState::Results | ViewState::Empty) {
+            w.set_sort_options(make_sort_options_model(true));
+            w.set_sort_index(0); // Relevance selected by default
+            w.set_sort_desc(false);
+            state_ref.lock().unwrap().sort = Sort::default();
+        }
+    })
+    .ok();
+}
+
+/// Spawn a background text-search thread and marshal results back to the UI.
+///
+/// Only the DB query runs on the worker thread; thumbnails are loaded lazily by
+/// the loader timer once results are installed. `sel` controls how the keyboard
+/// selection is updated when results land.
 fn spawn_search(
     weak: Weak<MainWindow>,
     state_ref: Arc<Mutex<SearchState>>,
+    grid_gen: Arc<AtomicU64>,
     backend: Backend,
     query: String,
-    offset: usize,
     filters: Filters,
     sel: SelectionPolicy,
 ) {
     std::thread::spawn(move || {
-        let res = backend.search(&query, offset, &filters);
-
-        // Fetch raw thumbnail bytes on the worker thread (DB/disk I/O).
-        // `Vec<Option<Vec<u8>>>` is Send; `slint::Image` is not.
-        let raw_thumbs: Vec<Option<Vec<u8>>> = match &res {
-            Ok(results) => results
-                .iter()
-                .map(|r| backend.thumbnail(&r.path, 300).ok())
-                .collect(),
-            Err(_) => Vec::new(),
-        };
-
-        slint::invoke_from_event_loop(move || {
-            let Some(w) = weak.upgrade() else { return };
-
-            let (vs, has_more, error_msg, results) = {
-                let mut s = state_ref.lock().unwrap();
-                match res {
-                    Ok(page) => s.apply_page(page, offset),
-                    Err(e) => s.apply_error(e.to_string(), offset),
-                }
-                let vs = s.view_state();
-                let has_more = s.has_more;
-                let error_msg = s.error.clone();
-                let results = s.results.clone();
-                (vs, has_more, error_msg, results)
-            };
-
-            // Only the (non-Send) JPEG→slint::Image decode runs here on the UI thread.
-            if matches!(vs, ViewState::Results | ViewState::Empty) {
-                let model = build_tiles_model(&results, raw_thumbs);
-                w.set_tiles(model);
-            }
-
-            apply_selection_after_results(&w, &sel.selected, results.len(), sel.reset);
-
-            w.set_status(status_text_for(vs, error_msg.as_deref()));
-            w.set_show_load_more(has_more && vs == ViewState::Results);
-            w.set_can_search(true);
-        })
-        .ok();
+        let res = backend.search(&query, &filters);
+        // Text search requires the model to be ready (can_search was false
+        // until the model became ready), so model_ready is always true here.
+        apply_fetch_result(weak, state_ref, grid_gen, res, sel, true, true);
     });
 }
 
 /// Like `spawn_search` but calls the vector-similarity backend.
 ///
 /// The detail panel stays open (callers keep `detail-open` true); this
-/// function only updates the tile grid.  Closures are `Send + 'static`
-/// for the same reasons as `spawn_search`.
-/// `sel` controls how the keyboard selection is updated when results land.
-/// For similarity searches the seed remains highlighted, so callers should
-/// set `sel.reset = false`.
+/// function only updates the tile grid. For similarity searches the seed
+/// remains highlighted, so callers should set `sel.reset = false`.
 fn spawn_similar(
     weak: Weak<MainWindow>,
     state_ref: Arc<Mutex<SearchState>>,
+    grid_gen: Arc<AtomicU64>,
     backend: Backend,
     seed_path: String,
-    offset: usize,
     filters: Filters,
     sel: SelectionPolicy,
 ) {
     std::thread::spawn(move || {
-        let res = backend.search_similar(&seed_path, offset, &filters);
-
-        let raw_thumbs: Vec<Option<Vec<u8>>> = match &res {
-            Ok(results) => results
-                .iter()
-                .map(|r| backend.thumbnail(&r.path, 300).ok())
-                .collect(),
-            Err(_) => Vec::new(),
-        };
-
-        slint::invoke_from_event_loop(move || {
-            let Some(w) = weak.upgrade() else { return };
-
-            let (vs, has_more, error_msg, results) = {
-                let mut s = state_ref.lock().unwrap();
-                match res {
-                    Ok(page) => s.apply_page(page, offset),
-                    Err(e) => s.apply_error(e.to_string(), offset),
-                }
-                let vs = s.view_state();
-                let has_more = s.has_more;
-                let error_msg = s.error.clone();
-                let results = s.results.clone();
-                (vs, has_more, error_msg, results)
-            };
-
-            if matches!(vs, ViewState::Results | ViewState::Empty) {
-                let model = build_tiles_model(&results, raw_thumbs);
-                w.set_tiles(model);
-            }
-
-            apply_selection_after_results(&w, &sel.selected, results.len(), sel.reset);
-
-            w.set_status(status_text_for(vs, error_msg.as_deref()));
-            w.set_show_load_more(has_more && vs == ViewState::Results);
-            w.set_can_search(true);
-        })
-        .ok();
+        let res = backend.search_similar(&seed_path, &filters);
+        // Similarity search uses stored embeddings (no text model needed), but
+        // the UI only allows it after the model is ready, so model_ready=true.
+        apply_fetch_result(weak, state_ref, grid_gen, res, sel, true, true);
     });
 }
 
-/// Browse all indexed images subject to `filters`, paginated by `offset`.
+/// Browse the full filtered set in the current sort order (no paging).
 ///
-/// Mirrors `spawn_search` but calls `backend.browse` instead of embedding a
-/// text query.  Used when the query box is empty but filters are active, and
-/// for the filter-bar debounce when `search_mode` is idle/browse.
+/// Used when the query box is empty but filters are active, and for the
+/// filter-bar debounce when `search_mode` is idle/browse.
 /// `sel` controls how the keyboard selection is updated when results land.
 fn spawn_browse(
     weak: Weak<MainWindow>,
     state_ref: Arc<Mutex<SearchState>>,
+    grid_gen: Arc<AtomicU64>,
     backend: Backend,
     filters: Filters,
-    offset: usize,
     sel: SelectionPolicy,
 ) {
     std::thread::spawn(move || {
-        let res = backend.browse(&filters, offset);
-
-        let raw_thumbs: Vec<Option<Vec<u8>>> = match &res {
-            Ok(results) => results
-                .iter()
-                .map(|r| backend.thumbnail(&r.path, 300).ok())
-                .collect(),
-            Err(_) => Vec::new(),
-        };
-
-        slint::invoke_from_event_loop(move || {
-            let Some(w) = weak.upgrade() else { return };
-
-            let (vs, has_more, error_msg, results) = {
-                let mut s = state_ref.lock().unwrap();
-                match res {
-                    Ok(page) => s.apply_page(page, offset),
-                    Err(e) => s.apply_error(e.to_string(), offset),
-                }
-                let vs = s.view_state();
-                let has_more = s.has_more;
-                let error_msg = s.error.clone();
-                let results = s.results.clone();
-                (vs, has_more, error_msg, results)
-            };
-
-            if matches!(vs, ViewState::Results | ViewState::Empty) {
-                let model = build_tiles_model(&results, raw_thumbs);
-                w.set_tiles(model);
-            }
-
-            apply_selection_after_results(&w, &sel.selected, results.len(), sel.reset);
-
-            w.set_status(status_text_for(vs, error_msg.as_deref()));
-            w.set_show_load_more(has_more && vs == ViewState::Results);
-            w.set_can_search(true);
-        })
-        .ok();
+        let sort = state_ref.lock().unwrap().sort;
+        let res = backend.browse(&filters, &sort);
+        // Check model readiness just before marshalling back to the UI thread.
+        // For the startup browse this races the model load; the model_timer owns
+        // the false→true transition when the model isn't ready yet.
+        let model_ready = backend.model_ready();
+        apply_fetch_result(weak, state_ref, grid_gen, res, sel, false, model_ready);
     });
 }
 
@@ -1228,6 +1931,50 @@ fn apply_selection_after_results(
     w.set_selected_index(new_sel.map(|i| i as i32).unwrap_or(-1));
 }
 
+/// Paths of the `n` neighbors around `center` in arc order (closest first),
+/// skipping the center itself (which is already being loaded by the display path).
+///
+/// Returns an empty vec when `results` is empty or `n` is 0.
+fn neighbor_paths(results: &[RowMeta], center: usize, n: usize) -> Vec<String> {
+    if n == 0 || results.is_empty() {
+        return Vec::new();
+    }
+    // preload_arc returns [center, center+1, center-1, …]; skip index 0 (the focus).
+    preload::preload_arc(center, n, results.len())
+        .into_iter()
+        .skip(1)
+        .map(|idx| results[idx].path.clone())
+        .collect()
+}
+
+/// Spawn a background thread that warms the DB thumbnail cache for each path
+/// in `paths` (already in arc order: closest neighbor first).
+///
+/// The thread stops as soon as it detects that `preload_generation` has advanced
+/// beyond `my_gen`, so stale dispatches from a previous focus do not waste I/O.
+/// A single thread serializes the SQLite writes and naturally honors the arc order.
+fn spawn_preload(
+    backend: Backend,
+    paths: Vec<String>,
+    size: u32,
+    preload_generation: Arc<AtomicU64>,
+    my_gen: u64,
+) {
+    if paths.is_empty() {
+        return;
+    }
+    std::thread::spawn(move || {
+        for path in paths {
+            if !is_current_generation(my_gen, preload_generation.load(Ordering::SeqCst)) {
+                break;
+            }
+            if let Err(e) = backend.thumbnail(&path, size) {
+                tracing::debug!("preload: thumbnail failed for {path}: {e}");
+            }
+        }
+    });
+}
+
 /// Previous lightbox index, clamped at 0 (no wrap).
 fn clamp_prev(current: usize) -> usize {
     current.saturating_sub(1)
@@ -1249,12 +1996,16 @@ fn is_current_generation(captured: u64, latest: u64) -> bool {
     captured == latest
 }
 
-/// Load the full-size image for `rel_path` on a background thread, then set the
+/// Load the lightbox image for `rel_path` on a background thread, then set the
 /// lightbox image and open the overlay on the UI thread.
 ///
-/// File I/O and decoding are both off the UI thread so large originals don't
-/// freeze the window. `slint::Image` is non-Send, so it is constructed inside
-/// the `invoke_from_event_loop` closure where we are on the UI thread.
+/// Fetches (or generates and persists) the `LIGHTBOX_SIZE`-pixel cached thumbnail
+/// via the backend, so RAW files are demosaiced at most once per image — subsequent
+/// opens of the same image are served from the DB thumbnail cache.
+///
+/// The thumbnail bytes are decoded to `DynamicImage` on the background thread so a
+/// slow first-time decode never freezes the UI. `slint::Image` is non-Send, so it
+/// is constructed inside the `invoke_from_event_loop` closure on the UI thread.
 ///
 /// `generation` is a shared monotonic counter: this call claims the next value and
 /// only applies its result if no newer lightbox load has been requested in the
@@ -1268,18 +2019,26 @@ fn load_lightbox_image(
 ) {
     let my_gen = generation.fetch_add(1, Ordering::SeqCst) + 1;
     std::thread::spawn(move || {
-        let abs = backend.abs_path(&rel_path);
-        // Full-resolution, RAW-aware, orientation-corrected decode — on this background
-        // thread so a slow RAW demosaic never freezes the UI.
-        let img = match imgfind::decode::decode_full_image(&abs) {
-            Ok(img) => img,
+        // Fetch (or generate+persist) the 2048-pixel thumbnail — on this background
+        // thread so a slow first-time RAW demosaic never freezes the UI.
+        let bytes = match backend.thumbnail(&rel_path, imgfind::thumbnail::LIGHTBOX_SIZE) {
+            Ok(b) => b,
             Err(e) => {
-                tracing::warn!("Lightbox: failed to decode {abs:?}: {e}");
+                tracing::warn!("Lightbox: failed to load thumbnail for {rel_path}: {e}");
                 return;
             }
         };
 
+        // Decode JPEG bytes → DynamicImage here (still off the UI thread).
         // `DynamicImage` is Send; move it to the UI thread and build the (!Send) Image there.
+        let img = match image::load_from_memory(&bytes) {
+            Ok(img) => img,
+            Err(e) => {
+                tracing::warn!("Lightbox: failed to decode thumbnail bytes for {rel_path}: {e}");
+                return;
+            }
+        };
+
         slint::invoke_from_event_loop(move || {
             // Drop this result if a newer lightbox load superseded it while we decoded.
             if !is_current_generation(my_gen, generation.load(Ordering::SeqCst)) {
@@ -1292,6 +2051,34 @@ fn load_lightbox_image(
         })
         .ok();
     });
+}
+
+/// Build a `ModelRc<SharedString>` for the sort selector.
+///
+/// When `with_relevance` is `true` (search/similar results), "Relevance" is
+/// prepended as the first option so it is selected by default.  For browse mode
+/// it is omitted because browse results have no relevance ranking.
+fn make_sort_options_model(with_relevance: bool) -> ModelRc<SharedString> {
+    let mut opts: Vec<SharedString> = Vec::new();
+    if with_relevance {
+        opts.push("Relevance".into());
+    }
+    opts.push("Name".into());
+    opts.push("Size".into());
+    opts.push("Type".into());
+    ModelRc::from(Rc::new(VecModel::from(opts)))
+}
+
+/// Map a sort-selector option string to a [`SortKey`].
+///
+/// "Relevance" is handled by the caller before this point; any other unknown
+/// string falls back to `SortKey::Name`.
+fn option_str_to_sort_key(s: &str) -> SortKey {
+    match s {
+        "Size" => SortKey::Size,
+        "Type" => SortKey::Type,
+        _ => SortKey::Name,
+    }
 }
 
 #[cfg(test)]
@@ -1419,5 +2206,82 @@ mod tests {
         // lo=0 (unbounded), hi=0.5 → "0 – 4.8 MB" (5_000_000 bytes = 4.8 MB)
         let label = build_size_label(0.0, 0.5, (0, 10_000_000));
         assert!(label.contains("4.8 MB"), "got: {label}");
+    }
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::{
+        PersistedMode, bytes_to_fraction, fraction_to_bytes, gps_to_mode, mode_is_search,
+        sort_to_selector_index,
+    };
+    use imgfind::filters::GpsFilter;
+    use imgfind::sort::{Sort, SortDir, SortKey};
+
+    #[test]
+    fn mode_is_search_only_for_text_and_similar() {
+        assert!(!mode_is_search(&PersistedMode::Browse));
+        assert!(mode_is_search(&PersistedMode::Text("cat".into())));
+        assert!(mode_is_search(&PersistedMode::Similar(7)));
+    }
+
+    #[test]
+    fn search_mode_selector_index_is_relevance() {
+        // In search mode the selector always reflects Relevance (index 0),
+        // regardless of the concrete stored key — the order is faithful anyway.
+        let sort = Sort {
+            key: SortKey::Size,
+            dir: SortDir::Desc,
+        };
+        assert_eq!(
+            sort_to_selector_index(sort, &PersistedMode::Text("x".into())),
+            0
+        );
+        assert_eq!(sort_to_selector_index(sort, &PersistedMode::Similar(1)), 0);
+    }
+
+    #[test]
+    fn browse_mode_selector_index_maps_key_directly() {
+        let mk = |key| Sort {
+            key,
+            dir: SortDir::Asc,
+        };
+        assert_eq!(
+            sort_to_selector_index(mk(SortKey::Name), &PersistedMode::Browse),
+            0
+        );
+        assert_eq!(
+            sort_to_selector_index(mk(SortKey::Size), &PersistedMode::Browse),
+            1
+        );
+        assert_eq!(
+            sort_to_selector_index(mk(SortKey::Type), &PersistedMode::Browse),
+            2
+        );
+    }
+
+    #[test]
+    fn gps_mode_round_trips() {
+        assert_eq!(gps_to_mode(GpsFilter::Any), 0);
+        assert_eq!(gps_to_mode(GpsFilter::HasGps), 1);
+        assert_eq!(gps_to_mode(GpsFilter::NoGps), 2);
+    }
+
+    #[test]
+    fn bytes_fraction_inverts_fraction_to_bytes() {
+        let (min, max) = (0i64, 1_000_000i64);
+        // Unbounded extremes map to the matching slider end.
+        assert_eq!(bytes_to_fraction(None, min, max, true), 0.0);
+        assert_eq!(bytes_to_fraction(None, min, max, false), 1.0);
+        // A concrete byte value round-trips back to its fraction.
+        let bytes = fraction_to_bytes(0.5, min, max, true);
+        assert!((bytes_to_fraction(bytes, min, max, true) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn bytes_fraction_degenerate_bounds() {
+        // max <= min: any concrete value collapses to the slider extreme.
+        assert_eq!(bytes_to_fraction(Some(5), 10, 10, true), 0.0);
+        assert_eq!(bytes_to_fraction(Some(5), 10, 10, false), 1.0);
     }
 }

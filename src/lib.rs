@@ -14,8 +14,10 @@ pub mod logging;
 pub mod metadata;
 pub mod models;
 pub mod search;
+pub mod sort;
 pub mod thumbnail;
 pub mod tui;
+pub mod ui_state;
 
 pub fn get_db_path(dir: Option<&str>) -> Result<PathBuf> {
     // First, try to find existing database by walking up directory tree

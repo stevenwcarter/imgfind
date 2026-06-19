@@ -3,8 +3,9 @@
 //! identical predicates. Designed to extend: add a field + a clause arm.
 
 use rusqlite::types::Value;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Filters {
     /// Inclusive file-size bounds in bytes; `None` = unbounded on that side.
     pub size_min: Option<i64>,
@@ -14,7 +15,8 @@ pub struct Filters {
     pub gps: GpsFilter,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum GpsFilter {
     #[default]
     Any,
