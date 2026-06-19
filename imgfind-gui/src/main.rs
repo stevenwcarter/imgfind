@@ -191,9 +191,14 @@ fn main() -> Result<()> {
     window.set_type_chips(build_chips_model(&all_extensions, &HashSet::new()));
     window.set_gps_mode(0);
     // Sort selector initial state — browse mode: Relevance not available.
-    window.set_sort_options(make_sort_options_model(false));
-    window.set_sort_index(0);
-    window.set_sort_desc(false);
+    // Seed the selector to the configured default sort so the UI matches the
+    // initial browse order from the moment results appear.
+    {
+        let default_sort = gui_config.resolved_sort();
+        window.set_sort_options(make_sort_options_model(false));
+        window.set_sort_index(sort_key_to_browse_index(default_sort.key));
+        window.set_sort_desc(matches!(default_sort.dir, SortDir::Desc));
+    }
 
     // State shared with background threads via Arc<Mutex<_>>.
     let state: Arc<Mutex<SearchState>> = Arc::new(Mutex::new(SearchState::new()));
@@ -252,7 +257,12 @@ fn main() -> Result<()> {
             if backend_poll.model_ready() {
                 if let Some(w) = weak.upgrade() {
                     w.set_can_search(true);
-                    w.set_status("Enter a search query to find images.".into());
+                    // Only show the empty-state hint when the grid has no
+                    // results yet (the startup browse may have already filled
+                    // it while the model was loading in parallel).
+                    if w.get_total_items() == 0 {
+                        w.set_status("Enter a search query to find images.".into());
+                    }
                 }
                 // Mark handled *before* stopping so a hypothetical reentrant
                 // tick that fires during stop() is also a no-op.
@@ -1051,8 +1061,71 @@ fn main() -> Result<()> {
     let _ = debounce_timer;
     let _ = loader_timer;
 
+    // T19: Default startup — browse all images in the configured sort order.
+    // T20 will wrap this as the else-branch of: if persisted_state → restore,
+    // else → start_default_browse(...).
+    start_default_browse(
+        window.as_weak(),
+        Arc::clone(&state),
+        Arc::clone(&grid_generation),
+        backend.clone(),
+        Arc::clone(&selected),
+        gui_config.resolved_sort(),
+    );
+
     window.run().context("Event loop failed")?;
     Ok(())
+}
+
+/// Map a [`SortKey`] to its index in the browse-mode sort selector.
+///
+/// The browse sort options model is `["Name", "Size", "Type"]` (no "Relevance"),
+/// so Name→0, Size→1, Type→2. Used to seed the selector UI at startup and after
+/// returning to browse mode from a search.
+fn sort_key_to_browse_index(key: SortKey) -> i32 {
+    match key {
+        SortKey::Size => 1,
+        SortKey::Type => 2,
+        SortKey::Name => 0,
+    }
+}
+
+/// Trigger the default startup browse-all in the configured sort order.
+///
+/// Sets `state.sort` to `sort`, pre-seeds the shared selection to index 0 so
+/// [`apply_selection_after_results`] re-clamps to it when results land (selecting
+/// the first tile for non-empty DBs), then spawns the browse. Does NOT touch the
+/// model or lightbox — the window stays in loading state until results arrive.
+///
+/// **T20 seam:** T20 should call this in the `else`-branch of its
+/// "if persisted UiState exists → restore; else → start_default_browse(…)" gate.
+/// The exact call site is just before `window.run()` in `main`.
+fn start_default_browse(
+    weak: Weak<MainWindow>,
+    state_ref: Arc<Mutex<SearchState>>,
+    grid_gen: Arc<AtomicU64>,
+    backend: Backend,
+    selected_ref: Arc<Mutex<Option<usize>>>,
+    sort: Sort,
+) {
+    // Install the configured sort so spawn_browse reads it from state.
+    state_ref.lock().unwrap().sort = sort;
+    // Pre-seed the selection to 0; apply_fetch_result re-clamps it to 0 when
+    // results are non-empty (reset=false keeps an in-range index). A freshly
+    // opened DB with zero images clears it to None via the filter.
+    let selected_for_policy = Arc::clone(&selected_ref);
+    *selected_ref.lock().unwrap() = Some(0);
+    spawn_browse(
+        weak,
+        state_ref,
+        grid_gen,
+        backend,
+        Filters::default(),
+        SelectionPolicy {
+            selected: selected_for_policy,
+            reset: false,
+        },
+    );
 }
 
 /// Restart the debounce timer with a fresh 250 ms single-shot callback.
