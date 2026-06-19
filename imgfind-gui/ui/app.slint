@@ -19,6 +19,10 @@ export component MainWindow inherits Window {
     in property <int> total-items;
     in property <string> status;
     in property <bool> can-search: false;
+    // Two-way-bound to the search field's text so Rust can pre-fill it on
+    // session restore. Setting it does NOT trigger `search` — that callback
+    // fires only on the LineEdit's `accepted` (Enter).
+    in-out property <string> query-text;
 
     // Lightbox state set from Rust.
     in property <bool> lightbox-open: false;
@@ -83,10 +87,11 @@ export component MainWindow inherits Window {
     // (the capped render window), so the scrollbar spans the complete library.
     private property <int> row-count: ceil(root.total-items / cols);
     private property <length> grid-height: row-count * tile-stride;
-    // Scroll offset exposed for the T14 viewport-driven window loader. NOTE the
-    // sign: viewport-y is <= 0 and grows MORE NEGATIVE as you scroll down, so the
-    // Rust side negates it (`scroll_px = (-vy).max(0)`).
-    out property <length> grid-viewport-y: grid-scroll.viewport-y;
+    // Scroll offset exposed for the T14 viewport-driven window loader, two-way
+    // bound to the ScrollView below so Rust can ALSO restore it on session
+    // launch (T20). NOTE the sign: viewport-y is <= 0 and grows MORE NEGATIVE as
+    // you scroll down, so the Rust side negates it (`scroll_px = (-vy).max(0)`).
+    in-out property <length> grid-viewport-y;
     // Visible height of the scroll viewport, for the T14 windowed loader's
     // `visible_rows` computation.
     out property <length> grid-viewport-h: grid-scroll.visible-height;
@@ -182,6 +187,7 @@ export component MainWindow inherits Window {
             HorizontalLayout {
                 spacing: 8px;
                 search-input := LineEdit {
+                    text <=> root.query-text;
                     placeholder-text: root.can-search ? "Search images..." : "Loading model...";
                     enabled: root.can-search;
                     // Return focus to app-keys after submitting so grid keys work.
@@ -369,6 +375,7 @@ export component MainWindow inherits Window {
                         height: 100%;
                         viewport-height: root.grid-height;
                         viewport-width: root.cols * root.tile-stride;
+                        viewport-y <=> root.grid-viewport-y;
 
                         for tile in root.tiles: Rectangle {
                             // Position by global index so the tile lands in the

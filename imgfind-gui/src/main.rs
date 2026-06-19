@@ -25,6 +25,7 @@ use backend::Backend;
 use detail::{DetailState, filename_of, format_metadata, select};
 use imgfind::filters::{Filters, GpsFilter};
 use imgfind::sort::{RowMeta, Sort, SortDir, SortKey};
+use imgfind::ui_state::{PersistedMode, UiState};
 use state::{SearchState, ViewState};
 
 /// Whether the current tile grid was populated by a text search or a
@@ -240,6 +241,12 @@ fn main() -> Result<()> {
     // Currently-selected extension set (drives chip `on` state + Filters.extensions).
     let selected_exts: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
 
+    // True only while `restore_session` is pre-filling the UI from a persisted
+    // session. The `search` callback bails out while set so that programmatically
+    // setting the search field (or any restore side effect) can never kick off a
+    // re-query — the restored result list must survive verbatim.
+    let restoring: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+
     // Poll for model readiness every 250 ms.  The timer performs exactly ONE
     // job: detect the loading→ready transition, enable the search box, and
     // stop itself.  After that point, search-start (false) and
@@ -281,8 +288,15 @@ fn main() -> Result<()> {
         let filters_ref = Arc::clone(&filters);
         let selected_ref = Arc::clone(&selected);
         let grid_gen_ref = Arc::clone(&grid_generation);
+        let restoring_ref = Arc::clone(&restoring);
         let backend_search = backend.clone();
         window.on_search(move |query| {
+            // Never run a query while restoring a persisted session: the restored
+            // result list (rehydrated by id) must be shown verbatim, with no
+            // "Searching…" flash and no re-query.
+            if restoring_ref.load(Ordering::SeqCst) {
+                return;
+            }
             let query = query.trim().to_string();
             let current_filters = filters_ref.lock().unwrap().clone();
 
@@ -1061,19 +1075,64 @@ fn main() -> Result<()> {
     let _ = debounce_timer;
     let _ = loader_timer;
 
-    // T19: Default startup — browse all images in the configured sort order.
-    // T20 will wrap this as the else-branch of: if persisted_state → restore,
-    // else → start_default_browse(...).
-    start_default_browse(
-        window.as_weak(),
-        Arc::clone(&state),
-        Arc::clone(&grid_generation),
-        backend.clone(),
-        Arc::clone(&selected),
-        gui_config.resolved_sort(),
-    );
+    // T20: Startup gate — restore the persisted session if one exists, else
+    // fall back to the T19 default browse-all. A malformed blob reads as
+    // `Ok(None)`; a hard read error is logged and also falls back to default.
+    match backend.get_ui_state() {
+        Ok(Some(st)) => {
+            let ctx = RestoreCtx {
+                weak: window.as_weak(),
+                state: Arc::clone(&state),
+                grid_gen: Arc::clone(&grid_generation),
+                backend: backend.clone(),
+                selected: Arc::clone(&selected),
+                filters: Arc::clone(&filters),
+                selected_exts: Arc::clone(&selected_exts),
+                search_mode: Arc::clone(&search_mode),
+                detail: Arc::clone(&detail),
+                restoring: Arc::clone(&restoring),
+                all_extensions: &all_extensions,
+                size_bounds,
+            };
+            restore_session(st, ctx);
+        }
+        Ok(None) => start_default_browse(
+            window.as_weak(),
+            Arc::clone(&state),
+            Arc::clone(&grid_generation),
+            backend.clone(),
+            Arc::clone(&selected),
+            gui_config.resolved_sort(),
+        ),
+        Err(e) => {
+            tracing::warn!("Failed to read persisted session, starting fresh: {e:#}");
+            start_default_browse(
+                window.as_weak(),
+                Arc::clone(&state),
+                Arc::clone(&grid_generation),
+                backend.clone(),
+                Arc::clone(&selected),
+                gui_config.resolved_sort(),
+            );
+        }
+    }
 
     window.run().context("Event loop failed")?;
+
+    // T20: Persist the session AFTER the event loop returns. `window` and every
+    // Arc<Mutex<…>> holder are still in scope; reading the live `grid-viewport-y`
+    // captures the final scroll position. Persistence must never crash exit, so a
+    // failure is logged and swallowed.
+    persist_session(
+        &window,
+        &state,
+        &filters,
+        &selected,
+        &detail,
+        &search_mode,
+        &backend,
+    );
+
     Ok(())
 }
 
@@ -1134,6 +1193,288 @@ fn start_default_browse(
             reset: false,
         },
     );
+}
+
+/// Shared-state handles `restore_session` needs to rebuild the UI from a
+/// persisted [`UiState`]. Bundled into a struct to stay under clippy's
+/// argument limit and keep the single call site readable.
+struct RestoreCtx<'a> {
+    weak: Weak<MainWindow>,
+    state: Arc<Mutex<SearchState>>,
+    grid_gen: Arc<AtomicU64>,
+    backend: Backend,
+    selected: Arc<Mutex<Option<usize>>>,
+    filters: Arc<Mutex<Filters>>,
+    selected_exts: Arc<Mutex<HashSet<String>>>,
+    search_mode: Arc<Mutex<SearchMode>>,
+    detail: Arc<Mutex<Option<DetailState>>>,
+    restoring: Arc<AtomicBool>,
+    all_extensions: &'a [String],
+    size_bounds: (i64, i64),
+}
+
+/// Whether a persisted [`PersistedMode`] is a search (text or similarity), as
+/// opposed to a plain browse. Search modes get a Relevance option in the sort
+/// selector and have a relevance ordering to restore.
+fn mode_is_search(mode: &PersistedMode) -> bool {
+    matches!(mode, PersistedMode::Text(_) | PersistedMode::Similar(_))
+}
+
+/// Index of `sort.key` within the sort-selector options for `mode`.
+///
+/// In search mode the options are `["Relevance", "Name", "Size", "Type"]`, so
+/// concrete keys are offset by one and Relevance (index 0) is the default
+/// reflection — `UiState` stores only a concrete `Sort`, so we cannot tell
+/// "Relevance was selected" apart from a real key and default to Relevance
+/// (the restored display order is faithful either way). In browse mode the
+/// options are `["Name", "Size", "Type"]` and the key maps directly.
+fn sort_to_selector_index(sort: Sort, mode: &PersistedMode) -> i32 {
+    if mode_is_search(mode) {
+        0
+    } else {
+        sort_key_to_browse_index(sort.key)
+    }
+}
+
+/// Map a [`GpsFilter`] back to the `gps-mode` widget int (inverse of the match
+/// in [`build_filters`]): Any=0, HasGps=1, NoGps=2.
+fn gps_to_mode(gps: GpsFilter) -> i32 {
+    match gps {
+        GpsFilter::Any => 0,
+        GpsFilter::HasGps => 1,
+        GpsFilter::NoGps => 2,
+    }
+}
+
+/// Invert a byte threshold back to a [0, 1] slider fraction (inverse of
+/// [`fraction_to_bytes`]). `None` (unbounded) maps to the matching extreme.
+fn bytes_to_fraction(bytes: Option<i64>, min: i64, max: i64, is_lo: bool) -> f32 {
+    match bytes {
+        None => {
+            if is_lo {
+                0.0
+            } else {
+                1.0
+            }
+        }
+        Some(b) => {
+            if max <= min {
+                if is_lo { 0.0 } else { 1.0 }
+            } else {
+                (((b - min) as f64) / ((max - min) as f64)).clamp(0.0, 1.0) as f32
+            }
+        }
+    }
+}
+
+/// Restore the GUI from a persisted [`UiState`] on the main thread, BEFORE the
+/// event loop runs. No query is executed: the result list is rehydrated by id
+/// (display order preserved) and installed directly, then window properties are
+/// set so the loader timer fills thumbnails at the restored scroll position once
+/// `run()` starts. Mirrors the install path of `apply_fetch_result` minus the
+/// background fetch. Restore side effects can never trigger a re-query: the
+/// `restoring` flag is held for the duration and the `search` callback honors it.
+fn restore_session(st: UiState, ctx: RestoreCtx<'_>) {
+    ctx.restoring.store(true, Ordering::SeqCst);
+
+    let Some(w) = ctx.weak.upgrade() else {
+        ctx.restoring.store(false, Ordering::SeqCst);
+        return;
+    };
+
+    // 1. Result list — rehydrate by id (verbatim display order), install into
+    //    SearchState as a completed "search" so view_state() == Results.
+    let rows = ctx.backend.rehydrate(&st.result_ids).unwrap_or_default();
+    let results_len = rows.len();
+    let is_search = mode_is_search(&st.mode);
+    {
+        let mut s = ctx.state.lock().unwrap();
+        s.start_search(String::new());
+        s.sort = st.sort;
+        if is_search {
+            s.relevance_order = rows.clone();
+        }
+        s.apply_results(rows);
+    }
+
+    // Restore the search-mode holder so the filter-bar debounce dispatches the
+    // right backend method on the user's next filter change.
+    let restored_mode = match &st.mode {
+        PersistedMode::Browse => SearchMode::Text(String::new()),
+        PersistedMode::Text(q) => SearchMode::Text(q.clone()),
+        PersistedMode::Similar(seed_id) => {
+            // Resolve the seed id back to its relative path (the holder stores a
+            // path). If the row is gone, fall back to browse mode.
+            match ctx.backend.rehydrate(&[*seed_id]).ok().and_then(|mut v| {
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v.remove(0).path)
+                }
+            }) {
+                Some(path) => SearchMode::Similar(path),
+                None => SearchMode::Text(String::new()),
+            }
+        }
+    };
+    *ctx.search_mode.lock().unwrap() = restored_mode;
+
+    // Install the grid: total-items spans the full set, clearing tiles + bumping
+    // the generation makes the loader timer rebuild the visible window.
+    w.set_total_items(results_len as i32);
+    w.set_tiles(ModelRc::default());
+    loader::bump_generation(&ctx.grid_gen);
+
+    // 2. Search text — programmatic set does NOT fire `search` (only `accepted`
+    //    on Enter does), and `restoring` guards the callback regardless.
+    w.set_query_text(st.search_text.clone().into());
+
+    // 3. Selection — clamp the stored index to the restored length.
+    let sel = st.selected_index.filter(|&i| i < results_len);
+    *ctx.selected.lock().unwrap() = sel;
+    w.set_selected_index(sel.map(|i| i as i32).unwrap_or(-1));
+
+    // 4. Scroll — the stored value is the raw (<= 0) viewport-y; the loader timer
+    //    then loads the window at that offset.
+    w.set_grid_viewport_y(st.scroll_y);
+
+    // 5. Sort selector — Relevance present iff search mode; index reflects the
+    //    stored key (Relevance default for search), direction from the dir.
+    w.set_sort_options(make_sort_options_model(is_search));
+    w.set_sort_index(sort_to_selector_index(st.sort, &st.mode));
+    w.set_sort_desc(matches!(st.sort.dir, SortDir::Desc));
+
+    // 7. Filters (best-effort cosmetic sync; the result list already reflects
+    //    them since it is the persisted id set). Set the shared holders and the
+    //    filter widgets back to the persisted state.
+    {
+        let exts: HashSet<String> = st.filters.extensions.iter().cloned().collect();
+        *ctx.filters.lock().unwrap() = st.filters.clone();
+        *ctx.selected_exts.lock().unwrap() = exts.clone();
+        let lo = bytes_to_fraction(
+            st.filters.size_min,
+            ctx.size_bounds.0,
+            ctx.size_bounds.1,
+            true,
+        );
+        let hi = bytes_to_fraction(
+            st.filters.size_max,
+            ctx.size_bounds.0,
+            ctx.size_bounds.1,
+            false,
+        );
+        w.set_size_lo(lo);
+        w.set_size_hi(hi);
+        w.set_size_label(build_size_label(lo, hi, ctx.size_bounds));
+        w.set_type_chips(build_chips_model(ctx.all_extensions, &exts));
+        w.set_gps_mode(gps_to_mode(st.filters.gps));
+    }
+
+    // 6. Detail panel — open it for the selected image (best-effort). Mirror
+    //    on_tile_selected: show the panel immediately with a placeholder, then
+    //    load the 512 thumb + metadata on a background thread.
+    if st.detail_open
+        && let Some(idx) = sel
+    {
+        let path = {
+            let s = ctx.state.lock().unwrap();
+            s.results.get(idx).map(|r| r.path.clone())
+        };
+        if let Some(path) = path {
+            let ds = select(path.clone());
+            *ctx.detail.lock().unwrap() = Some(ds.clone());
+            w.set_detail_open(true);
+            w.set_detail_filename(ds.filename.into());
+            w.set_detail_image(Default::default());
+            w.set_detail_meta("Loading\u{2026}".into());
+
+            let weak2 = ctx.weak.clone();
+            let backend2 = ctx.backend.clone();
+            std::thread::spawn(move || {
+                let meta_result = backend2.metadata(&path);
+                let thumb_result = backend2.thumbnail(&path, 512);
+                slint::invoke_from_event_loop(move || {
+                    let Some(w) = weak2.upgrade() else { return };
+                    match thumb_result {
+                        Ok(bytes) => match image_util::jpeg_to_slint_image(&bytes) {
+                            Ok(img) => w.set_detail_image(img),
+                            Err(e) => tracing::warn!("restore detail thumb decode failed: {e}"),
+                        },
+                        Err(e) => tracing::warn!("restore detail thumbnail failed: {e}"),
+                    }
+                    match meta_result {
+                        Ok(meta) => w.set_detail_meta(format_metadata(&meta).into()),
+                        Err(e) => {
+                            tracing::warn!("restore detail metadata failed: {e}");
+                            w.set_detail_meta("".into());
+                        }
+                    }
+                })
+                .ok();
+            });
+        }
+    }
+
+    ctx.restoring.store(false, Ordering::SeqCst);
+}
+
+/// Persist the current session to the DB after the event loop returns. Reads
+/// the live window scroll position plus the shared state holders. Any failure
+/// is logged and swallowed so it can never crash process exit.
+fn persist_session(
+    window: &MainWindow,
+    state: &Arc<Mutex<SearchState>>,
+    filters: &Arc<Mutex<Filters>>,
+    selected: &Arc<Mutex<Option<usize>>>,
+    detail: &Arc<Mutex<Option<DetailState>>>,
+    search_mode: &Arc<Mutex<SearchMode>>,
+    backend: &Backend,
+) {
+    let (result_ids, sort) = {
+        let s = state.lock().unwrap();
+        (s.results.iter().map(|r| r.id).collect::<Vec<i64>>(), s.sort)
+    };
+    let search_text;
+    let mode = {
+        let m = search_mode.lock().unwrap().clone();
+        match m {
+            SearchMode::Text(q) if q.is_empty() => {
+                search_text = String::new();
+                PersistedMode::Browse
+            }
+            SearchMode::Text(q) => {
+                search_text = q.clone();
+                PersistedMode::Text(q)
+            }
+            SearchMode::Similar(seed_path) => {
+                search_text = String::new();
+                // Resolve the seed path back to its id; on failure fall back to
+                // Browse (the result list restores either way).
+                match backend.id_for_rel_path(&seed_path) {
+                    Ok(id) => PersistedMode::Similar(id),
+                    Err(e) => {
+                        tracing::warn!("could not resolve similar-seed id, persisting Browse: {e}");
+                        PersistedMode::Browse
+                    }
+                }
+            }
+        }
+    };
+
+    let st = UiState {
+        search_text,
+        mode,
+        sort,
+        filters: filters.lock().unwrap().clone(),
+        result_ids,
+        selected_index: *selected.lock().unwrap(),
+        detail_open: detail.lock().unwrap().is_some(),
+        scroll_y: window.get_grid_viewport_y(),
+    };
+
+    if let Err(e) = backend.set_ui_state(&st) {
+        tracing::warn!("Failed to persist session: {e:#}");
+    }
 }
 
 /// Restart the debounce timer with a fresh 250 ms single-shot callback.
@@ -1865,5 +2206,82 @@ mod tests {
         // lo=0 (unbounded), hi=0.5 → "0 – 4.8 MB" (5_000_000 bytes = 4.8 MB)
         let label = build_size_label(0.0, 0.5, (0, 10_000_000));
         assert!(label.contains("4.8 MB"), "got: {label}");
+    }
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::{
+        PersistedMode, bytes_to_fraction, fraction_to_bytes, gps_to_mode, mode_is_search,
+        sort_to_selector_index,
+    };
+    use imgfind::filters::GpsFilter;
+    use imgfind::sort::{Sort, SortDir, SortKey};
+
+    #[test]
+    fn mode_is_search_only_for_text_and_similar() {
+        assert!(!mode_is_search(&PersistedMode::Browse));
+        assert!(mode_is_search(&PersistedMode::Text("cat".into())));
+        assert!(mode_is_search(&PersistedMode::Similar(7)));
+    }
+
+    #[test]
+    fn search_mode_selector_index_is_relevance() {
+        // In search mode the selector always reflects Relevance (index 0),
+        // regardless of the concrete stored key — the order is faithful anyway.
+        let sort = Sort {
+            key: SortKey::Size,
+            dir: SortDir::Desc,
+        };
+        assert_eq!(
+            sort_to_selector_index(sort, &PersistedMode::Text("x".into())),
+            0
+        );
+        assert_eq!(sort_to_selector_index(sort, &PersistedMode::Similar(1)), 0);
+    }
+
+    #[test]
+    fn browse_mode_selector_index_maps_key_directly() {
+        let mk = |key| Sort {
+            key,
+            dir: SortDir::Asc,
+        };
+        assert_eq!(
+            sort_to_selector_index(mk(SortKey::Name), &PersistedMode::Browse),
+            0
+        );
+        assert_eq!(
+            sort_to_selector_index(mk(SortKey::Size), &PersistedMode::Browse),
+            1
+        );
+        assert_eq!(
+            sort_to_selector_index(mk(SortKey::Type), &PersistedMode::Browse),
+            2
+        );
+    }
+
+    #[test]
+    fn gps_mode_round_trips() {
+        assert_eq!(gps_to_mode(GpsFilter::Any), 0);
+        assert_eq!(gps_to_mode(GpsFilter::HasGps), 1);
+        assert_eq!(gps_to_mode(GpsFilter::NoGps), 2);
+    }
+
+    #[test]
+    fn bytes_fraction_inverts_fraction_to_bytes() {
+        let (min, max) = (0i64, 1_000_000i64);
+        // Unbounded extremes map to the matching slider end.
+        assert_eq!(bytes_to_fraction(None, min, max, true), 0.0);
+        assert_eq!(bytes_to_fraction(None, min, max, false), 1.0);
+        // A concrete byte value round-trips back to its fraction.
+        let bytes = fraction_to_bytes(0.5, min, max, true);
+        assert!((bytes_to_fraction(bytes, min, max, true) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn bytes_fraction_degenerate_bounds() {
+        // max <= min: any concrete value collapses to the slider extreme.
+        assert_eq!(bytes_to_fraction(Some(5), 10, 10, true), 0.0);
+        assert_eq!(bytes_to_fraction(Some(5), 10, 10, false), 1.0);
     }
 }

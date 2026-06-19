@@ -13,7 +13,8 @@ use imgfind::filters::Filters;
 use imgfind::search::SearchEngine;
 use imgfind::sort::{RowMeta, Sort};
 use imgfind::thumbnail::get_or_generate_thumbnail;
-use imgfind::{RelativePath, get_db_path, relative_to_abs_path};
+use imgfind::ui_state::UiState;
+use imgfind::{AbsolutePath, RelativePath, get_db_path, relative_to_abs_path};
 
 /// Maximum number of ranked results fetched per search/similar query. The
 /// full ordered set lives in `SearchState`, but ranked vector search is
@@ -112,10 +113,29 @@ impl Backend {
     }
 
     /// Fetch [`RowMeta`] for an explicit ordered id list (session restore).
-    // Wiring-pending: consumed by the startup/persistence path (T19/T20).
-    #[allow(dead_code)]
     pub fn rehydrate(&self, ids: &[i64]) -> Result<Vec<RowMeta>> {
         self.db.rehydrate_rows(ids).context("Rehydrate failed")
+    }
+
+    /// Load the persisted GUI session, if any. Returns `Ok(None)` when no row
+    /// exists or the stored blob is malformed (callers fall back to a default
+    /// browse rather than failing startup).
+    pub fn get_ui_state(&self) -> Result<Option<UiState>> {
+        self.db.get_ui_state().context("Failed to read UI state")
+    }
+
+    /// Persist the GUI session state (single-row upsert).
+    pub fn set_ui_state(&self, st: &UiState) -> Result<()> {
+        self.db.set_ui_state(st).context("Failed to write UI state")
+    }
+
+    /// Resolve a stored relative image path back to its DB row id (used to
+    /// persist/restore a similarity-search seed by id rather than by path).
+    pub fn id_for_rel_path(&self, rel_path: &str) -> Result<i64> {
+        let abs = AbsolutePath(self.abs_path(rel_path));
+        self.db
+            .get_image_id(&abs)
+            .with_context(|| format!("No image id for {rel_path}"))
     }
 
     pub fn extensions(&self) -> Result<Vec<String>> {
