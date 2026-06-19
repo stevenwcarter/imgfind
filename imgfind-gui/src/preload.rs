@@ -1,7 +1,5 @@
 //! Neighbor preload ordering: focus first, then outward in an increasing arc.
 
-// Not yet wired into the preloading call site; suppress until Task 11 connects it.
-#[allow(dead_code)]
 /// Returns indices to preload starting at `i`, expanding outward by one step
 /// in each direction up to distance `n`, clamped to `[0, len)` and
 /// de-duplicated.

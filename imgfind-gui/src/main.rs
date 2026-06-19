@@ -159,6 +159,16 @@ fn main() -> Result<()> {
     let backend = Backend::open(args.dir.as_deref()).context("Failed to open imgfind database")?;
     backend.start_loading_model();
 
+    // Load config early — T19 and later tasks can reuse `gui_config` without
+    // calling Config::load() again.
+    let gui_config = imgfind::config::Config::load()
+        .map(|c| c.gui)
+        .unwrap_or_else(|e| {
+            tracing::warn!("Failed to load config, using defaults: {e}");
+            imgfind::config::GuiConfig::default()
+        });
+    let preload_n = gui_config.preload_neighbors;
+
     // Fetch size bounds once at startup for the [0,1]↔bytes mapping.
     let size_bounds = backend.size_bounds().unwrap_or((0, 0));
 
@@ -199,6 +209,11 @@ fn main() -> Result<()> {
     // only applies its result if its captured generation is still the latest, so a
     // slow decode can't land after the user has already navigated to another image.
     let lb_generation: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+
+    // Monotonic counter bumped at the start of every preload dispatch.
+    // Bumping before spawning ensures stale in-flight preloads stop when the
+    // user moves on to a different focus image.
+    let preload_generation: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
 
     // Monotonic counter bumped every time a NEW result set is installed (each
     // search/similar/browse, and reset paths). The thumbnail worker tags each
@@ -350,6 +365,7 @@ fn main() -> Result<()> {
         let detail_ref = Arc::clone(&detail);
         let selected_ref = Arc::clone(&selected);
         let backend_detail = backend.clone();
+        let preload_gen_detail = Arc::clone(&preload_generation);
         window.on_tile_selected(move |index| {
             let idx = index as usize;
             // Keep the shared selection in sync so keyboard and mouse share one highlight.
@@ -401,6 +417,22 @@ fn main() -> Result<()> {
                 })
                 .ok();
             });
+
+            // Preload neighbors at 512px for fast detail-panel switching.
+            {
+                let my_gen = preload_gen_detail.fetch_add(1, Ordering::SeqCst) + 1;
+                let paths = {
+                    let s = state_ref.lock().unwrap();
+                    neighbor_paths(&s.results, idx, preload_n)
+                };
+                spawn_preload(
+                    backend_detail.clone(),
+                    paths,
+                    512,
+                    Arc::clone(&preload_gen_detail),
+                    my_gen,
+                );
+            }
         });
     }
 
@@ -412,6 +444,7 @@ fn main() -> Result<()> {
         let selected_ref = Arc::clone(&selected);
         let backend_lb = backend.clone();
         let gen_ref = Arc::clone(&lb_generation);
+        let preload_gen_ta = Arc::clone(&preload_generation);
         window.on_tile_activated(move |index| {
             let idx = index as usize;
             let path = state_ref
@@ -428,6 +461,22 @@ fn main() -> Result<()> {
                 w.set_selected_index(index);
             }
             load_lightbox_image(weak.clone(), backend_lb.clone(), rel, gen_ref.clone());
+
+            // Preload neighbors at LIGHTBOX_SIZE so prev/next navigation is instant.
+            {
+                let my_gen = preload_gen_ta.fetch_add(1, Ordering::SeqCst) + 1;
+                let paths = {
+                    let s = state_ref.lock().unwrap();
+                    neighbor_paths(&s.results, idx, preload_n)
+                };
+                spawn_preload(
+                    backend_lb.clone(),
+                    paths,
+                    imgfind::thumbnail::LIGHTBOX_SIZE,
+                    Arc::clone(&preload_gen_ta),
+                    my_gen,
+                );
+            }
         });
     }
 
@@ -473,6 +522,7 @@ fn main() -> Result<()> {
         let lb_ref = Arc::clone(&lb_index);
         let backend_vf = backend.clone();
         let gen_ref = Arc::clone(&lb_generation);
+        let preload_gen_vf = Arc::clone(&preload_generation);
         window.on_detail_view_full(move || {
             let seed_path = {
                 let d = detail_ref.lock().unwrap();
@@ -492,6 +542,22 @@ fn main() -> Result<()> {
             *lb_ref.lock().unwrap() = idx;
 
             load_lightbox_image(weak.clone(), backend_vf.clone(), rel, gen_ref.clone());
+
+            // Preload neighbors when a valid grid position is known.
+            if let Some(center) = idx {
+                let my_gen = preload_gen_vf.fetch_add(1, Ordering::SeqCst) + 1;
+                let paths = {
+                    let s = state_ref.lock().unwrap();
+                    neighbor_paths(&s.results, center, preload_n)
+                };
+                spawn_preload(
+                    backend_vf.clone(),
+                    paths,
+                    imgfind::thumbnail::LIGHTBOX_SIZE,
+                    Arc::clone(&preload_gen_vf),
+                    my_gen,
+                );
+            }
         });
     }
 
@@ -572,6 +638,7 @@ fn main() -> Result<()> {
         let selected_ref = Arc::clone(&selected);
         let backend_lb = backend.clone();
         let gen_ref = Arc::clone(&lb_generation);
+        let preload_gen_prev = Arc::clone(&preload_generation);
         window.on_lightbox_prev(move || {
             tracing::debug!("lightbox-prev invoked");
             let new_idx = {
@@ -595,6 +662,22 @@ fn main() -> Result<()> {
             if let Some(rel) = path {
                 load_lightbox_image(weak.clone(), backend_lb.clone(), rel, gen_ref.clone());
             }
+
+            // Preload neighbors in arc order so the next likely images are warm.
+            {
+                let my_gen = preload_gen_prev.fetch_add(1, Ordering::SeqCst) + 1;
+                let paths = {
+                    let s = state_ref.lock().unwrap();
+                    neighbor_paths(&s.results, new_idx, preload_n)
+                };
+                spawn_preload(
+                    backend_lb.clone(),
+                    paths,
+                    imgfind::thumbnail::LIGHTBOX_SIZE,
+                    Arc::clone(&preload_gen_prev),
+                    my_gen,
+                );
+            }
         });
     }
 
@@ -606,6 +689,7 @@ fn main() -> Result<()> {
         let selected_ref = Arc::clone(&selected);
         let backend_lb = backend.clone();
         let gen_ref = Arc::clone(&lb_generation);
+        let preload_gen_next = Arc::clone(&preload_generation);
         window.on_lightbox_next(move || {
             tracing::debug!("lightbox-next invoked");
             let (new_idx, len) = {
@@ -633,6 +717,22 @@ fn main() -> Result<()> {
                 .map(|r| r.path.clone());
             if let Some(rel) = path {
                 load_lightbox_image(weak.clone(), backend_lb.clone(), rel, gen_ref.clone());
+            }
+
+            // Preload neighbors in arc order so the next likely images are warm.
+            {
+                let my_gen = preload_gen_next.fetch_add(1, Ordering::SeqCst) + 1;
+                let paths = {
+                    let s = state_ref.lock().unwrap();
+                    neighbor_paths(&s.results, new_idx, preload_n)
+                };
+                spawn_preload(
+                    backend_lb.clone(),
+                    paths,
+                    imgfind::thumbnail::LIGHTBOX_SIZE,
+                    Arc::clone(&preload_gen_next),
+                    my_gen,
+                );
             }
         });
     }
@@ -1388,6 +1488,50 @@ fn apply_selection_after_results(
     };
     *selected_ref.lock().unwrap() = new_sel;
     w.set_selected_index(new_sel.map(|i| i as i32).unwrap_or(-1));
+}
+
+/// Paths of the `n` neighbors around `center` in arc order (closest first),
+/// skipping the center itself (which is already being loaded by the display path).
+///
+/// Returns an empty vec when `results` is empty or `n` is 0.
+fn neighbor_paths(results: &[RowMeta], center: usize, n: usize) -> Vec<String> {
+    if n == 0 || results.is_empty() {
+        return Vec::new();
+    }
+    // preload_arc returns [center, center+1, center-1, …]; skip index 0 (the focus).
+    preload::preload_arc(center, n, results.len())
+        .into_iter()
+        .skip(1)
+        .map(|idx| results[idx].path.clone())
+        .collect()
+}
+
+/// Spawn a background thread that warms the DB thumbnail cache for each path
+/// in `paths` (already in arc order: closest neighbor first).
+///
+/// The thread stops as soon as it detects that `preload_generation` has advanced
+/// beyond `my_gen`, so stale dispatches from a previous focus do not waste I/O.
+/// A single thread serializes the SQLite writes and naturally honors the arc order.
+fn spawn_preload(
+    backend: Backend,
+    paths: Vec<String>,
+    size: u32,
+    preload_generation: Arc<AtomicU64>,
+    my_gen: u64,
+) {
+    if paths.is_empty() {
+        return;
+    }
+    std::thread::spawn(move || {
+        for path in paths {
+            if !is_current_generation(my_gen, preload_generation.load(Ordering::SeqCst)) {
+                break;
+            }
+            if let Err(e) = backend.thumbnail(&path, size) {
+                tracing::debug!("preload: thumbnail failed for {path}: {e}");
+            }
+        }
+    });
 }
 
 /// Previous lightbox index, clamped at 0 (no wrap).
