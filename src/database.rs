@@ -28,6 +28,11 @@ const MAX_JITTER: f64 = 0.000001;
 
 pub type ImageSearchResult = Result<Vec<(String, f32, Option<Vec<u8>>)>>;
 
+/// One ranked metadata-search row: `(image id, relative path, distance,
+/// file_size)`. The `id` lets callers build stable [`crate::sort::RowMeta`]
+/// rows from ranked (relevance-ordered) results.
+pub type RankedMetaRow = (i64, String, f32, Option<i64>);
+
 impl Database {
     pub fn new(db_path: &Path) -> Result<Self> {
         // Initialize sqlite-vec extension
@@ -818,9 +823,11 @@ impl Database {
         Ok(search_results)
     }
 
-    /// Metadata-first search: returns (relative path, distance, file_size) with
-    /// no thumbnail join. Joins `image_metadata` for `file_size`. Mirrors the
-    /// embedding-binding + execution idiom of `search_similar_images_with_raw_blob`.
+    /// Metadata-first search: returns `(image id, relative path, distance,
+    /// file_size)` with no thumbnail join. Joins `image_metadata` for
+    /// `file_size`. Mirrors the embedding-binding + execution idiom of
+    /// `search_similar_images_with_raw_blob`. The `id` lets callers build stable
+    /// [`crate::sort::RowMeta`] rows from ranked results.
     pub fn search_similar_images_meta(
         &self,
         query_embedding: &[f32],
@@ -829,7 +836,7 @@ impl Database {
         distance_threshold: f32,
         max_k: usize,
         filters: &Filters,
-    ) -> Result<Vec<(String, f32, Option<i64>)>> {
+    ) -> Result<Vec<RankedMetaRow>> {
         // k must cover offset+limit AFTER filtering; raise to max_k so a full
         // page can survive post-MATCH filtering. `k` and the distance threshold
         // are interpolated as the vec0 MATCH/k syntax requires literal values
@@ -840,7 +847,7 @@ impl Database {
         let (clause, fvalues) = build_filter_clause(filters);
 
         let query = format!(
-            "SELECT i.path, v.distance, m.file_size
+            "SELECT i.id, i.path, v.distance, m.file_size
                FROM {vt} v
                JOIN images i ON i.id = v.rowid
                LEFT JOIN image_metadata m ON m.image_id = i.id
@@ -864,9 +871,10 @@ impl Database {
         values.extend(fvalues);
         let results = stmt.query_map(params_from_iter(values), |row| {
             Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, f32>(1)?,
-                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, f32>(2)?,
+                row.get::<_, Option<i64>>(3)?,
             ))
         })?;
 
@@ -881,7 +889,7 @@ impl Database {
     /// Find images similar to an already-indexed image, using its STORED
     /// embedding from the active model's vec0 table (no re-embedding). The seed
     /// itself is typically the nearest neighbour (distance ~0); callers may filter
-    /// it out. Returns `(relative_path, distance, file_size)` rows.
+    /// it out. Returns `(image id, relative_path, distance, file_size)` rows.
     pub fn find_similar_to_path(
         &self,
         path: &RelativePath,
@@ -890,7 +898,7 @@ impl Database {
         distance_threshold: f32,
         max_k: usize,
         filters: &crate::filters::Filters,
-    ) -> Result<Vec<(String, f32, Option<i64>)>> {
+    ) -> Result<Vec<RankedMetaRow>> {
         let vt = self.vectors_table()?;
         let rel = path.as_str();
         let conn = self
@@ -1877,8 +1885,8 @@ mod tests {
         assert_eq!(page1.len(), 4, "page 1 should be full");
         assert_eq!(page2.len(), 4, "page 2 should return the next slice");
 
-        let p1_paths: Vec<&str> = page1.iter().map(|(p, ..)| p.as_str()).collect();
-        let p2_paths: Vec<&str> = page2.iter().map(|(p, ..)| p.as_str()).collect();
+        let p1_paths: Vec<&str> = page1.iter().map(|(_, p, ..)| p.as_str()).collect();
+        let p2_paths: Vec<&str> = page2.iter().map(|(_, p, ..)| p.as_str()).collect();
         assert_eq!(p1_paths, ["img1.jpg", "img2.jpg", "img3.jpg", "img4.jpg"]);
         assert_eq!(p2_paths, ["img5.jpg", "img6.jpg", "img7.jpg", "img8.jpg"]);
 
@@ -2121,7 +2129,7 @@ mod tests {
                 &crate::filters::Filters::default(),
             )
             .expect("similar");
-        let paths: Vec<&str> = rows.iter().map(|(p, _, _)| p.as_str()).collect();
+        let paths: Vec<&str> = rows.iter().map(|(_, p, _, _)| p.as_str()).collect();
         assert!(
             paths.contains(&"a.jpg"),
             "seed should appear among neighbours"
@@ -2131,7 +2139,7 @@ mod tests {
             "other image should appear among neighbours"
         );
         // a.jpg (the seed) is closest to itself.
-        assert_eq!(rows[0].0, "a.jpg");
+        assert_eq!(rows[0].1, "a.jpg");
 
         let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
     }
@@ -2286,7 +2294,7 @@ mod tests {
         let rows = db
             .search_similar_images_meta(&q, 80, 0, 1.3, 100, &jpg_only)
             .unwrap();
-        let paths: Vec<&str> = rows.iter().map(|(p, _, _)| p.as_str()).collect();
+        let paths: Vec<&str> = rows.iter().map(|(_, p, _, _)| p.as_str()).collect();
         assert!(paths.contains(&"a.jpg"));
         assert!(
             !paths.contains(&"b.png"),

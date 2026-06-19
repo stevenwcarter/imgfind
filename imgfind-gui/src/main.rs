@@ -21,7 +21,8 @@ use slint::{ModelRc, SharedString, Timer, TimerMode, VecModel, Weak};
 use backend::Backend;
 use detail::{DetailState, filename_of, format_metadata, select};
 use imgfind::filters::{Filters, GpsFilter};
-use state::{SearchResult, SearchState, ViewState};
+use imgfind::sort::RowMeta;
+use state::{SearchState, ViewState};
 
 /// Whether the current tile grid was populated by a text search or a
 /// vector-similarity search.  Stored in an `Arc<Mutex<_>>` so both the
@@ -166,7 +167,6 @@ fn main() -> Result<()> {
     // Initial UI state: model loading, search disabled.
     window.set_can_search(false);
     window.set_status("Loading model...".into());
-    window.set_show_load_more(false);
     window.set_tiles(ModelRc::default());
     window.set_lightbox_open(false);
     window.set_detail_open(false);
@@ -255,7 +255,6 @@ fn main() -> Result<()> {
                     *mode_ref.lock().unwrap() = SearchMode::Text(String::new());
                     if let Some(w) = weak.upgrade() {
                         w.set_status("Enter a search query to find images.".into());
-                        w.set_show_load_more(false);
                         w.set_tiles(ModelRc::default());
                         w.set_detail_open(false);
                         w.set_lightbox_open(false);
@@ -271,7 +270,6 @@ fn main() -> Result<()> {
                         w.set_lightbox_open(false);
                         w.set_detail_open(false);
                         w.set_status("Searching\u{2026}".into());
-                        w.set_show_load_more(false);
                         w.set_can_search(false);
                     }
                     spawn_browse(
@@ -279,7 +277,6 @@ fn main() -> Result<()> {
                         Arc::clone(&state_ref),
                         backend_search.clone(),
                         current_filters,
-                        0,
                         SelectionPolicy {
                             selected: Arc::clone(&selected_ref),
                             reset: true,
@@ -302,7 +299,6 @@ fn main() -> Result<()> {
             state_ref.lock().unwrap().start_search(query.clone());
             if let Some(w) = weak.upgrade() {
                 w.set_status("Searching\u{2026}".into());
-                w.set_show_load_more(false);
                 w.set_can_search(false);
             }
 
@@ -311,86 +307,12 @@ fn main() -> Result<()> {
                 Arc::clone(&state_ref),
                 backend_search.clone(),
                 query,
-                0,
                 current_filters,
                 SelectionPolicy {
                     selected: Arc::clone(&selected_ref),
                     reset: true,
                 },
             );
-        });
-    }
-
-    // --- load-more callback ---
-    {
-        let weak = window.as_weak();
-        let state_ref = Arc::clone(&state);
-        let mode_ref = Arc::clone(&search_mode);
-        let filters_ref = Arc::clone(&filters);
-        let selected_ref = Arc::clone(&selected);
-        let backend_more = backend.clone();
-        window.on_load_more(move || {
-            let offset = state_ref.lock().unwrap().next_offset();
-            let mode = mode_ref.lock().unwrap().clone();
-            let current_filters = filters_ref.lock().unwrap().clone();
-
-            if let Some(w) = weak.upgrade() {
-                w.set_status("Searching\u{2026}".into());
-                w.set_show_load_more(false);
-                w.set_can_search(false);
-            }
-
-            match mode {
-                SearchMode::Text(query) if !query.is_empty() => {
-                    spawn_search(
-                        weak.clone(),
-                        Arc::clone(&state_ref),
-                        backend_more.clone(),
-                        query,
-                        offset,
-                        current_filters,
-                        SelectionPolicy {
-                            selected: Arc::clone(&selected_ref),
-                            reset: false,
-                        },
-                    );
-                }
-                SearchMode::Similar(seed) if !seed.is_empty() => {
-                    spawn_similar(
-                        weak.clone(),
-                        Arc::clone(&state_ref),
-                        backend_more.clone(),
-                        seed,
-                        offset,
-                        current_filters,
-                        SelectionPolicy {
-                            selected: Arc::clone(&selected_ref),
-                            reset: false,
-                        },
-                    );
-                }
-                // Text("") means we're in browse mode.
-                SearchMode::Text(_) => {
-                    spawn_browse(
-                        weak.clone(),
-                        Arc::clone(&state_ref),
-                        backend_more.clone(),
-                        current_filters,
-                        offset,
-                        SelectionPolicy {
-                            selected: Arc::clone(&selected_ref),
-                            reset: false,
-                        },
-                    );
-                }
-                _ => {
-                    // No active search — restore UI to idle.
-                    if let Some(w) = weak.upgrade() {
-                        w.set_can_search(true);
-                        w.set_show_load_more(false);
-                    }
-                }
-            }
         });
     }
 
@@ -569,16 +491,14 @@ fn main() -> Result<()> {
             let current_filters = filters_ref.lock().unwrap().clone();
             *mode_ref.lock().unwrap() = SearchMode::Similar(seed_path.clone());
 
-            // `start_search` records the seed path as the "committed query" so
-            // `apply_page` / `apply_error` work correctly for offset tracking.
-            // NOTE: `committed_query` holds a file path here, NOT a text query.
-            // load-more reads `search_mode` (not this field) to dispatch the
-            // next page, and `committed_query` is never displayed — do NOT rely
-            // on it being a real text query during a similarity search.
+            // `start_search` records the seed path as the "committed query".
+            // NOTE: `committed_query` holds a file path here, NOT a text query;
+            // `search_mode` (not this field) drives dispatch, and
+            // `committed_query` is never displayed — do NOT rely on it being a
+            // real text query during a similarity search.
             state_ref.lock().unwrap().start_search(seed_path.clone());
             if let Some(w) = weak.upgrade() {
                 w.set_status(format!("Similar to {filename}").into());
-                w.set_show_load_more(false);
                 w.set_can_search(false);
                 // detail-open stays TRUE — panel remains on the seed.
             }
@@ -588,7 +508,6 @@ fn main() -> Result<()> {
                 Arc::clone(&state_ref),
                 backend_sim.clone(),
                 seed_path,
-                0,
                 current_filters,
                 SelectionPolicy {
                     selected: Arc::clone(&selected_ref),
@@ -931,7 +850,6 @@ fn fire_debounced_query(
             state_ref.lock().unwrap().start_search(query.clone());
             if let Some(w) = weak.upgrade() {
                 w.set_status("Searching\u{2026}".into());
-                w.set_show_load_more(false);
                 w.set_can_search(false);
             }
             spawn_search(
@@ -939,7 +857,6 @@ fn fire_debounced_query(
                 state_ref,
                 backend,
                 query,
-                0,
                 filters,
                 SelectionPolicy {
                     selected: selected_ref,
@@ -953,7 +870,6 @@ fn fire_debounced_query(
             *selected_ref.lock().unwrap() = None;
             if let Some(w) = weak.upgrade() {
                 w.set_status("Enter a search query to find images.".into());
-                w.set_show_load_more(false);
                 w.set_tiles(ModelRc::default());
                 w.set_selected_index(-1);
             }
@@ -963,7 +879,6 @@ fn fire_debounced_query(
             state_ref.lock().unwrap().start_search(String::new());
             if let Some(w) = weak.upgrade() {
                 w.set_status("Searching\u{2026}".into());
-                w.set_show_load_more(false);
                 w.set_can_search(false);
             }
             spawn_browse(
@@ -971,7 +886,6 @@ fn fire_debounced_query(
                 state_ref,
                 backend,
                 filters,
-                0,
                 SelectionPolicy {
                     selected: selected_ref,
                     reset: true,
@@ -983,7 +897,6 @@ fn fire_debounced_query(
             if let Some(w) = weak.upgrade() {
                 let filename = filename_of(&seed);
                 w.set_status(format!("Similar to {filename}").into());
-                w.set_show_load_more(false);
                 w.set_can_search(false);
             }
             spawn_similar(
@@ -991,7 +904,6 @@ fn fire_debounced_query(
                 state_ref,
                 backend,
                 seed,
-                0,
                 filters,
                 SelectionPolicy {
                     selected: selected_ref,
@@ -1003,7 +915,7 @@ fn fire_debounced_query(
 }
 
 /// Decode raw JPEG bytes (already on the UI thread) into Slint `Image` tiles.
-fn build_tiles_model(results: &[SearchResult], raw_thumbs: Vec<Option<Vec<u8>>>) -> ModelRc<Tile> {
+fn build_tiles_model(results: &[RowMeta], raw_thumbs: Vec<Option<Vec<u8>>>) -> ModelRc<Tile> {
     let tiles: Vec<Tile> = results
         .iter()
         .zip(raw_thumbs)
@@ -1011,7 +923,7 @@ fn build_tiles_model(results: &[SearchResult], raw_thumbs: Vec<Option<Vec<u8>>>)
             let img = maybe_bytes
                 .and_then(|bytes| image_util::jpeg_to_slint_image(&bytes).ok())
                 .unwrap_or_default();
-            let size_kb = r.file_size.unwrap_or(0) / 1024;
+            let size_kb = r.size.unwrap_or(0) / 1024;
             Tile {
                 path: r.path.clone().into(),
                 image: img,
@@ -1032,177 +944,128 @@ fn status_text_for(vs: ViewState, error_msg: Option<&str>) -> slint::SharedStrin
     }
 }
 
-/// Spawn a background search thread and marshal results back to the UI thread.
+/// Fetch raw thumbnail bytes for a bounded prefix of `results`.
+///
+/// INTERIM (T12): capped to `window::WINDOW_MIN` until T14 replaces this with
+/// the windowed loader. `browse_all` can return 100k rows; we must not fetch a
+/// thumbnail per row. The full ordered `Vec<RowMeta>` still lives in
+/// `SearchState`; only the tiles/thumbnails built here are capped.
+fn fetch_capped_thumbs(backend: &Backend, results: &[RowMeta]) -> Vec<Option<Vec<u8>>> {
+    results
+        .iter()
+        .take(window::WINDOW_MIN)
+        .map(|r| backend.thumbnail(&r.path, 300).ok())
+        .collect()
+}
+
+/// Marshal a fetched result set back onto the UI thread: apply it to the state,
+/// build the (capped) tiles model, update selection and status.
+///
+/// `raw_thumbs` are the thumbnails for the bounded prefix fetched on the worker
+/// thread (`slint::Image` is not `Send`, so only the JPEG→`Image` decode runs
+/// here on the UI thread).
+fn apply_fetch_result(
+    weak: Weak<MainWindow>,
+    state_ref: Arc<Mutex<SearchState>>,
+    res: Result<Vec<RowMeta>>,
+    raw_thumbs: Vec<Option<Vec<u8>>>,
+    sel: SelectionPolicy,
+) {
+    slint::invoke_from_event_loop(move || {
+        let Some(w) = weak.upgrade() else { return };
+
+        let (vs, error_msg, results) = {
+            let mut s = state_ref.lock().unwrap();
+            match res {
+                Ok(rows) => s.apply_results(rows),
+                Err(e) => s.apply_error(e.to_string()),
+            }
+            (s.view_state(), s.error.clone(), s.results.clone())
+        };
+
+        // Only the (non-Send) JPEG→slint::Image decode runs here on the UI
+        // thread; the tiles cover at most the WINDOW_MIN prefix (see
+        // `fetch_capped_thumbs`).
+        if matches!(vs, ViewState::Results | ViewState::Empty) {
+            let capped = &results[..results.len().min(window::WINDOW_MIN)];
+            let model = build_tiles_model(capped, raw_thumbs);
+            w.set_tiles(model);
+        }
+
+        apply_selection_after_results(&w, &sel.selected, results.len(), sel.reset);
+
+        w.set_status(status_text_for(vs, error_msg.as_deref()));
+        w.set_can_search(true);
+    })
+    .ok();
+}
+
+/// Spawn a background text-search thread and marshal results back to the UI.
 ///
 /// DB and disk I/O (thumbnail fetches) happen on the worker thread; only the
-/// non-`Send` `slint::Image` decode runs inside `invoke_from_event_loop`.
+/// non-`Send` `slint::Image` decode runs on the UI thread.
 /// `sel` controls how the keyboard selection is updated when results land.
 fn spawn_search(
     weak: Weak<MainWindow>,
     state_ref: Arc<Mutex<SearchState>>,
     backend: Backend,
     query: String,
-    offset: usize,
     filters: Filters,
     sel: SelectionPolicy,
 ) {
     std::thread::spawn(move || {
-        let res = backend.search(&query, offset, &filters);
-
-        // Fetch raw thumbnail bytes on the worker thread (DB/disk I/O).
-        // `Vec<Option<Vec<u8>>>` is Send; `slint::Image` is not.
-        let raw_thumbs: Vec<Option<Vec<u8>>> = match &res {
-            Ok(results) => results
-                .iter()
-                .map(|r| backend.thumbnail(&r.path, 300).ok())
-                .collect(),
+        let res = backend.search(&query, &filters);
+        let raw_thumbs = match &res {
+            Ok(results) => fetch_capped_thumbs(&backend, results),
             Err(_) => Vec::new(),
         };
-
-        slint::invoke_from_event_loop(move || {
-            let Some(w) = weak.upgrade() else { return };
-
-            let (vs, has_more, error_msg, results) = {
-                let mut s = state_ref.lock().unwrap();
-                match res {
-                    Ok(page) => s.apply_page(page, offset),
-                    Err(e) => s.apply_error(e.to_string(), offset),
-                }
-                let vs = s.view_state();
-                let has_more = s.has_more;
-                let error_msg = s.error.clone();
-                let results = s.results.clone();
-                (vs, has_more, error_msg, results)
-            };
-
-            // Only the (non-Send) JPEG→slint::Image decode runs here on the UI thread.
-            if matches!(vs, ViewState::Results | ViewState::Empty) {
-                let model = build_tiles_model(&results, raw_thumbs);
-                w.set_tiles(model);
-            }
-
-            apply_selection_after_results(&w, &sel.selected, results.len(), sel.reset);
-
-            w.set_status(status_text_for(vs, error_msg.as_deref()));
-            w.set_show_load_more(has_more && vs == ViewState::Results);
-            w.set_can_search(true);
-        })
-        .ok();
+        apply_fetch_result(weak, state_ref, res, raw_thumbs, sel);
     });
 }
 
 /// Like `spawn_search` but calls the vector-similarity backend.
 ///
 /// The detail panel stays open (callers keep `detail-open` true); this
-/// function only updates the tile grid.  Closures are `Send + 'static`
-/// for the same reasons as `spawn_search`.
-/// `sel` controls how the keyboard selection is updated when results land.
-/// For similarity searches the seed remains highlighted, so callers should
-/// set `sel.reset = false`.
+/// function only updates the tile grid. For similarity searches the seed
+/// remains highlighted, so callers should set `sel.reset = false`.
 fn spawn_similar(
     weak: Weak<MainWindow>,
     state_ref: Arc<Mutex<SearchState>>,
     backend: Backend,
     seed_path: String,
-    offset: usize,
     filters: Filters,
     sel: SelectionPolicy,
 ) {
     std::thread::spawn(move || {
-        let res = backend.search_similar(&seed_path, offset, &filters);
-
-        let raw_thumbs: Vec<Option<Vec<u8>>> = match &res {
-            Ok(results) => results
-                .iter()
-                .map(|r| backend.thumbnail(&r.path, 300).ok())
-                .collect(),
+        let res = backend.search_similar(&seed_path, &filters);
+        let raw_thumbs = match &res {
+            Ok(results) => fetch_capped_thumbs(&backend, results),
             Err(_) => Vec::new(),
         };
-
-        slint::invoke_from_event_loop(move || {
-            let Some(w) = weak.upgrade() else { return };
-
-            let (vs, has_more, error_msg, results) = {
-                let mut s = state_ref.lock().unwrap();
-                match res {
-                    Ok(page) => s.apply_page(page, offset),
-                    Err(e) => s.apply_error(e.to_string(), offset),
-                }
-                let vs = s.view_state();
-                let has_more = s.has_more;
-                let error_msg = s.error.clone();
-                let results = s.results.clone();
-                (vs, has_more, error_msg, results)
-            };
-
-            if matches!(vs, ViewState::Results | ViewState::Empty) {
-                let model = build_tiles_model(&results, raw_thumbs);
-                w.set_tiles(model);
-            }
-
-            apply_selection_after_results(&w, &sel.selected, results.len(), sel.reset);
-
-            w.set_status(status_text_for(vs, error_msg.as_deref()));
-            w.set_show_load_more(has_more && vs == ViewState::Results);
-            w.set_can_search(true);
-        })
-        .ok();
+        apply_fetch_result(weak, state_ref, res, raw_thumbs, sel);
     });
 }
 
-/// Browse all indexed images subject to `filters`, paginated by `offset`.
+/// Browse the full filtered set in the current sort order (no paging).
 ///
-/// Mirrors `spawn_search` but calls `backend.browse` instead of embedding a
-/// text query.  Used when the query box is empty but filters are active, and
-/// for the filter-bar debounce when `search_mode` is idle/browse.
+/// Used when the query box is empty but filters are active, and for the
+/// filter-bar debounce when `search_mode` is idle/browse.
 /// `sel` controls how the keyboard selection is updated when results land.
 fn spawn_browse(
     weak: Weak<MainWindow>,
     state_ref: Arc<Mutex<SearchState>>,
     backend: Backend,
     filters: Filters,
-    offset: usize,
     sel: SelectionPolicy,
 ) {
     std::thread::spawn(move || {
-        let res = backend.browse(&filters, offset);
-
-        let raw_thumbs: Vec<Option<Vec<u8>>> = match &res {
-            Ok(results) => results
-                .iter()
-                .map(|r| backend.thumbnail(&r.path, 300).ok())
-                .collect(),
+        let sort = state_ref.lock().unwrap().sort;
+        let res = backend.browse(&filters, &sort);
+        let raw_thumbs = match &res {
+            Ok(results) => fetch_capped_thumbs(&backend, results),
             Err(_) => Vec::new(),
         };
-
-        slint::invoke_from_event_loop(move || {
-            let Some(w) = weak.upgrade() else { return };
-
-            let (vs, has_more, error_msg, results) = {
-                let mut s = state_ref.lock().unwrap();
-                match res {
-                    Ok(page) => s.apply_page(page, offset),
-                    Err(e) => s.apply_error(e.to_string(), offset),
-                }
-                let vs = s.view_state();
-                let has_more = s.has_more;
-                let error_msg = s.error.clone();
-                let results = s.results.clone();
-                (vs, has_more, error_msg, results)
-            };
-
-            if matches!(vs, ViewState::Results | ViewState::Empty) {
-                let model = build_tiles_model(&results, raw_thumbs);
-                w.set_tiles(model);
-            }
-
-            apply_selection_after_results(&w, &sel.selected, results.len(), sel.reset);
-
-            w.set_status(status_text_for(vs, error_msg.as_deref()));
-            w.set_show_load_more(has_more && vs == ViewState::Results);
-            w.set_can_search(true);
-        })
-        .ok();
+        apply_fetch_result(weak, state_ref, res, raw_thumbs, sel);
     });
 }
 

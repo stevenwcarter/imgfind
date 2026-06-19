@@ -1,4 +1,4 @@
-use crate::database::{Database, ImageSearchResult};
+use crate::database::{Database, ImageSearchResult, RankedMetaRow};
 use crate::filters::Filters;
 use anyhow::Result;
 
@@ -43,7 +43,7 @@ impl<'a> SearchEngine<'a> {
         distance_threshold: f32,
         max_k: usize,
         filters: &Filters,
-    ) -> Result<Vec<(String, f32, Option<i64>)>> {
+    ) -> Result<Vec<RankedMetaRow>> {
         let query_embedding = normalize_vector(&query_embedding);
         self.db.search_similar_images_meta(
             &query_embedding,

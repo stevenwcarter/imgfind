@@ -11,10 +11,22 @@ use imgfind::config::SearchConfig;
 use imgfind::database::{Database, ImageMetadata, extract_image_metadata};
 use imgfind::filters::Filters;
 use imgfind::search::SearchEngine;
+use imgfind::sort::{RowMeta, Sort};
 use imgfind::thumbnail::get_or_generate_thumbnail;
 use imgfind::{RelativePath, get_db_path, relative_to_abs_path};
 
-use crate::state::{PAGE_SIZE, SearchResult};
+/// Maximum number of ranked results fetched per search/similar query. The
+/// full ordered set lives in `SearchState`, but ranked vector search is
+/// inherently bounded — the most relevant `SEARCH_LIMIT` rows.
+const SEARCH_LIMIT: usize = 80;
+
+/// Derive the lowercased file extension from a path (empty when no dot),
+/// matching `Database::browse_all`'s Rust-side derivation.
+fn ext_from(path: &str) -> String {
+    path.rsplit_once('.')
+        .map(|(_, e)| e.to_lowercase())
+        .unwrap_or_default()
+}
 
 #[derive(Clone)]
 pub struct Backend {
@@ -61,12 +73,9 @@ impl Backend {
         self.embedder.get().is_some()
     }
 
-    pub fn search(
-        &self,
-        query: &str,
-        offset: usize,
-        filters: &Filters,
-    ) -> Result<Vec<SearchResult>> {
+    /// Text query → ranked [`RowMeta`] in relevance order (distance ascending).
+    /// Relevance lives in the Vec ordering; `distance` is not stored.
+    pub fn search(&self, query: &str, filters: &Filters) -> Result<Vec<RowMeta>> {
         let embedder = self
             .embedder
             .get()
@@ -79,8 +88,8 @@ impl Backend {
         let rows = engine
             .search_meta(
                 embedding,
-                PAGE_SIZE,
-                offset,
+                SEARCH_LIMIT,
+                0,
                 sc.distance_threshold,
                 sc.max_k,
                 filters,
@@ -88,27 +97,25 @@ impl Backend {
             .context("Search failed")?;
         Ok(rows
             .into_iter()
-            .map(|(path, distance, file_size)| SearchResult {
+            .map(|(id, path, _distance, size)| RowMeta {
+                ext: ext_from(&path),
+                id,
                 path,
-                distance,
-                file_size,
+                size,
             })
             .collect())
     }
 
-    pub fn browse(&self, filters: &Filters, offset: usize) -> Result<Vec<SearchResult>> {
-        let rows = self
-            .db
-            .browse(filters, PAGE_SIZE, offset)
-            .context("Browse failed")?;
-        Ok(rows
-            .into_iter()
-            .map(|(path, file_size)| SearchResult {
-                path,
-                distance: 0.0,
-                file_size,
-            })
-            .collect())
+    /// Browse the full filtered set in `sort` order (no paging).
+    pub fn browse(&self, filters: &Filters, sort: &Sort) -> Result<Vec<RowMeta>> {
+        self.db.browse_all(filters, sort).context("Browse failed")
+    }
+
+    /// Fetch [`RowMeta`] for an explicit ordered id list (session restore).
+    // Wiring-pending: consumed by the startup/persistence path (T19/T20).
+    #[allow(dead_code)]
+    pub fn rehydrate(&self, ids: &[i64]) -> Result<Vec<RowMeta>> {
+        self.db.rehydrate_rows(ids).context("Rehydrate failed")
     }
 
     pub fn extensions(&self) -> Result<Vec<String>> {
@@ -148,19 +155,14 @@ impl Backend {
 
     /// Images similar to `rel_path`, using its stored embedding. The seed itself
     /// is filtered out of the results.
-    pub fn search_similar(
-        &self,
-        rel_path: &str,
-        offset: usize,
-        filters: &Filters,
-    ) -> Result<Vec<SearchResult>> {
+    pub fn search_similar(&self, rel_path: &str, filters: &Filters) -> Result<Vec<RowMeta>> {
         let sc = SearchConfig::default();
         let rows = self
             .db
             .find_similar_to_path(
                 &RelativePath(PathBuf::from(rel_path)),
-                PAGE_SIZE,
-                offset,
+                SEARCH_LIMIT,
+                0,
                 sc.distance_threshold,
                 sc.max_k,
                 filters,
@@ -168,11 +170,12 @@ impl Backend {
             .with_context(|| format!("Similar search failed for {rel_path}"))?;
         Ok(rows
             .into_iter()
-            .filter(|(path, _, _)| path != rel_path)
-            .map(|(path, distance, file_size)| SearchResult {
+            .filter(|(_, path, _, _)| path != rel_path)
+            .map(|(id, path, _distance, size)| RowMeta {
+                ext: ext_from(&path),
+                id,
                 path,
-                distance,
-                file_size,
+                size,
             })
             .collect())
     }
@@ -281,7 +284,7 @@ mod tests {
         let backend = backend_with(db);
 
         let results = backend
-            .search_similar("a.jpg", 0, &Filters::default())
+            .search_similar("a.jpg", &Filters::default())
             .expect("similar");
         let paths: Vec<&str> = results.iter().map(|r| r.path.as_str()).collect();
         assert!(
@@ -323,7 +326,7 @@ mod tests {
                     extensions: vec!["jpg".into()],
                     ..Default::default()
                 },
-                0,
+                &Sort::default(),
             )
             .unwrap();
         assert_eq!(jpg.len(), 1);
@@ -335,7 +338,7 @@ mod tests {
                     gps: GpsFilter::HasGps,
                     ..Default::default()
                 },
-                0,
+                &Sort::default(),
             )
             .unwrap();
         assert_eq!(gps.len(), 1);
