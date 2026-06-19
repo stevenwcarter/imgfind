@@ -1,5 +1,13 @@
 use crate::{database::Database, get_db_path};
 use anyhow::{Context, Result};
+
+/// Long-edge target for the GUI lightbox/preview cached render.
+pub const LIGHTBOX_SIZE: u32 = 2048;
+
+/// Thumbnail sizes the GUI requests: grid (300 px), detail panel (512 px),
+/// and lightbox/preview (2048 px). Pre-generating all three avoids decode
+/// latency on first view at each size.
+pub const GUI_THUMBNAIL_SIZES: &[u32] = &[300, 512, LIGHTBOX_SIZE];
 use rayon::prelude::*;
 use rusqlite::params;
 use std::io::Cursor;
@@ -219,4 +227,79 @@ pub fn get_or_generate_thumbnail(
     // Return the newly generated thumbnail
     db.get_thumbnail(hash, size)
         .context("Failed to retrieve newly generated thumbnail")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{ImageBuffer, Rgb};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Returns a unique `<tmpdir>/.imgfind/imgfind.db` path per test invocation.
+    fn temp_db_path() -> std::path::PathBuf {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("imgfind_thumb_test_{}_{n}", std::process::id()));
+        dir.join(".imgfind").join("imgfind.db")
+    }
+
+    #[test]
+    fn gui_sizes_are_300_512_2048() {
+        assert_eq!(GUI_THUMBNAIL_SIZES, &[300, 512, 2048]);
+        assert_eq!(LIGHTBOX_SIZE, 2048);
+    }
+
+    /// Asserts that `get_or_generate_thumbnail` persists a thumbnail row for
+    /// each of the three GUI sizes: the row must be absent before the call and
+    /// present (non-empty bytes) after it.
+    #[test]
+    fn get_or_generate_persists_each_gui_size() {
+        let db_path = temp_db_path();
+        let db = Database::new(&db_path).expect("create test db");
+
+        // Parent dir (the directory that contains `.imgfind/`) is the base for
+        // relative image paths stored in the database.
+        let parent_dir = db_path
+            .parent()
+            .expect(".imgfind dir")
+            .parent()
+            .expect("parent dir");
+
+        // Write a real, decodable 8×8 RGB PNG.  RGB8 (not RGBA8) because
+        // `generate_thumbnail_bytes` re-encodes as JPEG which has no alpha channel.
+        let img_path = parent_dir.join("test_fixture.png");
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_pixel(8, 8, Rgb([255, 0, 128]));
+        img.save(&img_path).expect("save test fixture image");
+
+        let abs_path = img_path.to_str().expect("utf-8 path");
+        let hash = "test_persistence_hash";
+
+        for &size in GUI_THUMBNAIL_SIZES {
+            // Before: no thumbnail row exists for this (hash, size) pair.
+            assert!(
+                db.get_thumbnail(hash, size).is_err(),
+                "size {size} should be absent before get_or_generate_thumbnail"
+            );
+
+            // Generate (and persist) the thumbnail.
+            let bytes =
+                get_or_generate_thumbnail(&db, abs_path, hash, size).expect("generate thumbnail");
+            assert!(
+                !bytes.is_empty(),
+                "returned bytes must be non-empty for size {size}"
+            );
+
+            // After: the row must be present and non-empty.
+            let cached = db
+                .get_thumbnail(hash, size)
+                .expect("thumbnail must be present after get_or_generate");
+            assert!(
+                !cached.is_empty(),
+                "persisted bytes must be non-empty for size {size}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(parent_dir);
+    }
 }
