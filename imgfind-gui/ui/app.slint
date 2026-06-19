@@ -75,8 +75,13 @@ export component MainWindow inherits Window {
     // (the capped render window), so the scrollbar spans the complete library.
     private property <int> row-count: ceil(root.total-items / cols);
     private property <length> grid-height: row-count * tile-stride;
-    // Scroll offset exposed for T14's viewport-driven window loader.
+    // Scroll offset exposed for the T14 viewport-driven window loader. NOTE the
+    // sign: viewport-y is <= 0 and grows MORE NEGATIVE as you scroll down, so the
+    // Rust side negates it (`scroll_px = (-vy).max(0)`).
     out property <length> grid-viewport-y: grid-scroll.viewport-y;
+    // Visible height of the scroll viewport, for the T14 windowed loader's
+    // `visible_rows` computation.
+    out property <length> grid-viewport-h: grid-scroll.visible-height;
 
     // ALL keyboard shortcuts live in ONE place: the single `app-keys` FocusScope
     // below, which wraps the whole window and uses `capture-key-pressed`. Slint

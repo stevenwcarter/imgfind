@@ -3497,6 +3497,7 @@ dependencies = [
  "clipper",
  "image",
  "imgfind",
+ "lru",
  "open",
  "rusqlite",
  "slint",

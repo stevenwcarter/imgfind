@@ -3,20 +3,23 @@ slint::include_modules!();
 mod backend;
 mod detail;
 mod image_util;
+mod loader;
 mod nav;
 mod preload;
 mod state;
 mod window;
 
 use std::collections::HashSet;
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use slint::{ModelRc, SharedString, Timer, TimerMode, VecModel, Weak};
+use slint::{Image, ModelRc, SharedString, Timer, TimerMode, VecModel, Weak};
 
 use backend::Backend;
 use detail::{DetailState, filename_of, format_metadata, select};
@@ -193,6 +196,13 @@ fn main() -> Result<()> {
     // slow decode can't land after the user has already navigated to another image.
     let lb_generation: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
 
+    // Monotonic counter bumped every time a NEW result set is installed (each
+    // search/similar/browse, and reset paths). The thumbnail worker tags each
+    // response with the generation its request was issued under; the loader
+    // timer drops responses whose generation no longer matches, so thumbnails
+    // from a superseded search can't leak into the current grid.
+    let grid_generation: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+
     // Currently selected detail image. None when the panel is closed.
     let detail: Arc<Mutex<Option<DetailState>>> = Arc::new(Mutex::new(None));
 
@@ -241,6 +251,7 @@ fn main() -> Result<()> {
         let mode_ref = Arc::clone(&search_mode);
         let filters_ref = Arc::clone(&filters);
         let selected_ref = Arc::clone(&selected);
+        let grid_gen_ref = Arc::clone(&grid_generation);
         let backend_search = backend.clone();
         window.on_search(move |query| {
             let query = query.trim().to_string();
@@ -254,6 +265,9 @@ fn main() -> Result<()> {
                     *lb_ref.lock().unwrap() = None;
                     *selected_ref.lock().unwrap() = None;
                     *mode_ref.lock().unwrap() = SearchMode::Text(String::new());
+                    // Bump the generation so the loader timer resets its
+                    // in-flight set / last range and stops loading the old set.
+                    loader::bump_generation(&grid_gen_ref);
                     if let Some(w) = weak.upgrade() {
                         w.set_status("Enter a search query to find images.".into());
                         w.set_tiles(ModelRc::default());
@@ -277,6 +291,7 @@ fn main() -> Result<()> {
                     spawn_browse(
                         weak.clone(),
                         Arc::clone(&state_ref),
+                        Arc::clone(&grid_gen_ref),
                         backend_search.clone(),
                         current_filters,
                         SelectionPolicy {
@@ -307,6 +322,7 @@ fn main() -> Result<()> {
             spawn_search(
                 weak.clone(),
                 Arc::clone(&state_ref),
+                Arc::clone(&grid_gen_ref),
                 backend_search.clone(),
                 query,
                 current_filters,
@@ -481,6 +497,7 @@ fn main() -> Result<()> {
         let mode_ref = Arc::clone(&search_mode);
         let filters_ref = Arc::clone(&filters);
         let selected_ref = Arc::clone(&selected);
+        let grid_gen_ref = Arc::clone(&grid_generation);
         let backend_sim = backend.clone();
         window.on_search_similar(move || {
             let seed_path = {
@@ -508,6 +525,7 @@ fn main() -> Result<()> {
             spawn_similar(
                 weak.clone(),
                 Arc::clone(&state_ref),
+                Arc::clone(&grid_gen_ref),
                 backend_sim.clone(),
                 seed_path,
                 current_filters,
@@ -690,6 +708,7 @@ fn main() -> Result<()> {
         let filters_ref = Arc::clone(&filters);
         let selected_exts_ref = Arc::clone(&selected_exts);
         let selected_ref = Arc::clone(&selected);
+        let grid_gen_ref = Arc::clone(&grid_generation);
         let backend_fc = backend.clone();
         let timer = Rc::clone(&debounce_timer);
         window.on_filters_changed(move || {
@@ -709,6 +728,7 @@ fn main() -> Result<()> {
                 weak.clone(),
                 Arc::clone(&state_ref),
                 Arc::clone(&mode_ref),
+                Arc::clone(&grid_gen_ref),
                 backend_fc.clone(),
                 new_filters,
                 Arc::clone(&selected_ref),
@@ -724,6 +744,7 @@ fn main() -> Result<()> {
         let filters_ref = Arc::clone(&filters);
         let selected_exts_ref = Arc::clone(&selected_exts);
         let selected_ref = Arc::clone(&selected);
+        let grid_gen_ref = Arc::clone(&grid_generation);
         let all_exts_et = all_extensions.clone();
         let backend_et = backend.clone();
         let timer = Rc::clone(&debounce_timer);
@@ -753,6 +774,7 @@ fn main() -> Result<()> {
                 weak.clone(),
                 Arc::clone(&state_ref),
                 Arc::clone(&mode_ref),
+                Arc::clone(&grid_gen_ref),
                 backend_et.clone(),
                 new_filters,
                 Arc::clone(&selected_ref),
@@ -768,6 +790,7 @@ fn main() -> Result<()> {
         let filters_ref = Arc::clone(&filters);
         let selected_exts_ref = Arc::clone(&selected_exts);
         let selected_ref = Arc::clone(&selected);
+        let grid_gen_ref = Arc::clone(&grid_generation);
         let backend_gps = backend.clone();
         let timer = Rc::clone(&debounce_timer);
         window.on_gps_mode_changed(move |mode| {
@@ -786,6 +809,7 @@ fn main() -> Result<()> {
                 weak.clone(),
                 Arc::clone(&state_ref),
                 Arc::clone(&mode_ref),
+                Arc::clone(&grid_gen_ref),
                 backend_gps.clone(),
                 new_filters,
                 Arc::clone(&selected_ref),
@@ -793,9 +817,48 @@ fn main() -> Result<()> {
         });
     }
 
-    // Keep the model timer and debounce timer alive for the entire event loop.
+    // --- moving-window thumbnail loader ---
+    //
+    // A single background worker decodes/persists thumbnails (one writer to
+    // dodge SQLITE_BUSY); the loader timer below runs on the UI thread, drains
+    // decoded bytes into a bounded LRU, and rebuilds the tile model for only the
+    // currently-visible window whenever the window or result set changes.
+    let (req_tx, req_rx) = mpsc::channel::<loader::ThumbRequest>();
+    let (resp_tx, resp_rx) = mpsc::channel::<loader::ThumbResponse>();
+    loader::spawn_thumb_worker(backend.clone(), req_rx, resp_tx);
+
+    let loader_timer = Timer::default();
+    {
+        let weak = window.as_weak();
+        let state_ref = Arc::clone(&state);
+        let grid_gen_ref = Arc::clone(&grid_generation);
+        // These are all !Send and owned solely by this UI-thread closure: never
+        // wrap them in Arc/Mutex. `last_gen` lets the closure detect a new
+        // result set (generation bumped elsewhere) and reset its window state.
+        let mut cache = loader::new_cache();
+        let mut in_flight = loader::InFlight::default();
+        let mut last_range: Option<Range<usize>> = None;
+        let mut last_gen: u64 = loader::current_generation(&grid_gen_ref);
+        loader_timer.start(TimerMode::Repeated, Duration::from_millis(100), move || {
+            let Some(w) = weak.upgrade() else { return };
+            loader_tick(LoaderTick {
+                window: &w,
+                state_ref: &state_ref,
+                grid_gen: &grid_gen_ref,
+                req_tx: &req_tx,
+                resp_rx: &resp_rx,
+                cache: &mut cache,
+                in_flight: &mut in_flight,
+                last_range: &mut last_range,
+                last_gen: &mut last_gen,
+            });
+        });
+    }
+
+    // Keep the model, debounce, and loader timers alive for the event loop.
     let _ = model_timer;
     let _ = debounce_timer;
+    let _ = loader_timer;
 
     window.run().context("Event loop failed")?;
     Ok(())
@@ -808,11 +871,13 @@ fn main() -> Result<()> {
 /// `Timer::start` accepts `FnMut + 'static` and we cannot move non-`Copy`
 /// values out of an outer `FnMut` callback, we allocate a new closure per
 /// restart — which is fine for a 250 ms debounce rate.
+#[allow(clippy::too_many_arguments)]
 fn start_debounce(
     timer: &Timer,
     weak: Weak<MainWindow>,
     state_ref: Arc<Mutex<SearchState>>,
     mode_ref: Arc<Mutex<SearchMode>>,
+    grid_gen: Arc<AtomicU64>,
     backend: Backend,
     filters: Filters,
     selected_ref: Arc<Mutex<Option<usize>>>,
@@ -825,6 +890,7 @@ fn start_debounce(
                 weak.clone(),
                 Arc::clone(&state_ref),
                 Arc::clone(&mode_ref),
+                Arc::clone(&grid_gen),
                 backend.clone(),
                 filters.clone(),
                 Arc::clone(&selected_ref),
@@ -838,10 +904,12 @@ fn start_debounce(
 /// Reads `search_mode` and either runs a text search, similarity search, or
 /// browse, starting from offset 0.  The filter change is treated as a fresh
 /// search (reset for text/browse, re-clamp for similar).
+#[allow(clippy::too_many_arguments)]
 fn fire_debounced_query(
     weak: Weak<MainWindow>,
     state_ref: Arc<Mutex<SearchState>>,
     mode_ref: Arc<Mutex<SearchMode>>,
+    grid_gen: Arc<AtomicU64>,
     backend: Backend,
     filters: Filters,
     selected_ref: Arc<Mutex<Option<usize>>>,
@@ -857,6 +925,7 @@ fn fire_debounced_query(
             spawn_search(
                 weak,
                 state_ref,
+                grid_gen,
                 backend,
                 query,
                 filters,
@@ -870,6 +939,8 @@ fn fire_debounced_query(
         // Text("") with default filters — restore idle state, nothing to browse.
         SearchMode::Text(_) if filters == Filters::default() => {
             *selected_ref.lock().unwrap() = None;
+            // Bump the generation so the loader timer resets and stops loading.
+            loader::bump_generation(&grid_gen);
             if let Some(w) = weak.upgrade() {
                 w.set_status("Enter a search query to find images.".into());
                 w.set_tiles(ModelRc::default());
@@ -887,6 +958,7 @@ fn fire_debounced_query(
             spawn_browse(
                 weak,
                 state_ref,
+                grid_gen,
                 backend,
                 filters,
                 SelectionPolicy {
@@ -905,6 +977,7 @@ fn fire_debounced_query(
             spawn_similar(
                 weak,
                 state_ref,
+                grid_gen,
                 backend,
                 seed,
                 filters,
@@ -917,37 +990,159 @@ fn fire_debounced_query(
     }
 }
 
-/// Decode raw JPEG bytes (already on the UI thread) into Slint `Image` tiles.
+/// Build the tile model for one render window from already-decoded images.
 ///
-/// `offset` is the global index of `results[0]` in the full result list.
-/// For the current INTERIM cap (T12/T13) the window always starts at 0, so
-/// callers pass 0; T14 will pass the real window start when it delivers a
-/// non-zero-offset slice.
+/// `results` is the window slice; `images[i]` is the decoded thumbnail for
+/// `results[i]` (looked up from the LRU by the caller), or `None` for a tile
+/// whose thumbnail has not yet been decoded — those render with a placeholder
+/// image until the loader fills them in. `offset` is the global index of
+/// `results[0]` in the full result list, used to set each `Tile.index` for
+/// correct absolute positioning in the virtualized grid.
 fn build_tiles_model(
     results: &[RowMeta],
-    raw_thumbs: Vec<Option<Vec<u8>>>,
+    images: Vec<Option<Image>>,
     offset: usize,
 ) -> ModelRc<Tile> {
     let tiles: Vec<Tile> = results
         .iter()
-        .zip(raw_thumbs)
+        .zip(images)
         .enumerate()
-        .map(|(i, (r, maybe_bytes))| {
-            let img = maybe_bytes
-                .and_then(|bytes| image_util::jpeg_to_slint_image(&bytes).ok())
-                .unwrap_or_default();
+        .map(|(i, (r, maybe_img))| {
             let size_kb = r.size.unwrap_or(0) / 1024;
             Tile {
                 path: r.path.clone().into(),
-                image: img,
+                image: maybe_img.unwrap_or_default(),
                 size_kb: size_kb as i32,
                 // Global index: window offset + position within this slice.
-                // T14 will supply a non-zero offset when the window doesn't start at 0.
                 index: (offset + i) as i32,
             }
         })
         .collect();
-    ModelRc::from(std::rc::Rc::new(VecModel::from(tiles)))
+    ModelRc::from(Rc::new(VecModel::from(tiles)))
+}
+
+/// Borrowed bundle of the loader timer's UI-thread state, passed to
+/// [`loader_tick`] once per tick. Grouping these into a struct keeps the timer
+/// closure tidy and the tick function under clippy's argument limit.
+struct LoaderTick<'a> {
+    window: &'a MainWindow,
+    state_ref: &'a Arc<Mutex<SearchState>>,
+    grid_gen: &'a Arc<AtomicU64>,
+    req_tx: &'a mpsc::Sender<loader::ThumbRequest>,
+    resp_rx: &'a mpsc::Receiver<loader::ThumbResponse>,
+    cache: &'a mut loader::ThumbCache,
+    in_flight: &'a mut loader::InFlight,
+    last_range: &'a mut Option<Range<usize>>,
+    last_gen: &'a mut u64,
+}
+
+/// One tick of the moving-window thumbnail loader, on the UI thread.
+///
+/// 1. Drain the worker's response channel, decoding current-generation bytes
+///    into the LRU (stale-generation responses are dropped).
+/// 2. Compute the visible item range from the live scroll geometry.
+/// 3. Rebuild the tile model only when the range or generation changed.
+/// 4. Request any visible thumbnails not yet cached or in-flight.
+///
+/// Cheap when idle: an empty channel plus an unchanged range/generation does no
+/// work beyond the geometry read.
+fn loader_tick(t: LoaderTick<'_>) {
+    let current_gen = loader::current_generation(t.grid_gen);
+
+    // A new result set was installed since the last tick: reset window state so
+    // the grid rebuilds from the top with this generation's thumbnails.
+    let gen_changed = *t.last_gen != current_gen;
+    if gen_changed {
+        *t.last_gen = current_gen;
+        *t.last_range = None;
+        t.in_flight.clear();
+    }
+
+    // 1. Drain decoded bytes into the cache (drop stale generations). Track
+    // whether any current-gen thumbnail landed, so an unchanged window still
+    // refreshes to show progressive loads.
+    let mut cached_new = false;
+    while let Ok((generation, path, result)) = t.resp_rx.try_recv() {
+        if generation != current_gen {
+            continue;
+        }
+        t.in_flight.remove(&path);
+        match result {
+            Ok(bytes) => match loader::decode_thumb_bytes(&bytes) {
+                Some(img) => {
+                    t.cache.put(path, img);
+                    cached_new = true;
+                }
+                None => tracing::warn!("thumb decode failed for {path}"),
+            },
+            Err(e) => tracing::warn!("thumbnail fetch failed for {path}: {e}"),
+        }
+    }
+
+    // 2. Visible window from scroll geometry. viewport-y is <= 0 (more negative
+    // scrolling down), so negate it for the pixels-from-top.
+    let cols = t.window.get_cols().max(0) as usize;
+    let viewport_h = t.window.get_grid_viewport_h();
+    let scroll_px = (-t.window.get_grid_viewport_y()).max(0.0);
+    let total = t.state_ref.lock().unwrap().results.len();
+    let (first_row, last_row) = window::visible_rows(scroll_px, viewport_h, window::TILE_PITCH_Y);
+    let range = window::window_range(first_row, last_row, cols, total);
+
+    // 3. Rebuild only when the window/generation changed, or when a freshly
+    // decoded thumbnail in the current window needs to appear. Otherwise the
+    // tick does no UI work (cheap when idle).
+    let range_changed = t.last_range.as_ref() != Some(&range);
+    if range_changed || gen_changed || cached_new {
+        rebuild_window(t.window, t.state_ref, t.cache, &range);
+        if range_changed || gen_changed {
+            tracing::debug!(
+                start = range.start,
+                end = range.end,
+                "loader: window changed"
+            );
+        }
+        *t.last_range = Some(range.clone());
+    }
+
+    // 4. Request missing thumbnails for the visible window.
+    let paths: Vec<String> = {
+        let s = t.state_ref.lock().unwrap();
+        s.results
+            .get(range.clone())
+            .map(|slice| slice.iter().map(|r| r.path.clone()).collect())
+            .unwrap_or_default()
+    };
+    for path in paths {
+        if t.cache.contains(&path) || t.in_flight.contains(&path) {
+            continue;
+        }
+        t.in_flight.insert(&path);
+        // A send error means the worker has gone away (shutdown); ignore it.
+        if t.req_tx.send((current_gen, path)).is_err() {
+            break;
+        }
+    }
+}
+
+/// Build and install the tile model for `range`, taking each tile's image from
+/// the LRU cache (placeholder when absent). `range.start` becomes the tile
+/// offset so each tile's global `index` positions it correctly in the grid.
+fn rebuild_window(
+    window: &MainWindow,
+    state_ref: &Arc<Mutex<SearchState>>,
+    cache: &mut loader::ThumbCache,
+    range: &Range<usize>,
+) {
+    let slice: Vec<RowMeta> = {
+        let s = state_ref.lock().unwrap();
+        s.results
+            .get(range.clone())
+            .map(<[_]>::to_vec)
+            .unwrap_or_default()
+    };
+    let images: Vec<Option<Image>> = slice.iter().map(|r| cache.get(&r.path).cloned()).collect();
+    let model = build_tiles_model(&slice, images, range.start);
+    window.set_tiles(model);
 }
 
 fn status_text_for(vs: ViewState, error_msg: Option<&str>) -> slint::SharedString {
@@ -960,59 +1155,44 @@ fn status_text_for(vs: ViewState, error_msg: Option<&str>) -> slint::SharedStrin
     }
 }
 
-/// Fetch raw thumbnail bytes for a bounded prefix of `results`.
+/// Marshal a fetched result set back onto the UI thread: install it into the
+/// state, bump the grid generation, set `total-items`, update selection and
+/// status. The tile grid itself is NOT built here — the loader timer renders
+/// only the visible window once it observes the new generation.
 ///
-/// INTERIM (T12): capped to `window::WINDOW_MIN` until T14 replaces this with
-/// the windowed loader. `browse_all` can return 100k rows; we must not fetch a
-/// thumbnail per row. The full ordered `Vec<RowMeta>` still lives in
-/// `SearchState`; only the tiles/thumbnails built here are capped.
-fn fetch_capped_thumbs(backend: &Backend, results: &[RowMeta]) -> Vec<Option<Vec<u8>>> {
-    results
-        .iter()
-        .take(window::WINDOW_MIN)
-        .map(|r| backend.thumbnail(&r.path, 300).ok())
-        .collect()
-}
-
-/// Marshal a fetched result set back onto the UI thread: apply it to the state,
-/// build the (capped) tiles model, update selection and status.
-///
-/// `raw_thumbs` are the thumbnails for the bounded prefix fetched on the worker
-/// thread (`slint::Image` is not `Send`, so only the JPEG→`Image` decode runs
-/// here on the UI thread).
+/// Bumping `grid_generation` invalidates any in-flight thumbnail responses from
+/// the previous result set and signals the loader timer to reset its in-flight
+/// set and last-rendered range, rebuilding from the top on its next tick.
 fn apply_fetch_result(
     weak: Weak<MainWindow>,
     state_ref: Arc<Mutex<SearchState>>,
+    grid_gen: Arc<AtomicU64>,
     res: Result<Vec<RowMeta>>,
-    raw_thumbs: Vec<Option<Vec<u8>>>,
     sel: SelectionPolicy,
 ) {
     slint::invoke_from_event_loop(move || {
         let Some(w) = weak.upgrade() else { return };
 
-        let (vs, error_msg, results) = {
+        let (vs, error_msg, results_len) = {
             let mut s = state_ref.lock().unwrap();
             match res {
                 Ok(rows) => s.apply_results(rows),
                 Err(e) => s.apply_error(e.to_string()),
             }
-            (s.view_state(), s.error.clone(), s.results.clone())
+            (s.view_state(), s.error.clone(), s.results.len())
         };
 
-        // Only the (non-Send) JPEG→slint::Image decode runs here on the UI
-        // thread; the tiles cover at most the WINDOW_MIN prefix (see
-        // `fetch_capped_thumbs`).  `total-items` is always the full result
-        // count so the scrollbar spans the complete library.
+        // A new result set is installed: bump the generation and clear the
+        // visible grid so the loader timer rebuilds the window from the top.
+        // `total-items` is always the full result count so the scrollbar spans
+        // the complete library even though only a window of tiles is rendered.
+        loader::bump_generation(&grid_gen);
         if matches!(vs, ViewState::Results | ViewState::Empty) {
-            let total = results.len();
-            let capped = &results[..total.min(window::WINDOW_MIN)];
-            // Window starts at global index 0 (INTERIM — T14 will generalise).
-            let model = build_tiles_model(capped, raw_thumbs, 0);
-            w.set_tiles(model);
-            w.set_total_items(total as i32);
+            w.set_tiles(ModelRc::default());
+            w.set_total_items(results_len as i32);
         }
 
-        apply_selection_after_results(&w, &sel.selected, results.len(), sel.reset);
+        apply_selection_after_results(&w, &sel.selected, results_len, sel.reset);
 
         w.set_status(status_text_for(vs, error_msg.as_deref()));
         w.set_can_search(true);
@@ -1022,12 +1202,13 @@ fn apply_fetch_result(
 
 /// Spawn a background text-search thread and marshal results back to the UI.
 ///
-/// DB and disk I/O (thumbnail fetches) happen on the worker thread; only the
-/// non-`Send` `slint::Image` decode runs on the UI thread.
-/// `sel` controls how the keyboard selection is updated when results land.
+/// Only the DB query runs on the worker thread; thumbnails are loaded lazily by
+/// the loader timer once results are installed. `sel` controls how the keyboard
+/// selection is updated when results land.
 fn spawn_search(
     weak: Weak<MainWindow>,
     state_ref: Arc<Mutex<SearchState>>,
+    grid_gen: Arc<AtomicU64>,
     backend: Backend,
     query: String,
     filters: Filters,
@@ -1035,11 +1216,7 @@ fn spawn_search(
 ) {
     std::thread::spawn(move || {
         let res = backend.search(&query, &filters);
-        let raw_thumbs = match &res {
-            Ok(results) => fetch_capped_thumbs(&backend, results),
-            Err(_) => Vec::new(),
-        };
-        apply_fetch_result(weak, state_ref, res, raw_thumbs, sel);
+        apply_fetch_result(weak, state_ref, grid_gen, res, sel);
     });
 }
 
@@ -1051,6 +1228,7 @@ fn spawn_search(
 fn spawn_similar(
     weak: Weak<MainWindow>,
     state_ref: Arc<Mutex<SearchState>>,
+    grid_gen: Arc<AtomicU64>,
     backend: Backend,
     seed_path: String,
     filters: Filters,
@@ -1058,11 +1236,7 @@ fn spawn_similar(
 ) {
     std::thread::spawn(move || {
         let res = backend.search_similar(&seed_path, &filters);
-        let raw_thumbs = match &res {
-            Ok(results) => fetch_capped_thumbs(&backend, results),
-            Err(_) => Vec::new(),
-        };
-        apply_fetch_result(weak, state_ref, res, raw_thumbs, sel);
+        apply_fetch_result(weak, state_ref, grid_gen, res, sel);
     });
 }
 
@@ -1074,6 +1248,7 @@ fn spawn_similar(
 fn spawn_browse(
     weak: Weak<MainWindow>,
     state_ref: Arc<Mutex<SearchState>>,
+    grid_gen: Arc<AtomicU64>,
     backend: Backend,
     filters: Filters,
     sel: SelectionPolicy,
@@ -1081,11 +1256,7 @@ fn spawn_browse(
     std::thread::spawn(move || {
         let sort = state_ref.lock().unwrap().sort;
         let res = backend.browse(&filters, &sort);
-        let raw_thumbs = match &res {
-            Ok(results) => fetch_capped_thumbs(&backend, results),
-            Err(_) => Vec::new(),
-        };
-        apply_fetch_result(weak, state_ref, res, raw_thumbs, sel);
+        apply_fetch_result(weak, state_ref, grid_gen, res, sel);
     });
 }
 
