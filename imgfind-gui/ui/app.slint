@@ -683,8 +683,10 @@ export component MainWindow inherits Window {
                                             root.tile-open-external(tile.index);
                                         }
                                     }
-                                    // Return keyboard focus to app-keys when the user
-                                    // clicks into the grid (e.g. after typing a query),
+                                    // Dispatch the (modifier-aware) tile click —
+                                    // plain click opens detail; shift/ctrl drive
+                                    // range/free selection — then return keyboard
+                                    // focus to app-keys (e.g. after typing a query)
                                     // so vim/arrow navigation works immediately.
                                     clicked => {
                                         root.tile-clicked(tile.index, root.click-shift, root.click-ctrl);
