@@ -513,6 +513,46 @@ fn main() -> Result<()> {
         });
     }
 
+    // --- clear-search callback: drop the text query, browse remaining filters ---
+    {
+        let weak = window.as_weak();
+        let state_ref = Arc::clone(&state);
+        let lb_ref = Arc::clone(&lb_index);
+        let detail_ref = Arc::clone(&detail);
+        let mode_ref = Arc::clone(&search_mode);
+        let filters_ref = Arc::clone(&filters);
+        let selected_ref = Arc::clone(&selected);
+        let selection_ref = Arc::clone(&selection);
+        let selection_dirty_ref = Arc::clone(&selection_dirty);
+        let grid_gen_ref = Arc::clone(&grid_generation);
+        let restoring_ref = Arc::clone(&restoring);
+        let backend_clear = backend.clone();
+        window.on_clear_search(move || {
+            if restoring_ref.load(Ordering::SeqCst) {
+                return;
+            }
+            let Some(w) = weak.upgrade() else { return };
+            w.set_query_text("".into());
+            let current_filters = filters_ref.lock().unwrap().clone();
+            clear_to_browse(
+                &weak,
+                &state_ref,
+                &detail_ref,
+                &lb_ref,
+                &mode_ref,
+                &grid_gen_ref,
+                &backend_clear,
+                current_filters,
+                SelectionPolicy {
+                    selected: Arc::clone(&selected_ref),
+                    after: SelectAfter::Clear,
+                    selection: Arc::clone(&selection_ref),
+                    selection_dirty: Arc::clone(&selection_dirty_ref),
+                },
+            );
+        });
+    }
+
     // --- tile-selected callback: show detail panel for the clicked tile ---
     {
         let weak = window.as_weak();
