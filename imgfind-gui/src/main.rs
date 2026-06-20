@@ -629,6 +629,45 @@ fn main() -> Result<()> {
         });
     }
 
+    // --- tile-clicked callback: modifier-aware mouse selection ---
+    // Plain click collapses any multi-select and opens the detail panel (via
+    // tile-selected); shift/ctrl update the multi-select + cursor only and never
+    // open detail. Each `selection.lock()` is its own statement so no guard is
+    // held across a `set_*`/`invoke_*` call into Slint.
+    {
+        let weak = window.as_weak();
+        let selection_ref = Arc::clone(&selection);
+        let selected_ref = Arc::clone(&selected);
+        let selection_dirty_ref = Arc::clone(&selection_dirty);
+        let state_ref = Arc::clone(&state);
+        window.on_tile_clicked(move |index, shift, ctrl| {
+            let idx = index as usize;
+            let Some(w) = weak.upgrade() else {
+                return;
+            };
+            if ctrl {
+                selection_ref.lock().unwrap().ctrl_toggle(idx);
+                *selected_ref.lock().unwrap() = Some(idx);
+                selection_dirty_ref.store(true, Ordering::Relaxed);
+                w.set_selected_index(index);
+                push_statusline(&w, &selection_ref, &state_ref);
+            } else if shift {
+                let anchor = selected_ref.lock().unwrap().unwrap_or(idx);
+                selection_ref.lock().unwrap().range_to(anchor, idx);
+                *selected_ref.lock().unwrap() = Some(idx);
+                selection_dirty_ref.store(true, Ordering::Relaxed);
+                w.set_selected_index(index);
+                push_statusline(&w, &selection_ref, &state_ref);
+            } else {
+                // Plain click: collapse any selection to this tile, then open
+                // the detail panel (which sets the cursor, loads, restatuses).
+                selection_ref.lock().unwrap().clear();
+                selection_dirty_ref.store(true, Ordering::Relaxed);
+                w.invoke_tile_selected(index);
+            }
+        });
+    }
+
     // --- tile-activated callback: open lightbox at the activated index ---
     {
         let weak = window.as_weak();
@@ -1547,6 +1586,58 @@ fn main() -> Result<()> {
         });
     }
 
+    // --- toggle-detail callback: peek tab opens/closes the detail panel ---
+    //
+    // Closed -> open the detail panel for the cursor tile (falling back to the
+    // first tile when nothing is selected); open -> close it. A no-op when
+    // there are no results to show.
+    {
+        let selected_ref = Arc::clone(&selected);
+        let state_ref = Arc::clone(&state);
+        let weak = window.as_weak();
+        window.on_toggle_detail(move || {
+            let Some(w) = weak.upgrade() else {
+                return;
+            };
+            if w.get_detail_open() {
+                w.invoke_detail_close();
+                return;
+            }
+            // Copy state out before any `invoke_*` so no guard is held across a
+            // re-entrant UI callback (tile-selected re-locks `selected`).
+            let empty = state_ref.lock().unwrap().results.is_empty();
+            if empty {
+                return;
+            }
+            let idx = selected_ref.lock().unwrap().unwrap_or(0);
+            w.invoke_tile_selected(idx as i32);
+        });
+    }
+
+    // --- brush-swatch-clicked callback: paint a brush via its rail swatch ---
+    //
+    // Mouse equivalent of the `m<color>` chord; both go through
+    // `paint_brush_by_index` so they apply identically.
+    {
+        let paint_ctx = PaintCtx {
+            brushes: Arc::clone(&brushes),
+            mm: Arc::clone(&mm_buffer),
+            selection: Arc::clone(&selection),
+            state: Arc::clone(&state),
+            backend: backend.clone(),
+            tag_ctx: TagTargetCtx {
+                detail: Arc::clone(&detail),
+                selected: Arc::clone(&selected),
+                lb_index: Arc::clone(&lb_index),
+                state: Arc::clone(&state),
+            },
+            weak: window.as_weak(),
+        };
+        window.on_brush_swatch_clicked(move |i| {
+            paint_brush_by_index(i.max(0) as usize, &paint_ctx);
+        });
+    }
+
     // --- editor-editing-changed callback: track active tag editors ---
     //
     // Each TagEditor fires this on entering (true) / leaving (false) edit mode.
@@ -1627,15 +1718,16 @@ fn main() -> Result<()> {
                     w.set_tag_modal_open(true);
                 }
                 chords::Action::PaintBrush(c) => {
-                    let tags = brushes_ref.lock().unwrap()[c.index()].clone();
-                    let paths = selected_paths(&selection_ref, &state_ref);
-                    if paths.is_empty() {
-                        apply_tags_to_focused(&weak, &backend_key, &tag_ctx, tags.clone());
-                    } else {
-                        apply_tags_to_selection(&weak, &backend_key, &tag_ctx, paths, tags.clone());
-                    }
-                    *mm_ref.lock().unwrap() = tags;
-                    push_rail_models(&w, &brushes_ref.lock().unwrap(), &mm_ref.lock().unwrap());
+                    let paint_ctx = PaintCtx {
+                        brushes: Arc::clone(&brushes_ref),
+                        mm: Arc::clone(&mm_ref),
+                        selection: Arc::clone(&selection_ref),
+                        state: Arc::clone(&state_ref),
+                        backend: backend_key.clone(),
+                        tag_ctx: tag_ctx.clone(),
+                        weak: weak.clone(),
+                    };
+                    paint_brush_by_index(c.index(), &paint_ctx);
                 }
                 chords::Action::RepeatLast => {
                     let tags = mm_ref.lock().unwrap().clone();
@@ -2897,11 +2989,43 @@ fn focused_path(
 /// Holders needed to resolve the focused image and refresh the detail panel
 /// after a tag paint. Bundled to keep [`apply_tags_to_focused`] under clippy's
 /// argument limit and the chord call sites readable.
+#[derive(Clone)]
 struct TagTargetCtx {
     detail: Arc<Mutex<Option<DetailState>>>,
     selected: Arc<Mutex<Option<usize>>>,
     lb_index: Arc<Mutex<Option<usize>>>,
     state: Arc<Mutex<SearchState>>,
+}
+
+/// Holders needed to apply a brush's tags by index, shared by the `m<color>`
+/// chord and the rail color-swatch click so both follow one code path.
+#[derive(Clone)]
+struct PaintCtx {
+    brushes: Arc<Mutex<[Vec<String>; 5]>>,
+    mm: Arc<Mutex<Vec<String>>>,
+    selection: Arc<Mutex<selection::Selection>>,
+    state: Arc<Mutex<SearchState>>,
+    backend: Backend,
+    tag_ctx: TagTargetCtx,
+    weak: Weak<MainWindow>,
+}
+
+/// Apply brush `idx`'s tags to the active selection (or the focused tile if the
+/// selection is empty), refresh the Most Recent buffer, and re-push the rail
+/// models. Locks are held only briefly and dropped before the tag writes spawn.
+fn paint_brush_by_index(idx: usize, ctx: &PaintCtx) {
+    let Some(w) = ctx.weak.upgrade() else {
+        return;
+    };
+    let tags = ctx.brushes.lock().unwrap()[idx].clone();
+    let paths = selected_paths(&ctx.selection, &ctx.state);
+    if paths.is_empty() {
+        apply_tags_to_focused(&ctx.weak, &ctx.backend, &ctx.tag_ctx, tags.clone());
+    } else {
+        apply_tags_to_selection(&ctx.weak, &ctx.backend, &ctx.tag_ctx, paths, tags.clone());
+    }
+    *ctx.mm.lock().unwrap() = tags;
+    push_rail_models(&w, &ctx.brushes.lock().unwrap(), &ctx.mm.lock().unwrap());
 }
 
 /// Apply `tags` to the currently-focused image (see [`focused_path`]).
