@@ -423,10 +423,7 @@ mod tests {
             backend.tags_for("a.jpg").unwrap(),
             vec!["sunset".to_string()]
         );
-        assert!(backend
-            .all_tags()
-            .unwrap()
-            .contains(&"sunset".to_string()));
+        assert!(backend.all_tags().unwrap().contains(&"sunset".to_string()));
         let _ = std::fs::remove_dir_all(root);
     }
 
