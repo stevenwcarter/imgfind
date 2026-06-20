@@ -72,6 +72,30 @@ impl Selection {
     pub fn mode(&self) -> SelectionMode {
         self.mode
     }
+
+    /// Mouse shift-click: a fresh Range anchored at `anchor`, spanning to `clicked`.
+    pub fn range_to(&mut self, anchor: usize, clicked: usize) {
+        self.enter_range(anchor);
+        self.cursor_moved(clicked);
+    }
+
+    /// Mouse ctrl-click: toggle `clicked` in a free/discrete selection.
+    /// Normal -> Free {clicked}; Free -> toggle; Range -> become Free (keep set), toggle.
+    pub fn ctrl_toggle(&mut self, clicked: usize) {
+        match self.mode {
+            SelectionMode::Normal => {
+                self.mode = SelectionMode::Free;
+                self.set.clear();
+                self.set.insert(clicked);
+            }
+            SelectionMode::Free | SelectionMode::Range { .. } => {
+                self.mode = SelectionMode::Free; // Range conversion keeps self.set
+                if !self.set.remove(&clicked) {
+                    self.set.insert(clicked);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -178,5 +202,69 @@ mod tests {
         s.cursor_moved(4);
         assert!(s.contains(3));
         assert!(!s.contains(5));
+    }
+
+    #[test]
+    fn range_to_forward() {
+        let mut s = Selection::default();
+        s.range_to(2, 8);
+        assert_eq!(s.set().iter().copied().collect::<Vec<_>>(), vec![2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(s.mode(), SelectionMode::Range { anchor: 2 });
+    }
+
+    #[test]
+    fn range_to_backward() {
+        let mut s = Selection::default();
+        s.range_to(8, 2);
+        assert_eq!(s.set().iter().copied().collect::<Vec<_>>(), vec![2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(s.mode(), SelectionMode::Range { anchor: 8 });
+    }
+
+    #[test]
+    fn range_to_onto_anchor() {
+        let mut s = Selection::default();
+        s.range_to(5, 5);
+        assert_eq!(s.set().iter().copied().collect::<Vec<_>>(), vec![5]);
+    }
+
+    #[test]
+    fn range_to_replaces_prior_selection() {
+        let mut s = Selection::default();
+        s.enter_free();
+        s.toggle(1);
+        s.toggle(9);
+        s.range_to(3, 5); // fresh range; old free set gone
+        assert_eq!(s.set().iter().copied().collect::<Vec<_>>(), vec![3, 4, 5]);
+        assert_eq!(s.mode(), SelectionMode::Range { anchor: 3 });
+    }
+
+    #[test]
+    fn ctrl_toggle_from_normal_selects_only_clicked() {
+        let mut s = Selection::default();
+        s.ctrl_toggle(4);
+        assert_eq!(s.mode(), SelectionMode::Free);
+        assert_eq!(s.set().iter().copied().collect::<Vec<_>>(), vec![4]);
+    }
+
+    #[test]
+    fn ctrl_toggle_from_free_adds_then_removes() {
+        let mut s = Selection::default();
+        s.enter_free();
+        s.toggle(2);
+        s.ctrl_toggle(9);
+        assert_eq!(s.set().iter().copied().collect::<Vec<_>>(), vec![2, 9]);
+        s.ctrl_toggle(2);
+        assert_eq!(s.set().iter().copied().collect::<Vec<_>>(), vec![9]);
+    }
+
+    #[test]
+    fn ctrl_toggle_from_range_converts_to_free_keeping_set() {
+        let mut s = Selection::default();
+        s.range_to(2, 4); // Range {2,3,4}
+        s.ctrl_toggle(9);
+        assert_eq!(s.mode(), SelectionMode::Free);
+        assert_eq!(s.set().iter().copied().collect::<Vec<_>>(), vec![2, 3, 4, 9]);
+        s.ctrl_toggle(3);
+        assert_eq!(s.set().iter().copied().collect::<Vec<_>>(), vec![2, 4, 9]);
     }
 }
