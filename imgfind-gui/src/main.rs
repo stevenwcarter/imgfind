@@ -1578,6 +1578,7 @@ fn main() -> Result<()> {
         let filters_ref = Arc::clone(&filters);
         let detail_ref = Arc::clone(&detail);
         let selected_ref = Arc::clone(&selected);
+        let selection_ref = Arc::clone(&selection);
         let sel_handles = sel_handles.clone();
         let lb_ref = Arc::clone(&lb_index);
         let state_ref = Arc::clone(&state);
@@ -1627,13 +1628,23 @@ fn main() -> Result<()> {
                 }
                 chords::Action::PaintBrush(c) => {
                     let tags = brushes_ref.lock().unwrap()[c.index()].clone();
-                    apply_tags_to_focused(&weak, &backend_key, &tag_ctx, tags.clone());
+                    let paths = selected_paths(&selection_ref, &state_ref);
+                    if paths.is_empty() {
+                        apply_tags_to_focused(&weak, &backend_key, &tag_ctx, tags.clone());
+                    } else {
+                        apply_tags_to_selection(&weak, &backend_key, &tag_ctx, paths, tags.clone());
+                    }
                     *mm_ref.lock().unwrap() = tags;
                     push_rail_models(&w, &brushes_ref.lock().unwrap(), &mm_ref.lock().unwrap());
                 }
                 chords::Action::RepeatLast => {
                     let tags = mm_ref.lock().unwrap().clone();
-                    apply_tags_to_focused(&weak, &backend_key, &tag_ctx, tags);
+                    let paths = selected_paths(&selection_ref, &state_ref);
+                    if paths.is_empty() {
+                        apply_tags_to_focused(&weak, &backend_key, &tag_ctx, tags);
+                    } else {
+                        apply_tags_to_selection(&weak, &backend_key, &tag_ctx, paths, tags);
+                    }
                 }
                 chords::Action::LoadBrushIntoFilter(c) => {
                     let new_filters = {
@@ -1682,6 +1693,7 @@ fn main() -> Result<()> {
         let brushes_ref = Arc::clone(&brushes);
         let detail_ref = Arc::clone(&detail);
         let selected_ref = Arc::clone(&selected);
+        let selection_ref = Arc::clone(&selection);
         let lb_ref = Arc::clone(&lb_index);
         let state_ref = Arc::clone(&state);
         let backend_modal = backend.clone();
@@ -1696,7 +1708,12 @@ fn main() -> Result<()> {
                 lb_index: Arc::clone(&lb_ref),
                 state: Arc::clone(&state_ref),
             };
-            apply_tags_to_focused(&weak, &backend_modal, &tag_ctx, tags.clone());
+            let paths = selected_paths(&selection_ref, &state_ref);
+            if paths.is_empty() {
+                apply_tags_to_focused(&weak, &backend_modal, &tag_ctx, tags.clone());
+            } else {
+                apply_tags_to_selection(&weak, &backend_modal, &tag_ctx, paths, tags.clone());
+            }
             *mm_ref.lock().unwrap() = tags;
             push_rail_models(&w, &brushes_ref.lock().unwrap(), &mm_ref.lock().unwrap());
             w.set_tag_modal_open(false);
@@ -2923,6 +2940,66 @@ fn apply_tags_to_focused(
         }
         if detail_shows_path {
             let fresh = backend.tags_for(&path).unwrap_or_default();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(w) = weak.upgrade() {
+                    push_detail_tags(&w, &fresh);
+                }
+            });
+        }
+    });
+}
+
+/// Resolve the active selection's indices to image paths via `SearchState`.
+///
+/// Returns an empty vec when the selection is inactive or empty, so callers can
+/// branch with `paths.is_empty()` to fall back to the single-focused-image path.
+/// Out-of-range indices (stale against the current results) are skipped.
+fn selected_paths(
+    selection: &Arc<Mutex<selection::Selection>>,
+    state: &Arc<Mutex<SearchState>>,
+) -> Vec<String> {
+    let sel = selection.lock().unwrap();
+    if !sel.is_active() || sel.is_empty() {
+        return Vec::new();
+    }
+    let s = state.lock().unwrap();
+    sel.set()
+        .iter()
+        .filter_map(|&i| s.results.get(i).map(|r| r.path.clone()))
+        .collect()
+}
+
+/// Apply `tags` to every path in `sel_paths` (background thread, batched writes).
+///
+/// Mirrors [`apply_tags_to_focused`] but fans the writes out across a whole
+/// selection. No-op when either input is empty. If the open detail panel shows
+/// one of the affected paths, its tag pills are re-fetched and pushed back on
+/// the UI thread so they update live.
+fn apply_tags_to_selection(
+    weak: &Weak<MainWindow>,
+    backend: &Backend,
+    ctx: &TagTargetCtx,
+    sel_paths: Vec<String>,
+    tags: Vec<String>,
+) {
+    if tags.is_empty() || sel_paths.is_empty() {
+        return;
+    }
+    let detail_path = ctx.detail.lock().unwrap().as_ref().map(|d| d.path.clone());
+    let backend = backend.clone();
+    let weak = weak.clone();
+    std::thread::spawn(move || {
+        for path in &sel_paths {
+            for t in &tags {
+                if let Err(e) = backend.add_tag(path, t) {
+                    tracing::warn!("failed to add tag {t} to {path}: {e}");
+                }
+            }
+        }
+        if let Some(dp) = detail_path
+            && sel_paths.contains(&dp)
+        {
+            let fresh = backend.tags_for(&dp).unwrap_or_default();
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(w) = weak.upgrade() {
                     push_detail_tags(&w, &fresh);
