@@ -44,6 +44,18 @@ pub enum TagMatch {
     AnyOf,
 }
 
+impl Filters {
+    /// Copy the tag-filter fields (`tags`, `tag_match`, `tags_enabled`) from
+    /// `other` into `self`. Call this after rebuilding size/type/GPS fields
+    /// from UI state so an active tag filter is preserved rather than reset
+    /// to defaults.
+    pub fn carry_tag_filter_from(&mut self, other: &Filters) {
+        self.tags = other.tags.clone();
+        self.tag_match = other.tag_match;
+        self.tags_enabled = other.tags_enabled;
+    }
+}
+
 /// Build the SQL predicate fragment + ordered bound params for `f`.
 /// The fragment is either empty or starts with " AND " so it can be appended
 /// after an existing `WHERE <something>`. Column aliases assumed: `i` = images,
@@ -113,6 +125,28 @@ pub fn build_filter_clause(f: &Filters) -> (String, Vec<Value>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn carry_tag_filter_preserves_tags_and_size() {
+        let mut rebuilt = Filters {
+            size_min: Some(1024),
+            size_max: Some(10 * 1024 * 1024),
+            ..Default::default()
+        };
+        let existing = Filters {
+            tags: vec!["a".into(), "b".into()],
+            tag_match: TagMatch::AnyOf,
+            tags_enabled: true,
+            ..Default::default()
+        };
+        rebuilt.carry_tag_filter_from(&existing);
+        assert_eq!(rebuilt.tags, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(rebuilt.tag_match, TagMatch::AnyOf);
+        assert!(rebuilt.tags_enabled);
+        // size fields must be untouched
+        assert_eq!(rebuilt.size_min, Some(1024));
+        assert_eq!(rebuilt.size_max, Some(10 * 1024 * 1024));
+    }
 
     #[test]
     fn empty_filters_yield_no_clause() {

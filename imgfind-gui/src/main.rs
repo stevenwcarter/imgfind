@@ -961,12 +961,16 @@ fn main() -> Result<()> {
                 None => return,
             };
             let exts = selected_exts_ref.lock().unwrap().clone();
-            let new_filters = build_filters(lo, hi, size_bounds, &exts, gps_mode);
+            let mut new_filters = build_filters(lo, hi, size_bounds, &exts, gps_mode);
             let label = build_size_label(lo, hi, size_bounds);
             if let Some(w) = weak.upgrade() {
                 w.set_size_label(label);
             }
-            *filters_ref.lock().unwrap() = new_filters.clone();
+            {
+                let mut stored = filters_ref.lock().unwrap();
+                new_filters.carry_tag_filter_from(&stored);
+                *stored = new_filters.clone();
+            }
             start_debounce(
                 &timer,
                 weak.clone(),
@@ -1011,8 +1015,12 @@ fn main() -> Result<()> {
             if let Some(w) = weak.upgrade() {
                 w.set_type_chips(model);
             }
-            let new_filters = build_filters(lo, hi, size_bounds, &active_exts, gps_mode);
-            *filters_ref.lock().unwrap() = new_filters.clone();
+            let mut new_filters = build_filters(lo, hi, size_bounds, &active_exts, gps_mode);
+            {
+                let mut stored = filters_ref.lock().unwrap();
+                new_filters.carry_tag_filter_from(&stored);
+                *stored = new_filters.clone();
+            }
             start_debounce(
                 &timer,
                 weak.clone(),
@@ -1046,8 +1054,12 @@ fn main() -> Result<()> {
                 .map(|w| (w.get_size_lo(), w.get_size_hi()))
                 .unwrap_or((0.0, 1.0));
             let exts = selected_exts_ref.lock().unwrap().clone();
-            let new_filters = build_filters(lo, hi, size_bounds, &exts, mode);
-            *filters_ref.lock().unwrap() = new_filters.clone();
+            let mut new_filters = build_filters(lo, hi, size_bounds, &exts, mode);
+            {
+                let mut stored = filters_ref.lock().unwrap();
+                new_filters.carry_tag_filter_from(&stored);
+                *stored = new_filters.clone();
+            }
             start_debounce(
                 &timer,
                 weak.clone(),
