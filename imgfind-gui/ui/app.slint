@@ -69,6 +69,7 @@ export component MainWindow inherits Window {
     in property <bool> tags-enabled: false;
 
     callback search(string);
+    callback clear-search();
     callback tile-selected(int);
     callback tile-activated(int);
     callback tile-open-external(int);
@@ -403,6 +404,11 @@ export component MainWindow inherits Window {
 
                 HorizontalLayout {
                     spacing: 8px;
+                    Button {
+                        text: "Clear text search";
+                        enabled: root.query-text != "";
+                        clicked => { root.clear-search(); app-keys.focus(); }
+                    }
                     search-input := LineEdit {
                         text <=> root.query-text;
                         placeholder-text: root.can-search ? "Search images..." : "Loading model...";

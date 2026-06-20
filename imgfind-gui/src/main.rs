@@ -461,58 +461,22 @@ fn main() -> Result<()> {
             let current_filters = filters_ref.lock().unwrap().clone();
 
             if query.is_empty() {
-                if current_filters == Filters::default() {
-                    // No query, no active filters — reset to idle.
-                    *state_ref.lock().unwrap() = SearchState::new();
-                    *detail_ref.lock().unwrap() = None;
-                    *lb_ref.lock().unwrap() = None;
-                    *selected_ref.lock().unwrap() = None;
-                    // Drop the multi-selection too: the result list is gone.
-                    selection_ref.lock().unwrap().clear();
-                    selection_dirty_ref.store(true, Ordering::Relaxed);
-                    *mode_ref.lock().unwrap() = SearchMode::Text(String::new());
-                    // Bump the generation so the loader timer resets its
-                    // in-flight set / last range and stops loading the old set.
-                    loader::bump_generation(&grid_gen_ref);
-                    if let Some(w) = weak.upgrade() {
-                        w.set_status("Enter a search query to find images.".into());
-                        w.set_tiles(ModelRc::default());
-                        w.set_total_items(0);
-                        w.set_detail_open(false);
-                        w.set_lightbox_open(false);
-                        w.set_selected_index(-1);
-                        // Reset sort selector to browse mode (no Relevance option).
-                        w.set_sort_options(make_sort_options_model(false));
-                        w.set_sort_index(0);
-                        w.set_sort_desc(false);
-                    }
-                    state_ref.lock().unwrap().sort = Sort::default();
-                } else {
-                    // Empty query but filters active — browse with filters.
-                    *lb_ref.lock().unwrap() = None;
-                    *detail_ref.lock().unwrap() = None;
-                    *mode_ref.lock().unwrap() = SearchMode::Text(String::new());
-                    state_ref.lock().unwrap().start_search(String::new());
-                    if let Some(w) = weak.upgrade() {
-                        w.set_lightbox_open(false);
-                        w.set_detail_open(false);
-                        w.set_status("Searching\u{2026}".into());
-                        w.set_can_search(false);
-                    }
-                    spawn_browse(
-                        weak.clone(),
-                        Arc::clone(&state_ref),
-                        Arc::clone(&grid_gen_ref),
-                        backend_search.clone(),
-                        current_filters,
-                        SelectionPolicy {
-                            selected: Arc::clone(&selected_ref),
-                            after: SelectAfter::Clear,
-                            selection: Arc::clone(&selection_ref),
-                            selection_dirty: Arc::clone(&selection_dirty_ref),
-                        },
-                    );
-                }
+                clear_to_browse(
+                    &weak,
+                    &state_ref,
+                    &detail_ref,
+                    &lb_ref,
+                    &mode_ref,
+                    &grid_gen_ref,
+                    &backend_search,
+                    current_filters,
+                    SelectionPolicy {
+                        selected: Arc::clone(&selected_ref),
+                        after: SelectAfter::Clear,
+                        selection: Arc::clone(&selection_ref),
+                        selection_dirty: Arc::clone(&selection_dirty_ref),
+                    },
+                );
                 return;
             }
 
@@ -538,6 +502,46 @@ fn main() -> Result<()> {
                 Arc::clone(&grid_gen_ref),
                 backend_search.clone(),
                 query,
+                current_filters,
+                SelectionPolicy {
+                    selected: Arc::clone(&selected_ref),
+                    after: SelectAfter::Clear,
+                    selection: Arc::clone(&selection_ref),
+                    selection_dirty: Arc::clone(&selection_dirty_ref),
+                },
+            );
+        });
+    }
+
+    // --- clear-search callback: drop the text query, browse remaining filters ---
+    {
+        let weak = window.as_weak();
+        let state_ref = Arc::clone(&state);
+        let lb_ref = Arc::clone(&lb_index);
+        let detail_ref = Arc::clone(&detail);
+        let mode_ref = Arc::clone(&search_mode);
+        let filters_ref = Arc::clone(&filters);
+        let selected_ref = Arc::clone(&selected);
+        let selection_ref = Arc::clone(&selection);
+        let selection_dirty_ref = Arc::clone(&selection_dirty);
+        let grid_gen_ref = Arc::clone(&grid_generation);
+        let restoring_ref = Arc::clone(&restoring);
+        let backend_clear = backend.clone();
+        window.on_clear_search(move || {
+            if restoring_ref.load(Ordering::SeqCst) {
+                return;
+            }
+            let Some(w) = weak.upgrade() else { return };
+            w.set_query_text("".into());
+            let current_filters = filters_ref.lock().unwrap().clone();
+            clear_to_browse(
+                &weak,
+                &state_ref,
+                &detail_ref,
+                &lb_ref,
+                &mode_ref,
+                &grid_gen_ref,
+                &backend_clear,
                 current_filters,
                 SelectionPolicy {
                     selected: Arc::clone(&selected_ref),
@@ -2943,6 +2947,50 @@ fn spawn_similar(
         // the UI only allows it after the model is ready, so model_ready=true.
         apply_fetch_result(weak, state_ref, grid_gen, res, sel, true, true);
     });
+}
+
+/// Drop the text query and browse the full set matching `filters` (an empty
+/// `Filters::default()` browses the whole library). Shared by `on_search`'s
+/// empty-query branch and the "Clear text search" button. Resets sort to the
+/// browse default — a prior search may have left sort = Relevance, invalid for
+/// browse — and the sort selector to browse mode (no Relevance option).
+#[allow(clippy::too_many_arguments)]
+fn clear_to_browse(
+    weak: &Weak<MainWindow>,
+    state: &Arc<Mutex<SearchState>>,
+    detail: &Arc<Mutex<Option<DetailState>>>,
+    lb: &Arc<Mutex<Option<usize>>>,
+    mode: &Arc<Mutex<SearchMode>>,
+    grid_gen: &Arc<AtomicU64>,
+    backend: &Backend,
+    filters: Filters,
+    sel: SelectionPolicy,
+) {
+    *lb.lock().unwrap() = None;
+    *detail.lock().unwrap() = None;
+    *mode.lock().unwrap() = SearchMode::Text(String::new());
+    {
+        let mut s = state.lock().unwrap();
+        s.sort = Sort::default();
+        s.start_search(String::new());
+    }
+    if let Some(w) = weak.upgrade() {
+        w.set_lightbox_open(false);
+        w.set_detail_open(false);
+        w.set_status("Searching\u{2026}".into());
+        w.set_can_search(false);
+        w.set_sort_options(make_sort_options_model(false));
+        w.set_sort_index(0);
+        w.set_sort_desc(false);
+    }
+    spawn_browse(
+        weak.clone(),
+        Arc::clone(state),
+        Arc::clone(grid_gen),
+        backend.clone(),
+        filters,
+        sel,
+    );
 }
 
 /// Browse the full filtered set in the current sort order (no paging).
