@@ -1,6 +1,7 @@
 slint::include_modules!();
 
 mod backend;
+mod chords;
 mod detail;
 mod image_util;
 mod loader;
