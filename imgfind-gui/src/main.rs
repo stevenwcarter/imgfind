@@ -25,7 +25,7 @@ use slint::{Image, Model, ModelRc, SharedString, Timer, TimerMode, VecModel, Wea
 
 use backend::Backend;
 use detail::{DetailState, filename_of, format_metadata, select};
-use imgfind::filters::{Filters, GpsFilter};
+use imgfind::filters::{Filters, GpsFilter, TagMatch};
 use imgfind::sort::{RowMeta, Sort, SortDir, SortKey};
 use imgfind::ui_state::{PersistedMode, UiState};
 use state::{SearchState, ViewState};
@@ -1061,6 +1061,136 @@ fn main() -> Result<()> {
         });
     }
 
+    // `on_filter_tags_committed` — fired when the user commits text in the tag
+    // filter editor; replaces the tag set, reflects it to the UI, then kicks the
+    // shared debounce so the current-mode query re-runs filtered.
+    {
+        let weak = window.as_weak();
+        let state_ref = Arc::clone(&state);
+        let mode_ref = Arc::clone(&search_mode);
+        let filters_ref = Arc::clone(&filters);
+        let selected_ref = Arc::clone(&selected);
+        let grid_gen_ref = Arc::clone(&grid_generation);
+        let backend_tc = backend.clone();
+        let timer = Rc::clone(&debounce_timer);
+        window.on_filter_tags_committed(move |text| {
+            let Some(w) = weak.upgrade() else { return };
+            let new_filters = {
+                let mut f = filters_ref.lock().unwrap();
+                tagset::set_words(&mut f.tags, text.as_str());
+                push_filter_tags(&w, &f);
+                f.clone()
+            };
+            start_debounce(
+                &timer,
+                weak.clone(),
+                Arc::clone(&state_ref),
+                Arc::clone(&mode_ref),
+                Arc::clone(&grid_gen_ref),
+                backend_tc.clone(),
+                new_filters,
+                Arc::clone(&selected_ref),
+            );
+        });
+    }
+
+    // `on_filter_tag_remove` — fired when the user removes a single tag pill.
+    {
+        let weak = window.as_weak();
+        let state_ref = Arc::clone(&state);
+        let mode_ref = Arc::clone(&search_mode);
+        let filters_ref = Arc::clone(&filters);
+        let selected_ref = Arc::clone(&selected);
+        let grid_gen_ref = Arc::clone(&grid_generation);
+        let backend_tr = backend.clone();
+        let timer = Rc::clone(&debounce_timer);
+        window.on_filter_tag_remove(move |tag| {
+            let Some(w) = weak.upgrade() else { return };
+            let new_filters = {
+                let mut f = filters_ref.lock().unwrap();
+                tagset::remove(&mut f.tags, tag.as_str());
+                push_filter_tags(&w, &f);
+                f.clone()
+            };
+            start_debounce(
+                &timer,
+                weak.clone(),
+                Arc::clone(&state_ref),
+                Arc::clone(&mode_ref),
+                Arc::clone(&grid_gen_ref),
+                backend_tr.clone(),
+                new_filters,
+                Arc::clone(&selected_ref),
+            );
+        });
+    }
+
+    // `on_tag_match_toggled` — flips the tag-filter mode between AND (AllOf) and
+    // OR (AnyOf).
+    {
+        let weak = window.as_weak();
+        let state_ref = Arc::clone(&state);
+        let mode_ref = Arc::clone(&search_mode);
+        let filters_ref = Arc::clone(&filters);
+        let selected_ref = Arc::clone(&selected);
+        let grid_gen_ref = Arc::clone(&grid_generation);
+        let backend_tm = backend.clone();
+        let timer = Rc::clone(&debounce_timer);
+        window.on_tag_match_toggled(move || {
+            let Some(w) = weak.upgrade() else { return };
+            let new_filters = {
+                let mut f = filters_ref.lock().unwrap();
+                f.tag_match = match f.tag_match {
+                    TagMatch::AllOf => TagMatch::AnyOf,
+                    TagMatch::AnyOf => TagMatch::AllOf,
+                };
+                push_filter_tags(&w, &f);
+                f.clone()
+            };
+            start_debounce(
+                &timer,
+                weak.clone(),
+                Arc::clone(&state_ref),
+                Arc::clone(&mode_ref),
+                Arc::clone(&grid_gen_ref),
+                backend_tm.clone(),
+                new_filters,
+                Arc::clone(&selected_ref),
+            );
+        });
+    }
+
+    // `on_tags_enabled_toggled` — flips the master enable for the tag filter.
+    {
+        let weak = window.as_weak();
+        let state_ref = Arc::clone(&state);
+        let mode_ref = Arc::clone(&search_mode);
+        let filters_ref = Arc::clone(&filters);
+        let selected_ref = Arc::clone(&selected);
+        let grid_gen_ref = Arc::clone(&grid_generation);
+        let backend_te = backend.clone();
+        let timer = Rc::clone(&debounce_timer);
+        window.on_tags_enabled_toggled(move || {
+            let Some(w) = weak.upgrade() else { return };
+            let new_filters = {
+                let mut f = filters_ref.lock().unwrap();
+                f.tags_enabled = !f.tags_enabled;
+                push_filter_tags(&w, &f);
+                f.clone()
+            };
+            start_debounce(
+                &timer,
+                weak.clone(),
+                Arc::clone(&state_ref),
+                Arc::clone(&mode_ref),
+                Arc::clone(&grid_gen_ref),
+                backend_te.clone(),
+                new_filters,
+                Arc::clone(&selected_ref),
+            );
+        });
+    }
+
     // --- sort-changed callback: user picked a different sort key ---
     {
         let weak = window.as_weak();
@@ -1253,6 +1383,7 @@ fn main() -> Result<()> {
         }
         Ok(None) => {
             init_fresh_rail(&window, &brushes, &mm_buffer);
+            push_filter_tags(&window, &filters.lock().unwrap());
             start_default_browse(
                 window.as_weak(),
                 Arc::clone(&state),
@@ -1265,6 +1396,7 @@ fn main() -> Result<()> {
         Err(e) => {
             tracing::warn!("Failed to read persisted session, starting fresh: {e:#}");
             init_fresh_rail(&window, &brushes, &mm_buffer);
+            push_filter_tags(&window, &filters.lock().unwrap());
             start_default_browse(
                 window.as_weak(),
                 Arc::clone(&state),
@@ -1357,6 +1489,16 @@ fn push_detail_tags(w: &MainWindow, tags: &[String]) {
             .collect::<Vec<SharedString>>(),
     )));
     w.set_detail_tags_joined(tags.join(" ").into());
+}
+
+/// Reflect the tag-filter slice of `filters` into the window: the tag pills,
+/// the joined editor text, the AND/OR mode bool, and the master enable. Called
+/// after every tag-filter edit and during restore/fresh-start setup.
+fn push_filter_tags(w: &MainWindow, f: &Filters) {
+    w.set_filter_tags(string_model(&f.tags));
+    w.set_filter_tags_joined(f.tags.join(" ").into());
+    w.set_tag_match_and(matches!(f.tag_match, TagMatch::AllOf));
+    w.set_tags_enabled(f.tags_enabled);
 }
 
 /// Show the rail with empty contents on a fresh DB (no persisted session). The
@@ -1615,6 +1757,9 @@ fn restore_session(st: UiState, ctx: RestoreCtx<'_>) {
         w.set_size_label(build_size_label(lo, hi, ctx.size_bounds));
         w.set_type_chips(build_chips_model(ctx.all_extensions, &exts));
         w.set_gps_mode(gps_to_mode(st.filters.gps));
+        // Reflect the persisted tag filter into the UI under the `restoring`
+        // guard (no query fired); the result list already reflects these tags.
+        push_filter_tags(&w, &st.filters);
     }
 
     // 6. Detail panel — open it for the selected image (best-effort). Mirror

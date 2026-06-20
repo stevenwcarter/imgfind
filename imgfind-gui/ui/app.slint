@@ -57,6 +57,11 @@ export component MainWindow inherits Window {
     in property <[{name: string, on: bool}]> type-chips;
     // 0 = Any, 1 = Has GPS, 2 = No GPS.
     in property <int> gps-mode: 0;
+    // Tag filter (set from Rust; UI emits edits via the callbacks below).
+    in property <[string]> filter-tags;
+    in property <string> filter-tags-joined;
+    in property <bool> tag-match-and: true;   // true = AND (AllOf), false = OR
+    in property <bool> tags-enabled: false;
 
     callback search(string);
     callback tile-selected(int);
@@ -74,6 +79,11 @@ export component MainWindow inherits Window {
     callback filters-changed();
     callback ext-toggled(string);
     callback gps-mode-changed(int);
+    // Tag-filter callbacks.
+    callback filter-tags-committed(string);
+    callback filter-tag-remove(string);
+    callback tag-match-toggled();
+    callback tags-enabled-toggled();
 
     // Sort selector (set from Rust; see sort-changed / sort-dir-toggled callbacks).
     // ASCII "Asc"/"Desc" for the direction button — no arrow glyphs (tofu in Slint's default font).
@@ -407,6 +417,58 @@ export component MainWindow inherits Window {
                                 clicked => { root.gps-mode-changed(2); }
                             }
                         }
+                    }
+                }
+
+                // --- Tag filter row ---
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    Text {
+                        text: "Tags:";
+                        color: #9aa4b2;
+                        vertical-alignment: center;
+                    }
+                    TagEditor {
+                        width: 240px;
+                        tags: root.filter-tags;
+                        joined: root.filter-tags-joined;
+                        placeholder: "filter by tags...";
+                        committed-text(t) => { root.filter-tags-committed(t); }
+                        remove(tag) => { root.filter-tag-remove(tag); }
+                    }
+                    // AND/OR toggle button (ASCII text — no glyphs).
+                    Rectangle {
+                        width: andor-text.preferred-width + 16px;
+                        height: 24px;
+                        border-radius: 4px;
+                        background: #2d3446;
+                        border-width: 1px;
+                        border-color: #3a4255;
+                        andor-text := Text {
+                            text: root.tag-match-and ? "AND" : "OR";
+                            color: #cfd6e2;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            width: 100%;
+                            height: 100%;
+                        }
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            clicked => { root.tag-match-toggled(); }
+                        }
+                    }
+                    Toggle {
+                        on: root.tags-enabled;
+                        toggled(v) => { root.tags-enabled-toggled(); }
+                    }
+                    Text {
+                        text: "filter on";
+                        color: #9aa4b2;
+                        vertical-alignment: center;
+                        font-size: 12px;
                     }
                 }
 
