@@ -16,6 +16,19 @@ pub enum PersistedMode {
     Similar(i64),
 }
 
+/// One color brush: a curated set of tag names quick-applied as a unit. The
+/// color is input-only; these tags are assigned to images as ordinary tags.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct TagBrush {
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+/// Default `rail_visible` is `true` (rail shown on first launch).
+fn default_true() -> bool {
+    true
+}
+
 /// Full GUI session state that can be serialised to JSON and stored in SQLite.
 ///
 /// Every field carries `#[serde(default)]` so that forward- and
@@ -40,6 +53,15 @@ pub struct UiState {
     pub detail_open: bool,
     #[serde(default)]
     pub scroll_y: f32,
+    /// Five color brushes, indexed by `colors::BrushColor::index`.
+    #[serde(default)]
+    pub brushes: [TagBrush; 5],
+    /// The live, editable "Most Recent" (`mm`) staging set.
+    #[serde(default)]
+    pub recent_tags: Vec<String>,
+    /// Left-rail visibility (defaults to shown).
+    #[serde(default = "default_true")]
+    pub rail_visible: bool,
 }
 
 #[cfg(test)]
@@ -61,10 +83,32 @@ mod tests {
             selected_index: Some(1),
             detail_open: true,
             scroll_y: 128.5,
+            brushes: [
+                TagBrush {
+                    tags: vec!["beach".into(), "sunset".into()],
+                },
+                TagBrush::default(),
+                TagBrush::default(),
+                TagBrush::default(),
+                TagBrush::default(),
+            ],
+            recent_tags: vec!["beach".into(), "sunset".into()],
+            rail_visible: false,
         };
         let json = serde_json::to_string(&st).unwrap();
         let back: UiState = serde_json::from_str(&json).unwrap();
         assert_eq!(back, st);
+    }
+
+    #[test]
+    fn old_blob_without_tag_fields_deserializes() {
+        // A pre-tags JSON blob omits brushes/recent_tags/rail_visible.
+        let json = r#"{"search_text":"x","result_ids":[1]}"#;
+        let back: UiState = serde_json::from_str(json).unwrap();
+        assert_eq!(back.brushes, <[TagBrush; 5]>::default());
+        assert!(back.recent_tags.is_empty());
+        // Absent rail_visible falls back to the serde default (true).
+        assert!(back.rail_visible);
     }
 
     #[test]
