@@ -1,0 +1,6 @@
+// Global bridge to imgfind_gui::tagset::wrap_tag_rows. `rows(tags, width)` packs
+// the tags into rows that fit `width`; used in a reactive binding so it recomputes
+// whenever a TagEditor's width changes (e.g. a future panel resize).
+export global TagWrap {
+    pure callback rows([string], length) -> [[string]];
+}

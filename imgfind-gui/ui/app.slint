@@ -4,6 +4,10 @@ import { RangeSlider } from "range_slider.slint";
 // errors on duplicate imports from the same path).
 import { Toggle } from "toggle.slint";
 import { TagEditor } from "tag_editor.slint";
+// Re-exported so Rust gets a `MainWindow::global::<TagWrap>()` accessor to
+// register the wrap_tag_rows bridge once at startup.
+import { TagWrap } from "tag_wrap.slint";
+export { TagWrap }
 
 export struct Tile {
     path: string,

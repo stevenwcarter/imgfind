@@ -210,6 +210,23 @@ fn main() -> Result<()> {
 
     let window = MainWindow::new().context("Failed to create window")?;
 
+    // Wrap each TagEditor's pills into rows that fit its current width. Shared
+    // by all four TagEditor instances via the TagWrap global; reactive on width.
+    window.global::<TagWrap>().on_rows(|tags, width| {
+        let tags: Vec<String> = tags.iter().map(|s| s.to_string()).collect();
+        // 11.0 = pill Text font-size in tag_editor.slint.
+        let rows = tagset::wrap_tag_rows(&tags, width, 11.0);
+        let model: Vec<ModelRc<SharedString>> = rows
+            .into_iter()
+            .map(|r| {
+                ModelRc::new(VecModel::from(
+                    r.into_iter().map(SharedString::from).collect::<Vec<_>>(),
+                ))
+            })
+            .collect();
+        ModelRc::new(VecModel::from(model))
+    });
+
     // Initial UI state: model loading, search disabled.
     window.set_can_search(false);
     window.set_status("Loading model...".into());

@@ -1,16 +1,14 @@
 // Text <-> pills tag editor.
 //
-// Display state: shows pills, one per tag. Click any pill's × glyph area to
-// fire remove(tag); click the empty background to enter editing mode.
+// Display state: shows pills, one per tag, wrapped onto multiple rows so they
+// never run off the right edge. Click anywhere on a pill to remove it; click the
+// empty background to enter editing mode.
 //
 // Editing state: a LineEdit pre-filled from `joined` (space-joined tags, set
 // by Rust). Commits raw text via committed-text(string) on Enter OR focus
 // loss; Rust is responsible for splitting on whitespace and deduplicating.
-//
-// Glyph note: the × remove glyph is U+00D7 (Latin-1 MULTIPLICATION SIGN),
-// which the Slint default font covers. Do NOT change it to ✕ (U+2715) or
-// any other symbol-range glyph — those render as tofu boxes.
 import { LineEdit } from "std-widgets.slint";
+import { TagWrap } from "tag_wrap.slint";
 
 export component TagEditor inherits Rectangle {
     in property <[string]> tags;
@@ -27,34 +25,49 @@ export component TagEditor inherits Rectangle {
     property <bool> editing: false;
     changed editing => { root.editing-changed(self.editing); }
 
-    min-height: 28px;
+    // Pills packed into rows that fit the editor's current width. Geometry is
+    // reactive, so this recomputes whenever `self.width` changes (e.g. a future
+    // drag-to-resize of the panels).
+    property <[[string]]> rows: TagWrap.rows(root.tags, self.width);
+
+    // Grow to fit the wrapped rows in display mode; fixed height while editing.
+    // Each row is 20px + 4px spacing = 24px; +4px for layout padding remainder.
+    height: root.editing ? 28px : max(28px, root.rows.length * 24px + 4px);
     border-radius: 4px;
     background: #232838;
     border-width: 1px;
     border-color: #3a4255;
+    // Defense-in-depth: even if the Rust width estimate is slightly off, a pill
+    // can never visibly overflow off-screen (the symptom this change kills).
+    clip: true;
 
     // --- Display state: pills + click-to-edit background ---
     if !root.editing: Rectangle {
+        // First child so pills (rendered after, on top) win their own clicks.
         TouchArea { clicked => { root.editing = true; } }
-        HorizontalLayout {
+        VerticalLayout {
             padding: 4px;
             spacing: 4px;
             alignment: start;
-            for tag in root.tags: Rectangle {
-                width: pill-text.preferred-width + 18px;
-                height: 20px;
-                border-radius: 10px;
-                background: root.pill-color;
-                pill-text := Text {
-                    text: tag + "  ×"; // × = U+00D7, Latin-1, safe for default font
-                    color: #fff;
-                    font-size: 11px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                    width: 100%;
-                    height: 100%;
+            for row in root.rows: HorizontalLayout {
+                spacing: 4px;
+                alignment: start;
+                for tag in row: Rectangle {
+                    width: pill-text.preferred-width + 18px;
+                    height: 20px;
+                    border-radius: 10px;
+                    background: root.pill-color;
+                    pill-text := Text {
+                        text: tag;
+                        color: #fff;
+                        font-size: 11px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        width: 100%;
+                        height: 100%;
+                    }
+                    TouchArea { clicked => { root.remove(tag); } }
                 }
-                TouchArea { clicked => { root.remove(tag); } }
             }
         }
     }
