@@ -1586,6 +1586,34 @@ fn main() -> Result<()> {
         });
     }
 
+    // --- toggle-detail callback: peek tab opens/closes the detail panel ---
+    //
+    // Closed -> open the detail panel for the cursor tile (falling back to the
+    // first tile when nothing is selected); open -> close it. A no-op when
+    // there are no results to show.
+    {
+        let selected_ref = Arc::clone(&selected);
+        let state_ref = Arc::clone(&state);
+        let weak = window.as_weak();
+        window.on_toggle_detail(move || {
+            let Some(w) = weak.upgrade() else {
+                return;
+            };
+            if w.get_detail_open() {
+                w.invoke_detail_close();
+                return;
+            }
+            // Copy state out before any `invoke_*` so no guard is held across a
+            // re-entrant UI callback (tile-selected re-locks `selected`).
+            let empty = state_ref.lock().unwrap().results.is_empty();
+            if empty {
+                return;
+            }
+            let idx = selected_ref.lock().unwrap().unwrap_or(0);
+            w.invoke_tile_selected(idx as i32);
+        });
+    }
+
     // --- brush-swatch-clicked callback: paint a brush via its rail swatch ---
     //
     // Mouse equivalent of the `m<color>` chord; both go through
