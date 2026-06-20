@@ -144,6 +144,7 @@ fn build_filters(
         size_max,
         extensions,
         gps,
+        ..Default::default()
     }
 }
 

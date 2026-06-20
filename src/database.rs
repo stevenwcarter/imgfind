@@ -2485,4 +2485,55 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
     }
+
+    /// Convenience wrapper: build a temp DB with image rows (no file-size metadata).
+    fn test_db_with_images(paths: &[&str]) -> (Database, std::path::PathBuf) {
+        let rows: Vec<(&str, Option<i64>)> = paths.iter().map(|p| (*p, None)).collect();
+        test_db_with_rows(&rows)
+    }
+
+    /// Convenience constructor for a `RelativePath` from a string literal.
+    fn rel(s: &str) -> RelativePath {
+        RelativePath(PathBuf::from(s))
+    }
+
+    #[test]
+    fn browse_all_filters_by_tags_all_and_any() {
+        use crate::filters::{Filters, TagMatch};
+        use crate::sort::Sort;
+
+        let (db, _tmp) = test_db_with_images(&["a.jpg", "b.jpg", "c.jpg"]);
+        db.tag_image(&rel("a.jpg"), "beach").unwrap();
+        db.tag_image(&rel("a.jpg"), "sunset").unwrap();
+        db.tag_image(&rel("b.jpg"), "beach").unwrap();
+        // c.jpg has no tags.
+
+        let all_beach_sunset = Filters {
+            tags: vec!["beach".into(), "sunset".into()],
+            tag_match: TagMatch::AllOf,
+            tags_enabled: true,
+            ..Default::default()
+        };
+        let got = db.browse_all(&all_beach_sunset, &Sort::default()).unwrap();
+        let paths: Vec<&str> = got.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(paths, vec!["a.jpg"]);
+
+        let any_beach_sunset = Filters {
+            tag_match: TagMatch::AnyOf,
+            ..all_beach_sunset.clone()
+        };
+        let mut got = db.browse_all(&any_beach_sunset, &Sort::default()).unwrap();
+        got.sort_by(|x, y| x.path.cmp(&y.path));
+        let paths: Vec<&str> = got.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(paths, vec!["a.jpg", "b.jpg"]);
+
+        let disabled = Filters {
+            tags_enabled: false,
+            ..all_beach_sunset
+        };
+        let got = db.browse_all(&disabled, &Sort::default()).unwrap();
+        assert_eq!(got.len(), 3);
+
+        let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
+    }
 }
