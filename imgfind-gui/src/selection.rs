@@ -208,7 +208,10 @@ mod tests {
     fn range_to_forward() {
         let mut s = Selection::default();
         s.range_to(2, 8);
-        assert_eq!(s.set().iter().copied().collect::<Vec<_>>(), vec![2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(
+            s.set().iter().copied().collect::<Vec<_>>(),
+            vec![2, 3, 4, 5, 6, 7, 8]
+        );
         assert_eq!(s.mode(), SelectionMode::Range { anchor: 2 });
     }
 
@@ -216,7 +219,10 @@ mod tests {
     fn range_to_backward() {
         let mut s = Selection::default();
         s.range_to(8, 2);
-        assert_eq!(s.set().iter().copied().collect::<Vec<_>>(), vec![2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(
+            s.set().iter().copied().collect::<Vec<_>>(),
+            vec![2, 3, 4, 5, 6, 7, 8]
+        );
         assert_eq!(s.mode(), SelectionMode::Range { anchor: 8 });
     }
 
@@ -263,7 +269,10 @@ mod tests {
         s.range_to(2, 4); // Range {2,3,4}
         s.ctrl_toggle(9);
         assert_eq!(s.mode(), SelectionMode::Free);
-        assert_eq!(s.set().iter().copied().collect::<Vec<_>>(), vec![2, 3, 4, 9]);
+        assert_eq!(
+            s.set().iter().copied().collect::<Vec<_>>(),
+            vec![2, 3, 4, 9]
+        );
         s.ctrl_toggle(3);
         assert_eq!(s.set().iter().copied().collect::<Vec<_>>(), vec![2, 4, 9]);
     }
