@@ -8,6 +8,7 @@ mod loader;
 mod nav;
 mod preload;
 mod state;
+mod tagset;
 mod window;
 
 use std::collections::HashSet;
@@ -276,6 +277,13 @@ fn main() -> Result<()> {
     // setting the search field (or any restore side effect) can never kick off a
     // re-query — the restored result list must survive verbatim.
     let restoring: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+
+    // Left-rail tag state. `brushes` holds the five color brushes' tag lists
+    // (index-aligned with `colors::BrushColor`); `mm_buffer` is the editable
+    // "Most Recent" staging set. Both are pure in-memory + persisted to
+    // `UiState` on exit (no DB writes or background threads while editing).
+    let brushes: Arc<Mutex<[Vec<String>; 5]>> = Arc::new(Mutex::new(Default::default()));
+    let mm_buffer: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
     // Poll for model readiness every 250 ms.  The timer performs exactly ONE
     // job: detect the loading→ready transition, enable the search box, and
@@ -1036,6 +1044,74 @@ fn main() -> Result<()> {
         });
     }
 
+    // --- brush-committed callback: set a brush's tags from raw editor text ---
+    {
+        let brushes_ref = Arc::clone(&brushes);
+        let mm_ref = Arc::clone(&mm_buffer);
+        let weak = window.as_weak();
+        let backend_bc = backend.clone();
+        window.on_brush_committed(move |idx, text| {
+            let Some(w) = weak.upgrade() else { return };
+            {
+                let mut b = brushes_ref.lock().unwrap();
+                if let Some(slot) = b.get_mut(idx as usize) {
+                    tagset::set_words(slot, text.as_str());
+                }
+                let recent = mm_ref.lock().unwrap();
+                push_rail_models(&w, &b, &recent);
+            }
+            persist_rail(&backend_bc, &brushes_ref, &mm_ref, w.get_rail_visible());
+        });
+    }
+
+    // --- brush-remove callback: remove one tag from a brush ---
+    {
+        let brushes_ref = Arc::clone(&brushes);
+        let mm_ref = Arc::clone(&mm_buffer);
+        let weak = window.as_weak();
+        let backend_br = backend.clone();
+        window.on_brush_remove(move |idx, tag| {
+            let Some(w) = weak.upgrade() else { return };
+            {
+                let mut b = brushes_ref.lock().unwrap();
+                if let Some(slot) = b.get_mut(idx as usize) {
+                    tagset::remove(slot, tag.as_str());
+                }
+                let recent = mm_ref.lock().unwrap();
+                push_rail_models(&w, &b, &recent);
+            }
+            persist_rail(&backend_br, &brushes_ref, &mm_ref, w.get_rail_visible());
+        });
+    }
+
+    // --- recent-remove callback: remove one tag from the Most Recent buffer ---
+    {
+        let brushes_ref = Arc::clone(&brushes);
+        let mm_ref = Arc::clone(&mm_buffer);
+        let weak = window.as_weak();
+        let backend_rr = backend.clone();
+        window.on_recent_remove(move |tag| {
+            let Some(w) = weak.upgrade() else { return };
+            {
+                let b = brushes_ref.lock().unwrap();
+                let mut recent = mm_ref.lock().unwrap();
+                tagset::remove(&mut recent, tag.as_str());
+                push_rail_models(&w, &b, &recent);
+            }
+            persist_rail(&backend_rr, &brushes_ref, &mm_ref, w.get_rail_visible());
+        });
+    }
+
+    // --- toggle-rail callback: flip left-rail visibility ---
+    {
+        let weak = window.as_weak();
+        window.on_toggle_rail(move || {
+            if let Some(w) = weak.upgrade() {
+                w.set_rail_visible(!w.get_rail_visible());
+            }
+        });
+    }
+
     // --- moving-window thumbnail loader ---
     //
     // A single background worker decodes/persists thumbnails (one writer to
@@ -1097,19 +1173,25 @@ fn main() -> Result<()> {
                 restoring: Arc::clone(&restoring),
                 all_extensions: &all_extensions,
                 size_bounds,
+                brushes: Arc::clone(&brushes),
+                mm_buffer: Arc::clone(&mm_buffer),
             };
             restore_session(st, ctx);
         }
-        Ok(None) => start_default_browse(
-            window.as_weak(),
-            Arc::clone(&state),
-            Arc::clone(&grid_generation),
-            backend.clone(),
-            Arc::clone(&selected),
-            gui_config.resolved_sort(),
-        ),
+        Ok(None) => {
+            init_fresh_rail(&window, &brushes, &mm_buffer);
+            start_default_browse(
+                window.as_weak(),
+                Arc::clone(&state),
+                Arc::clone(&grid_generation),
+                backend.clone(),
+                Arc::clone(&selected),
+                gui_config.resolved_sort(),
+            );
+        }
         Err(e) => {
             tracing::warn!("Failed to read persisted session, starting fresh: {e:#}");
+            init_fresh_rail(&window, &brushes, &mm_buffer);
             start_default_browse(
                 window.as_weak(),
                 Arc::clone(&state),
@@ -1135,6 +1217,8 @@ fn main() -> Result<()> {
         &detail,
         &search_mode,
         &backend,
+        &brushes,
+        &mm_buffer,
     );
 
     Ok(())
@@ -1151,6 +1235,80 @@ fn sort_key_to_browse_index(key: SortKey) -> i32 {
         SortKey::Name => 0,
         SortKey::Size => 1,
         SortKey::Type => 2,
+    }
+}
+
+/// Slint swatch color for a [`BrushColor`].
+fn brush_swatch(c: imgfind::colors::BrushColor) -> slint::Color {
+    use imgfind::colors::BrushColor;
+    match c {
+        BrushColor::Red => slint::Color::from_rgb_u8(0xd0, 0x4a, 0x4a),
+        BrushColor::Green => slint::Color::from_rgb_u8(0x3a, 0xa6, 0x60),
+        BrushColor::Yellow => slint::Color::from_rgb_u8(0xd2, 0xb0, 0x3a),
+        BrushColor::Purple => slint::Color::from_rgb_u8(0x9a, 0x5a, 0xc8),
+        BrushColor::Blue => slint::Color::from_rgb_u8(0x4a, 0x7c, 0xd0),
+    }
+}
+
+/// Build a `[string]` Slint model from a slice of owned strings.
+fn string_model(items: &[String]) -> ModelRc<SharedString> {
+    let rows: Vec<SharedString> = items.iter().map(|s| s.as_str().into()).collect();
+    ModelRc::new(VecModel::from(rows))
+}
+
+/// Push the brush rows and Most-Recent model into the window. Called after any
+/// rail edit and during restore/fresh-start setup.
+fn push_rail_models(w: &MainWindow, brushes: &[Vec<String>; 5], recent: &[String]) {
+    use imgfind::colors::BrushColor;
+    let rows: Vec<BrushRow> = BrushColor::ALL
+        .iter()
+        .map(|&c| {
+            let tags = &brushes[c.index()];
+            BrushRow {
+                letter: c.letter().into(),
+                color: brush_swatch(c),
+                tags: string_model(tags),
+                joined: tags.join(" ").into(),
+            }
+        })
+        .collect();
+    w.set_brushes(ModelRc::new(VecModel::from(rows)));
+    w.set_recent_tags(string_model(recent));
+}
+
+/// Show the rail with empty contents on a fresh DB (no persisted session). The
+/// derived `UiState::default().rail_visible` is `false`, so the rail must be
+/// turned on explicitly here for first-launch visibility.
+fn init_fresh_rail(
+    window: &MainWindow,
+    brushes: &Arc<Mutex<[Vec<String>; 5]>>,
+    mm_buffer: &Arc<Mutex<Vec<String>>>,
+) {
+    let b = brushes.lock().unwrap();
+    let recent = mm_buffer.lock().unwrap();
+    push_rail_models(window, &b, &recent);
+    window.set_rail_visible(true);
+}
+
+/// Persist just the rail-related fields by merging them into the stored
+/// [`UiState`]. Reads the current persisted state, overwrites the rail fields,
+/// and writes it back, so rail edits survive even though the full session is
+/// only persisted on exit. Failures are logged and swallowed.
+fn persist_rail(
+    backend: &Backend,
+    brushes: &Arc<Mutex<[Vec<String>; 5]>>,
+    mm_buffer: &Arc<Mutex<Vec<String>>>,
+    rail_visible: bool,
+) {
+    let mut st = backend.get_ui_state().ok().flatten().unwrap_or_default();
+    {
+        let b = brushes.lock().unwrap();
+        st.brushes = std::array::from_fn(|i| imgfind::ui_state::TagBrush { tags: b[i].clone() });
+    }
+    st.recent_tags = mm_buffer.lock().unwrap().clone();
+    st.rail_visible = rail_visible;
+    if let Err(e) = backend.set_ui_state(&st) {
+        tracing::warn!("Failed to persist rail state: {e:#}");
     }
 }
 
@@ -1215,6 +1373,8 @@ struct RestoreCtx<'a> {
     restoring: Arc<AtomicBool>,
     all_extensions: &'a [String],
     size_bounds: (i64, i64),
+    brushes: Arc<Mutex<[Vec<String>; 5]>>,
+    mm_buffer: Arc<Mutex<Vec<String>>>,
 }
 
 /// Whether a persisted [`PersistedMode`] is a search (text or similarity), as
@@ -1419,12 +1579,26 @@ fn restore_session(st: UiState, ctx: RestoreCtx<'_>) {
         }
     }
 
+    // 8. Left rail — load the brushes/recent buffer from the persisted state,
+    //    push the models, and restore rail visibility.
+    {
+        let mut b = ctx.brushes.lock().unwrap();
+        for (i, slot) in b.iter_mut().enumerate() {
+            *slot = st.brushes[i].tags.clone();
+        }
+        let mut recent = ctx.mm_buffer.lock().unwrap();
+        *recent = st.recent_tags.clone();
+        push_rail_models(&w, &b, &recent);
+    }
+    w.set_rail_visible(st.rail_visible);
+
     ctx.restoring.store(false, Ordering::SeqCst);
 }
 
 /// Persist the current session to the DB after the event loop returns. Reads
 /// the live window scroll position plus the shared state holders. Any failure
 /// is logged and swallowed so it can never crash process exit.
+#[allow(clippy::too_many_arguments)]
 fn persist_session(
     window: &MainWindow,
     state: &Arc<Mutex<SearchState>>,
@@ -1433,6 +1607,8 @@ fn persist_session(
     detail: &Arc<Mutex<Option<DetailState>>>,
     search_mode: &Arc<Mutex<SearchMode>>,
     backend: &Backend,
+    brushes: &Arc<Mutex<[Vec<String>; 5]>>,
+    mm_buffer: &Arc<Mutex<Vec<String>>>,
 ) {
     let (result_ids, sort) = {
         let s = state.lock().unwrap();
@@ -1474,7 +1650,12 @@ fn persist_session(
         selected_index: *selected.lock().unwrap(),
         detail_open: detail.lock().unwrap().is_some(),
         scroll_y: window.get_grid_viewport_y(),
-        ..Default::default()
+        brushes: {
+            let b = brushes.lock().unwrap();
+            std::array::from_fn(|i| imgfind::ui_state::TagBrush { tags: b[i].clone() })
+        },
+        recent_tags: mm_buffer.lock().unwrap().clone(),
+        rail_visible: window.get_rail_visible(),
     };
 
     if let Err(e) = backend.set_ui_state(&st) {
