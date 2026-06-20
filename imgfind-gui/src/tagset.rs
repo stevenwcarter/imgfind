@@ -1,11 +1,10 @@
 //! Pure helpers for editing ordered, de-duplicated tag lists (brushes and the
 //! "Most Recent" buffer).
 
-/// Add whitespace-separated words to `list`, trimming and skipping duplicates,
+/// Add whitespace-separated words to `list`, skipping duplicates,
 /// preserving existing order and append order of new words.
 pub fn add_words(list: &mut Vec<String>, text: &str) {
     for w in text.split_whitespace() {
-        let w = w.trim();
         if !w.is_empty() && !list.iter().any(|t| t == w) {
             list.push(w.to_string());
         }

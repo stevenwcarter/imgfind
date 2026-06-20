@@ -71,6 +71,9 @@ mod tests {
     #[test]
     fn index_is_stable_order() {
         assert_eq!(BrushColor::Red.index(), 0);
+        assert_eq!(BrushColor::Green.index(), 1);
+        assert_eq!(BrushColor::Yellow.index(), 2);
+        assert_eq!(BrushColor::Purple.index(), 3);
         assert_eq!(BrushColor::Blue.index(), 4);
     }
 
