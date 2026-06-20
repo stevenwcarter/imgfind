@@ -8,6 +8,7 @@ mod image_util;
 mod loader;
 mod nav;
 mod preload;
+mod selection;
 mod state;
 mod tagset;
 mod window;
