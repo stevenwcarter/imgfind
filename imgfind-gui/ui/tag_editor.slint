@@ -19,8 +19,13 @@ export component TagEditor inherits Rectangle {
     in property <color> pill-color: #3d4663;
     callback committed-text(string);      // raw text; Rust splits + dedupes
     callback remove(string);
+    // Fired whenever this editor enters/leaves text-edit mode. The root window
+    // listens so it can suppress keyboard chord forwarding while a tag field is
+    // being typed into (otherwise letters like m/f/t/r are stolen by chords).
+    callback editing-changed(bool);
 
     property <bool> editing: false;
+    changed editing => { root.editing-changed(self.editing); }
 
     min-height: 28px;
     border-radius: 4px;

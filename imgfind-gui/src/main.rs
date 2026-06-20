@@ -285,6 +285,19 @@ fn main() -> Result<()> {
     let brushes: Arc<Mutex<[Vec<String>; 5]>> = Arc::new(Mutex::new(Default::default()));
     let mm_buffer: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
+    // Pending keyboard-chord prefix (e.g. after `m` we await a brush letter) and
+    // the single-shot timer that resets a stale prefix after ~800ms. Both live on
+    // the UI thread; the timer is !Send so `Rc` (not `Arc`) is correct.
+    let pending_chord: Arc<Mutex<chords::Pending>> = Arc::new(Mutex::new(chords::Pending::None));
+    let chord_timer: Rc<Timer> = Rc::new(Timer::default());
+
+    // Count of tag text editors currently in edit mode. Each TagEditor bumps it
+    // via `editor-editing-changed`; while it's > 0 the window's
+    // `chords-suppressed` flag is set so chord keys go to the editor, not the
+    // chord machine. A counter (vs a bool) is robust to a transient overlap when
+    // one editor commits-on-blur as another gains focus. UI-thread-only → `Cell`.
+    let editing_count: Rc<std::cell::Cell<i32>> = Rc::new(std::cell::Cell::new(0));
+
     // Poll for model readiness every 250 ms.  The timer performs exactly ONE
     // job: detect the loading→ready transition, enable the search box, and
     // stop itself.  After that point, search-start (false) and
@@ -1327,6 +1340,171 @@ fn main() -> Result<()> {
         });
     }
 
+    // --- editor-editing-changed callback: track active tag editors ---
+    //
+    // Each TagEditor fires this on entering (true) / leaving (false) edit mode.
+    // We keep a UI-thread count and reflect "any editor editing" into the window
+    // so `capture-key-pressed` suppresses chord forwarding while a tag field types.
+    {
+        let weak = window.as_weak();
+        let editing_count = Rc::clone(&editing_count);
+        window.on_editor_editing_changed(move |editing| {
+            let n = (editing_count.get() + if editing { 1 } else { -1 }).max(0);
+            editing_count.set(n);
+            if let Some(w) = weak.upgrade() {
+                w.set_chords_suppressed(n > 0);
+            }
+        });
+    }
+
+    // --- key callback: keyboard-chord dispatcher ---
+    //
+    // app.slint forwards one chord trigger/completion key per press here (only
+    // when no text editor or the modal has focus). `chords::resolve` advances the
+    // pure state machine; we arm/cancel an ~800ms prefix-reset timer and execute
+    // the resolved action. All Backend writes happen on background threads.
+    {
+        let pending_chord = Arc::clone(&pending_chord);
+        let chord_timer = Rc::clone(&chord_timer);
+        let brushes_ref = Arc::clone(&brushes);
+        let mm_ref = Arc::clone(&mm_buffer);
+        let filters_ref = Arc::clone(&filters);
+        let detail_ref = Arc::clone(&detail);
+        let selected_ref = Arc::clone(&selected);
+        let lb_ref = Arc::clone(&lb_index);
+        let state_ref = Arc::clone(&state);
+        let mode_ref = Arc::clone(&search_mode);
+        let grid_gen_ref = Arc::clone(&grid_generation);
+        let backend_key = backend.clone();
+        let timer = Rc::clone(&debounce_timer);
+        let weak = window.as_weak();
+        window.on_key(move |key| {
+            let Some(w) = weak.upgrade() else { return };
+
+            // Advance the pure chord state machine.
+            let (next, action) = {
+                let mut pend = pending_chord.lock().unwrap();
+                let (next, action) = chords::resolve(*pend, key.as_str());
+                *pend = next;
+                (next, action)
+            };
+
+            // Arm an ~800ms reset while a prefix is pending; otherwise cancel it.
+            if matches!(next, chords::Pending::AwaitM | chords::Pending::AwaitF) {
+                let pc = Arc::clone(&pending_chord);
+                chord_timer.start(
+                    TimerMode::SingleShot,
+                    Duration::from_millis(800),
+                    move || {
+                        *pc.lock().unwrap() = chords::Pending::None;
+                    },
+                );
+            } else {
+                chord_timer.stop();
+            }
+
+            let Some(action) = action else { return };
+            let tag_ctx = TagTargetCtx {
+                detail: Arc::clone(&detail_ref),
+                selected: Arc::clone(&selected_ref),
+                lb_index: Arc::clone(&lb_ref),
+                state: Arc::clone(&state_ref),
+            };
+            match action {
+                chords::Action::ToggleRail => {
+                    w.set_rail_visible(!w.get_rail_visible());
+                }
+                chords::Action::OpenTagModal => {
+                    w.set_tag_modal_open(true);
+                }
+                chords::Action::PaintBrush(c) => {
+                    let tags = brushes_ref.lock().unwrap()[c.index()].clone();
+                    apply_tags_to_focused(&weak, &backend_key, &tag_ctx, tags.clone());
+                    *mm_ref.lock().unwrap() = tags;
+                    push_rail_models(&w, &brushes_ref.lock().unwrap(), &mm_ref.lock().unwrap());
+                }
+                chords::Action::RepeatLast => {
+                    let tags = mm_ref.lock().unwrap().clone();
+                    apply_tags_to_focused(&weak, &backend_key, &tag_ctx, tags);
+                }
+                chords::Action::LoadBrushIntoFilter(c) => {
+                    let new_filters = {
+                        let tags = brushes_ref.lock().unwrap()[c.index()].clone();
+                        let mut f = filters_ref.lock().unwrap();
+                        f.tags = tags;
+                        push_filter_tags(&w, &f);
+                        f.clone()
+                    };
+                    start_debounce(
+                        &timer,
+                        weak.clone(),
+                        Arc::clone(&state_ref),
+                        Arc::clone(&mode_ref),
+                        Arc::clone(&grid_gen_ref),
+                        backend_key.clone(),
+                        new_filters,
+                        Arc::clone(&selected_ref),
+                    );
+                }
+                chords::Action::ToggleTagFilter => {
+                    let new_filters = {
+                        let mut f = filters_ref.lock().unwrap();
+                        f.tags_enabled = !f.tags_enabled;
+                        push_filter_tags(&w, &f);
+                        f.clone()
+                    };
+                    start_debounce(
+                        &timer,
+                        weak.clone(),
+                        Arc::clone(&state_ref),
+                        Arc::clone(&mode_ref),
+                        Arc::clone(&grid_gen_ref),
+                        backend_key.clone(),
+                        new_filters,
+                        Arc::clone(&selected_ref),
+                    );
+                }
+            }
+        });
+    }
+
+    // --- tag-modal-commit callback: apply typed tags to the focused image ---
+    {
+        let mm_ref = Arc::clone(&mm_buffer);
+        let brushes_ref = Arc::clone(&brushes);
+        let detail_ref = Arc::clone(&detail);
+        let selected_ref = Arc::clone(&selected);
+        let lb_ref = Arc::clone(&lb_index);
+        let state_ref = Arc::clone(&state);
+        let backend_modal = backend.clone();
+        let weak = window.as_weak();
+        window.on_tag_modal_commit(move |text| {
+            let Some(w) = weak.upgrade() else { return };
+            let mut tags = Vec::new();
+            tagset::set_words(&mut tags, text.as_str());
+            let tag_ctx = TagTargetCtx {
+                detail: Arc::clone(&detail_ref),
+                selected: Arc::clone(&selected_ref),
+                lb_index: Arc::clone(&lb_ref),
+                state: Arc::clone(&state_ref),
+            };
+            apply_tags_to_focused(&weak, &backend_modal, &tag_ctx, tags.clone());
+            *mm_ref.lock().unwrap() = tags;
+            push_rail_models(&w, &brushes_ref.lock().unwrap(), &mm_ref.lock().unwrap());
+            w.set_tag_modal_open(false);
+        });
+    }
+
+    // --- tag-modal-cancel callback: close the modal without applying ---
+    {
+        let weak = window.as_weak();
+        window.on_tag_modal_cancel(move || {
+            if let Some(w) = weak.upgrade() {
+                w.set_tag_modal_open(false);
+            }
+        });
+    }
+
     // --- moving-window thumbnail loader ---
     //
     // A single background worker decodes/persists thumbnails (one writer to
@@ -1369,6 +1547,7 @@ fn main() -> Result<()> {
     let _ = model_timer;
     let _ = debounce_timer;
     let _ = loader_timer;
+    let _ = chord_timer;
 
     // T20: Startup gate — restore the persisted session if one exists, else
     // fall back to the T19 default browse-all. A malformed blob reads as
@@ -2435,6 +2614,90 @@ fn apply_selection_after_results(
     let new_sel = resolve_selection(after, results, prev);
     *selected_ref.lock().unwrap() = new_sel;
     w.set_selected_index(new_sel.map(|i| i as i32).unwrap_or(-1));
+}
+
+/// Relative path of the currently-focused image, in priority order: the
+/// lightbox image if the lightbox is open, else the detail-panel image if the
+/// panel is open, else the selected grid tile. `None` when nothing is focused —
+/// tag-paint actions are then no-ops.
+fn focused_path(
+    detail: &Arc<Mutex<Option<DetailState>>>,
+    selected: &Arc<Mutex<Option<usize>>>,
+    lb_index: &Arc<Mutex<Option<usize>>>,
+    state: &Arc<Mutex<SearchState>>,
+) -> Option<String> {
+    // Copy the index out before locking `state` so we never hold two locks at
+    // once in an order that could deadlock against another path.
+    let lb = *lb_index.lock().unwrap();
+    if let Some(i) = lb {
+        return state.lock().unwrap().results.get(i).map(|r| r.path.clone());
+    }
+    let detail_path = detail.lock().unwrap().as_ref().map(|d| d.path.clone());
+    if let Some(p) = detail_path {
+        return Some(p);
+    }
+    let sel = (*selected.lock().unwrap())?;
+    state
+        .lock()
+        .unwrap()
+        .results
+        .get(sel)
+        .map(|r| r.path.clone())
+}
+
+/// Holders needed to resolve the focused image and refresh the detail panel
+/// after a tag paint. Bundled to keep [`apply_tags_to_focused`] under clippy's
+/// argument limit and the chord call sites readable.
+struct TagTargetCtx {
+    detail: Arc<Mutex<Option<DetailState>>>,
+    selected: Arc<Mutex<Option<usize>>>,
+    lb_index: Arc<Mutex<Option<usize>>>,
+    state: Arc<Mutex<SearchState>>,
+}
+
+/// Apply `tags` to the currently-focused image (see [`focused_path`]).
+///
+/// No-op when nothing is focused or `tags` is empty. The `Backend::add_tag`
+/// writes run on a background thread (never on the UI thread); if the detail
+/// panel is currently showing the same image, its tag list is re-fetched and
+/// pushed back on the UI thread so the pills update live.
+fn apply_tags_to_focused(
+    weak: &Weak<MainWindow>,
+    backend: &Backend,
+    ctx: &TagTargetCtx,
+    tags: Vec<String>,
+) {
+    if tags.is_empty() {
+        return;
+    }
+    let Some(path) = focused_path(&ctx.detail, &ctx.selected, &ctx.lb_index, &ctx.state) else {
+        return;
+    };
+    // Whether the open detail panel is showing this image — decides if we need to
+    // re-push its tag pills after the writes land.
+    let detail_shows_path = ctx
+        .detail
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|d| d.path == path);
+    let backend = backend.clone();
+    let weak = weak.clone();
+    std::thread::spawn(move || {
+        for t in &tags {
+            if let Err(e) = backend.add_tag(&path, t) {
+                tracing::warn!("failed to add tag {t} to {path}: {e}");
+            }
+        }
+        if detail_shows_path {
+            let fresh = backend.tags_for(&path).unwrap_or_default();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(w) = weak.upgrade() {
+                    push_detail_tags(&w, &fresh);
+                }
+            });
+        }
+    });
 }
 
 /// Paths of the `n` neighbors around `center` in arc order (closest first),

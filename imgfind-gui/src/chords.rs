@@ -1,10 +1,6 @@
 //! Pure keyboard-chord state machine for tag shortcuts. The Slint side forwards
 //! a single key string per press (only when no text input has focus); this
 //! module decides the resulting action and the next pending state. No I/O.
-//!
-//! Public items here are wired into the event loop by a later task; allow
-//! dead-code until then rather than polluting later diffs.
-#![allow(dead_code)]
 
 use imgfind::colors::BrushColor;
 
