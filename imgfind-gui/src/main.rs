@@ -1749,7 +1749,7 @@ fn main() -> Result<()> {
                     if paths.is_empty() {
                         apply_tags_to_focused(&weak, &backend_key, &tag_ctx, tags);
                     } else {
-                        apply_tags_to_selection(&weak, &backend_key, &tag_ctx, paths, tags);
+                        apply_tags_to_paths(&weak, &backend_key, &tag_ctx, paths, tags);
                     }
                 }
                 chords::Action::LoadBrushIntoFilter(c) => {
@@ -1818,7 +1818,7 @@ fn main() -> Result<()> {
             if paths.is_empty() {
                 apply_tags_to_focused(&weak, &backend_modal, &tag_ctx, tags.clone());
             } else {
-                apply_tags_to_selection(&weak, &backend_modal, &tag_ctx, paths, tags.clone());
+                apply_tags_to_paths(&weak, &backend_modal, &tag_ctx, paths, tags.clone());
             }
             *mm_ref.lock().unwrap() = tags;
             push_rail_models(&w, &brushes_ref.lock().unwrap(), &mm_ref.lock().unwrap());
@@ -3050,7 +3050,7 @@ fn paint_brush_by_index(idx: usize, ctx: &PaintCtx) {
     if paths.is_empty() {
         apply_tags_to_focused(&ctx.weak, &ctx.backend, &ctx.tag_ctx, tags.clone());
     } else {
-        apply_tags_to_selection(&ctx.weak, &ctx.backend, &ctx.tag_ctx, paths, tags.clone());
+        apply_tags_to_paths(&ctx.weak, &ctx.backend, &ctx.tag_ctx, paths, tags.clone());
     }
     *ctx.mm.lock().unwrap() = tags;
     push_rail_models(&w, &ctx.brushes.lock().unwrap(), &ctx.mm.lock().unwrap());
@@ -3069,6 +3069,8 @@ fn detail_shows(detail: &Option<DetailState>, path: &str) -> bool {
     detail.as_ref().is_some_and(|d| d.path == path)
 }
 
+/// Apply `tags` to the single currently-focused image, delegating the actual
+/// writes + detail refresh to [`apply_tags_to_paths`].
 fn apply_tags_to_focused(
     weak: &Weak<MainWindow>,
     backend: &Backend,
@@ -3081,26 +3083,7 @@ fn apply_tags_to_focused(
     let Some(path) = focused_path(&ctx.detail, &ctx.selected, &ctx.lb_index, &ctx.state) else {
         return;
     };
-    // Whether the open detail panel is showing this image — decides if we need to
-    // re-push its tag pills after the writes land.
-    let detail_shows_path = detail_shows(&ctx.detail.lock().unwrap(), &path);
-    let backend = backend.clone();
-    let weak = weak.clone();
-    std::thread::spawn(move || {
-        for t in &tags {
-            if let Err(e) = backend.add_tag(&path, t) {
-                tracing::warn!("failed to add tag {t} to {path}: {e}");
-            }
-        }
-        if detail_shows_path {
-            let fresh = backend.tags_for(&path).unwrap_or_default();
-            let _ = slint::invoke_from_event_loop(move || {
-                if let Some(w) = weak.upgrade() {
-                    push_detail_tags(&w, &fresh);
-                }
-            });
-        }
-    });
+    apply_tags_to_paths(weak, backend, ctx, vec![path], tags);
 }
 
 /// Resolve the active selection's indices to image paths via `SearchState`.
@@ -3123,27 +3106,27 @@ fn selected_paths(
         .collect()
 }
 
-/// Apply `tags` to every path in `sel_paths` (background thread, batched writes).
+/// Apply `tags` to every path in `paths` (background thread, batched writes).
 ///
-/// Mirrors [`apply_tags_to_focused`] but fans the writes out across a whole
-/// selection. No-op when either input is empty. If the open detail panel shows
-/// one of the affected paths, its tag pills are re-fetched and pushed back on
-/// the UI thread so they update live.
-fn apply_tags_to_selection(
+/// Shared write-then-detail-refresh tail behind both [`apply_tags_to_focused`]
+/// (one path) and the selection paint path. No-op when either input is empty.
+/// If the open detail panel shows one of the affected paths, its tag pills are
+/// re-fetched and pushed back on the UI thread so they update live.
+fn apply_tags_to_paths(
     weak: &Weak<MainWindow>,
     backend: &Backend,
     ctx: &TagTargetCtx,
-    sel_paths: Vec<String>,
+    paths: Vec<String>,
     tags: Vec<String>,
 ) {
-    if tags.is_empty() || sel_paths.is_empty() {
+    if tags.is_empty() || paths.is_empty() {
         return;
     }
     let detail_path = ctx.detail.lock().unwrap().as_ref().map(|d| d.path.clone());
     let backend = backend.clone();
     let weak = weak.clone();
     std::thread::spawn(move || {
-        for path in &sel_paths {
+        for path in &paths {
             for t in &tags {
                 if let Err(e) = backend.add_tag(path, t) {
                     tracing::warn!("failed to add tag {t} to {path}: {e}");
@@ -3151,7 +3134,7 @@ fn apply_tags_to_selection(
             }
         }
         if let Some(dp) = detail_path
-            && sel_paths.contains(&dp)
+            && paths.contains(&dp)
         {
             let fresh = backend.tags_for(&dp).unwrap_or_default();
             let _ = slint::invoke_from_event_loop(move || {
