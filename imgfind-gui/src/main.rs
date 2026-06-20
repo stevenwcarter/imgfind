@@ -3648,6 +3648,8 @@ mod tests {
         let line = format_statusline(&s, &rows);
         assert!(line.starts_with("VISUAL (FREE)"), "got: {line}");
         assert!(line.contains("selected 2"), "got: {line}");
+        // indices 0 (2 MB) + 2 (4 MB) = 6,000,000 bytes selected.
+        assert!(line.contains(&format_bytes(6_000_000)), "got: {line}");
     }
 
     #[test]
