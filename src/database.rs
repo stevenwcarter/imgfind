@@ -2523,6 +2523,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
     }
 
+    /// Pin the invariant that `browse_all(Filters::default(), …)` returns **every**
+    /// indexed image. The GUI's clear-search path calls exactly this to restore the
+    /// full library; if a filter sneaks into `Filters::default()` this test will catch it.
+    #[test]
+    fn browse_all_default_filters_returns_all() {
+        use crate::filters::Filters;
+        use crate::sort::{Sort, SortDir, SortKey};
+
+        let (db, _tmp) =
+            test_db_with_rows(&[("a.jpg", Some(1)), ("b.jpg", Some(2)), ("c.jpg", Some(3))]);
+        let rows = db
+            .browse_all(
+                &Filters::default(),
+                &Sort {
+                    key: SortKey::Name,
+                    dir: SortDir::Asc,
+                },
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 3, "default filters must return every image");
+        let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
+    }
+
     // ── rehydrate_rows tests ───────────────────────────────────────────────────
 
     #[test]
