@@ -122,6 +122,38 @@ fn format_bytes(bytes: i64) -> String {
     }
 }
 
+/// Build the always-visible bottom statusline from the current selection and
+/// the full result set. ASCII separators only (Slint default-font glyph safety).
+// wired in Task 3
+#[allow(dead_code)]
+fn format_statusline(sel: &selection::Selection, results: &[RowMeta]) -> String {
+    let total_bytes: i64 = results.iter().filter_map(|r| r.size).sum();
+    let label = match sel.mode() {
+        selection::SelectionMode::Normal => "NORMAL",
+        selection::SelectionMode::Free => "VISUAL (FREE)",
+        selection::SelectionMode::Range { .. } => "VISUAL (RANGE)",
+    };
+    let base = format!(
+        "{label} - {} images - {}",
+        results.len(),
+        format_bytes(total_bytes)
+    );
+    if sel.is_active() && !sel.is_empty() {
+        let sel_bytes: i64 = sel
+            .set()
+            .iter()
+            .filter_map(|&i| results.get(i).and_then(|r| r.size))
+            .sum();
+        format!(
+            "{base} | selected {} - {}",
+            sel.set().len(),
+            format_bytes(sel_bytes)
+        )
+    } else {
+        base
+    }
+}
+
 /// Build a `Filters` from current UI slider/chip/GPS state.
 fn build_filters(
     lo: f32,
@@ -2972,9 +3004,10 @@ mod arg_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_size_label, clamp_next, clamp_prev, format_bytes, fraction_to_bytes,
-        is_current_generation,
+        build_size_label, clamp_next, clamp_prev, format_bytes, format_statusline,
+        fraction_to_bytes, is_current_generation,
     };
+    use imgfind::sort::RowMeta;
 
     #[test]
     fn latest_generation_applies_stale_is_dropped() {
@@ -3072,6 +3105,75 @@ mod tests {
         // lo=0 (unbounded), hi=0.5 → "0 – 4.8 MB" (5_000_000 bytes = 4.8 MB)
         let label = build_size_label(0.0, 0.5, (0, 10_000_000));
         assert!(label.contains("4.8 MB"), "got: {label}");
+    }
+
+    // --- format_statusline ---
+
+    #[test]
+    fn statusline_normal_shows_count_and_total() {
+        use crate::selection::Selection;
+        let rows = vec![
+            RowMeta { id: 1, path: "a".into(), size: Some(1_000_000), ext: "jpg".into() },
+            RowMeta { id: 2, path: "b".into(), size: Some(1_000_000), ext: "jpg".into() },
+        ];
+        let s = Selection::default();
+        let line = format_statusline(&s, &rows);
+        assert!(line.starts_with("NORMAL"), "got: {line}");
+        assert!(line.contains("2 images"), "got: {line}");
+        assert!(line.contains("MB"), "got: {line}");
+        assert!(!line.contains("selected"), "got: {line}");
+    }
+
+    #[test]
+    fn statusline_none_size_counts_as_zero() {
+        use crate::selection::Selection;
+        let rows = vec![
+            RowMeta { id: 1, path: "a".into(), size: None, ext: "jpg".into() },
+        ];
+        let s = Selection::default();
+        let line = format_statusline(&s, &rows);
+        assert!(line.contains("1 images"), "got: {line}");
+        assert!(line.contains("0 B"), "got: {line}");
+    }
+
+    #[test]
+    fn statusline_free_shows_selection_stats() {
+        use crate::selection::Selection;
+        let rows = vec![
+            RowMeta { id: 1, path: "a".into(), size: Some(2_000_000), ext: "jpg".into() },
+            RowMeta { id: 2, path: "b".into(), size: Some(3_000_000), ext: "jpg".into() },
+            RowMeta { id: 3, path: "c".into(), size: Some(4_000_000), ext: "jpg".into() },
+        ];
+        let mut s = Selection::default();
+        s.enter_free();
+        s.toggle(0);
+        s.toggle(2);
+        let line = format_statusline(&s, &rows);
+        assert!(line.starts_with("VISUAL (FREE)"), "got: {line}");
+        assert!(line.contains("selected 2"), "got: {line}");
+    }
+
+    #[test]
+    fn statusline_range_label() {
+        use crate::selection::Selection;
+        let rows = vec![
+            RowMeta { id: 1, path: "a".into(), size: Some(1), ext: "jpg".into() },
+            RowMeta { id: 2, path: "b".into(), size: Some(1), ext: "jpg".into() },
+        ];
+        let mut s = Selection::default();
+        s.enter_range(0);
+        s.cursor_moved(1);
+        let line = format_statusline(&s, &rows);
+        assert!(line.starts_with("VISUAL (RANGE)"), "got: {line}");
+        assert!(line.contains("selected 2"), "got: {line}");
+    }
+
+    #[test]
+    fn statusline_empty_results() {
+        use crate::selection::Selection;
+        let s = Selection::default();
+        let line = format_statusline(&s, &[]);
+        assert!(line.contains("0 images"), "got: {line}");
     }
 }
 
