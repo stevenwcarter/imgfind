@@ -251,6 +251,17 @@ export component MainWindow inherits Window {
                 }
                 return accept;
             }
+            // Multi-image selection (grid-only): `v` enters Free mode, `Shift+V`
+            // enters Range mode. Placed before the chord/nav blocks; `v` is
+            // neither a chord nor a nav key, so order is safe — but explicit.
+            if (event.text == "v" || event.text == "V") {
+                if (event.modifiers.shift) {
+                    root.selection-enter-range();
+                } else {
+                    root.selection-enter-free();
+                }
+                return accept;
+            }
             // Tag chord keys: backtick, the t/m/f triggers, and the brush
             // completion letters. Forward to Rust, which holds the pending-prefix
             // state. None of these collide with grid nav (hjkl/arrows/Enter/Space/
@@ -282,11 +293,13 @@ export component MainWindow inherits Window {
                 return accept;
             }
             if (event.text == " ") {
-                root.grid-open-lightbox();
+                root.grid-space();
                 return accept;
             }
-            if (event.text == Key.Escape && root.detail-open) {
-                root.detail-close();
+            // Esc in the grid branch: clears an active selection (else closes the
+            // detail panel). Rust decides via grid-escape().
+            if (event.text == Key.Escape) {
+                root.grid-escape();
                 return accept;
             }
             return reject;
