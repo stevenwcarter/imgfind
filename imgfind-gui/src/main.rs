@@ -1472,6 +1472,7 @@ fn persist_session(
         selected_index: *selected.lock().unwrap(),
         detail_open: detail.lock().unwrap().is_some(),
         scroll_y: window.get_grid_viewport_y(),
+        ..Default::default()
     };
 
     if let Err(e) = backend.set_ui_state(&st) {
@@ -2384,12 +2385,18 @@ mod sort_sel_tests {
     #[test]
     fn resolve_keep_index_out_of_range() {
         let rows = vec![make_row(1)];
-        assert_eq!(resolve_selection(&SelectAfter::KeepIndex, &rows, Some(5)), None);
+        assert_eq!(
+            resolve_selection(&SelectAfter::KeepIndex, &rows, Some(5)),
+            None
+        );
     }
 
     #[test]
     fn resolve_keep_index_empty() {
-        assert_eq!(resolve_selection(&SelectAfter::KeepIndex, &[], Some(0)), None);
+        assert_eq!(
+            resolve_selection(&SelectAfter::KeepIndex, &[], Some(0)),
+            None
+        );
     }
 
     #[test]
@@ -2424,6 +2431,9 @@ mod sort_sel_tests {
     #[test]
     fn resolve_by_id_none() {
         let rows = vec![make_row(10)];
-        assert_eq!(resolve_selection(&SelectAfter::ById(None), &rows, None), None);
+        assert_eq!(
+            resolve_selection(&SelectAfter::ById(None), &rows, None),
+            None
+        );
     }
 }
