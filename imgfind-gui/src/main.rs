@@ -8,11 +8,12 @@ mod image_util;
 mod loader;
 mod nav;
 mod preload;
+mod selection;
 mod state;
 mod tagset;
 mod window;
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -81,6 +82,45 @@ struct SelectionPolicy {
     selected: Arc<Mutex<Option<usize>>>,
     /// Controls how the selection is updated when results land.
     after: SelectAfter,
+    /// Vim-style multi-image selection. Cleared on every result-set replacement
+    /// (the stored indices would otherwise dangle into the old result list);
+    /// `selection_dirty` is then set so the loader tick rebuilds the grid and
+    /// refreshes the statusline for the new set.
+    selection: Arc<Mutex<selection::Selection>>,
+    selection_dirty: Arc<AtomicBool>,
+}
+
+/// The three shared selection handles threaded through the debounce/sort
+/// helpers. Bundled so those helpers stay under clippy's `too_many_arguments`
+/// limit and so each call site clones one group, not three loose Arcs.
+#[derive(Clone)]
+struct SelectionHandles {
+    /// Single keyboard/mouse cursor index (mirrors the Slint `selected-index`).
+    selected: Arc<Mutex<Option<usize>>>,
+    /// Vim-style multi-image selection (mode + index set).
+    selection: Arc<Mutex<selection::Selection>>,
+    /// Set when the selection changes so the loader tick rebuilds + restatuses.
+    dirty: Arc<AtomicBool>,
+}
+
+impl SelectionHandles {
+    /// Build a [`SelectionPolicy`] for a result-set install, consuming the
+    /// handles (each install closure holds its own clone).
+    fn policy(self, after: SelectAfter) -> SelectionPolicy {
+        SelectionPolicy {
+            selected: self.selected,
+            after,
+            selection: self.selection,
+            selection_dirty: self.dirty,
+        }
+    }
+
+    /// Clear the multi-selection and mark it dirty. Used on the few result-set
+    /// resets that bypass [`apply_fetch_result`] (in-memory resort, idle reset).
+    fn clear(&self) {
+        self.selection.lock().unwrap().clear();
+        self.dirty.store(true, Ordering::Relaxed);
+    }
 }
 
 #[derive(Parser)]
@@ -118,6 +158,36 @@ fn format_bytes(bytes: i64) -> String {
         format!("{:.0} KB", bytes as f64 / KB)
     } else {
         format!("{bytes} B")
+    }
+}
+
+/// Build the always-visible bottom statusline from the current selection and
+/// the full result set. ASCII separators only (Slint default-font glyph safety).
+fn format_statusline(sel: &selection::Selection, results: &[RowMeta]) -> String {
+    let total_bytes: i64 = results.iter().filter_map(|r| r.size).sum();
+    let label = match sel.mode() {
+        selection::SelectionMode::Normal => "NORMAL",
+        selection::SelectionMode::Free => "VISUAL (FREE)",
+        selection::SelectionMode::Range { .. } => "VISUAL (RANGE)",
+    };
+    let base = format!(
+        "{label} - {} images - {}",
+        results.len(),
+        format_bytes(total_bytes)
+    );
+    if sel.is_active() && !sel.is_empty() {
+        let sel_bytes: i64 = sel
+            .set()
+            .iter()
+            .filter_map(|&i| results.get(i).and_then(|r| r.size))
+            .sum();
+        format!(
+            "{base} | selected {} - {}",
+            sel.set().len(),
+            format_bytes(sel_bytes)
+        )
+    } else {
+        base
     }
 }
 
@@ -260,6 +330,25 @@ fn main() -> Result<()> {
     // Slint `selected-index` property). Shares the index space with `lb_index`.
     let selected: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
 
+    // Vim-style multi-image selection (mode + selected index set). Task 4 wires
+    // the key handlers that mutate it; this task threads it through the tile
+    // builder so selected tiles paint a yellow border and the statusline reports
+    // the current mode/count. `selection_dirty` is set whenever the selection
+    // changes so the loader tick forces one rebuild even if the window is
+    // otherwise unchanged.
+    let selection: Arc<Mutex<selection::Selection>> =
+        Arc::new(Mutex::new(selection::Selection::default()));
+    let selection_dirty: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+
+    // Bundled selection handles cloned into the debounce/sort closures (and the
+    // helpers they call), so a result-set replacement clears the multi-selection
+    // through one path. `Clone` is a triple Arc bump.
+    let sel_handles = SelectionHandles {
+        selected: Arc::clone(&selected),
+        selection: Arc::clone(&selection),
+        dirty: Arc::clone(&selection_dirty),
+    };
+
     // Monotonic counter bumped on every lightbox load request. A background decode
     // only applies its result if its captured generation is still the latest, so a
     // slow decode can't land after the user has already navigated to another image.
@@ -356,6 +445,8 @@ fn main() -> Result<()> {
         let mode_ref = Arc::clone(&search_mode);
         let filters_ref = Arc::clone(&filters);
         let selected_ref = Arc::clone(&selected);
+        let selection_ref = Arc::clone(&selection);
+        let selection_dirty_ref = Arc::clone(&selection_dirty);
         let grid_gen_ref = Arc::clone(&grid_generation);
         let restoring_ref = Arc::clone(&restoring);
         let backend_search = backend.clone();
@@ -376,6 +467,9 @@ fn main() -> Result<()> {
                     *detail_ref.lock().unwrap() = None;
                     *lb_ref.lock().unwrap() = None;
                     *selected_ref.lock().unwrap() = None;
+                    // Drop the multi-selection too: the result list is gone.
+                    selection_ref.lock().unwrap().clear();
+                    selection_dirty_ref.store(true, Ordering::Relaxed);
                     *mode_ref.lock().unwrap() = SearchMode::Text(String::new());
                     // Bump the generation so the loader timer resets its
                     // in-flight set / last range and stops loading the old set.
@@ -414,6 +508,8 @@ fn main() -> Result<()> {
                         SelectionPolicy {
                             selected: Arc::clone(&selected_ref),
                             after: SelectAfter::Clear,
+                            selection: Arc::clone(&selection_ref),
+                            selection_dirty: Arc::clone(&selection_dirty_ref),
                         },
                     );
                 }
@@ -446,6 +542,8 @@ fn main() -> Result<()> {
                 SelectionPolicy {
                     selected: Arc::clone(&selected_ref),
                     after: SelectAfter::Clear,
+                    selection: Arc::clone(&selection_ref),
+                    selection_dirty: Arc::clone(&selection_dirty_ref),
                 },
             );
         });
@@ -725,6 +823,8 @@ fn main() -> Result<()> {
         let mode_ref = Arc::clone(&search_mode);
         let filters_ref = Arc::clone(&filters);
         let selected_ref = Arc::clone(&selected);
+        let selection_ref = Arc::clone(&selection);
+        let selection_dirty_ref = Arc::clone(&selection_dirty);
         let grid_gen_ref = Arc::clone(&grid_generation);
         let backend_sim = backend.clone();
         window.on_search_similar(move || {
@@ -760,6 +860,8 @@ fn main() -> Result<()> {
                 SelectionPolicy {
                     selected: Arc::clone(&selected_ref),
                     after: SelectAfter::KeepIndex,
+                    selection: Arc::clone(&selection_ref),
+                    selection_dirty: Arc::clone(&selection_dirty_ref),
                 },
             );
         });
@@ -894,6 +996,8 @@ fn main() -> Result<()> {
     {
         let state_ref = Arc::clone(&state);
         let selected_ref = Arc::clone(&selected);
+        let selection_ref = Arc::clone(&selection);
+        let selection_dirty_ref = Arc::clone(&selection_dirty);
         let weak = window.as_weak();
         window.on_grid_nav(move |dir_i, cols_i| {
             let Some(dir) = nav::NavDir::from_i32(dir_i) else {
@@ -903,6 +1007,13 @@ fn main() -> Result<()> {
             let cur = *selected_ref.lock().unwrap();
             let new = nav::move_selection(cur, dir, cols_i.max(0) as usize, len);
             *selected_ref.lock().unwrap() = new;
+            // Move the multi-selection cursor so a Range selection grows/shrinks
+            // live as the cursor moves (a no-op in Normal mode). Drop the guard
+            // before any `invoke_*`/`set_*` to avoid re-entrant deadlock.
+            if let Some(i) = new {
+                selection_ref.lock().unwrap().cursor_moved(i);
+            }
+            selection_dirty_ref.store(true, Ordering::Relaxed);
             if let Some(w) = weak.upgrade() {
                 w.set_selected_index(new.map(|i| i as i32).unwrap_or(-1));
                 // Live-update the detail panel only if it is already open.
@@ -911,6 +1022,7 @@ fn main() -> Result<()> {
                 {
                     w.invoke_tile_selected(i as i32);
                 }
+                push_statusline(&w, &selection_ref, &state_ref);
             }
         });
     }
@@ -947,6 +1059,96 @@ fn main() -> Result<()> {
         });
     }
 
+    // --- selection-enter-range callback: `Shift+V` enters VISUAL (RANGE) mode ---
+    {
+        let selection_ref = Arc::clone(&selection);
+        let selected_ref = Arc::clone(&selected);
+        let selection_dirty_ref = Arc::clone(&selection_dirty);
+        let state_ref = Arc::clone(&state);
+        let weak = window.as_weak();
+        window.on_selection_enter_range(move || {
+            // Anchor at the current cursor; seed to 0 so Shift+V on a fresh grid
+            // anchors the first tile.
+            let cur = selected_ref.lock().unwrap().unwrap_or(0);
+            *selected_ref.lock().unwrap() = Some(cur);
+            selection_ref.lock().unwrap().enter_range(cur);
+            selection_dirty_ref.store(true, Ordering::Relaxed);
+            if let Some(w) = weak.upgrade() {
+                w.set_selected_index(cur as i32);
+                push_statusline(&w, &selection_ref, &state_ref);
+            }
+        });
+    }
+
+    // --- selection-enter-free callback: `v` enters VISUAL (FREE) mode ---
+    {
+        let selection_ref = Arc::clone(&selection);
+        let selection_dirty_ref = Arc::clone(&selection_dirty);
+        let state_ref = Arc::clone(&state);
+        let weak = window.as_weak();
+        window.on_selection_enter_free(move || {
+            selection_ref.lock().unwrap().enter_free();
+            selection_dirty_ref.store(true, Ordering::Relaxed);
+            if let Some(w) = weak.upgrade() {
+                push_statusline(&w, &selection_ref, &state_ref);
+            }
+        });
+    }
+
+    // --- grid-space callback: toggle in FREE mode, else open the lightbox ---
+    {
+        let selection_ref = Arc::clone(&selection);
+        let selected_ref = Arc::clone(&selected);
+        let selection_dirty_ref = Arc::clone(&selection_dirty);
+        let state_ref = Arc::clone(&state);
+        let weak = window.as_weak();
+        window.on_grid_space(move || {
+            // Read the mode into a local so the `selection` guard is released
+            // before any re-entrant `invoke_*` (the lightbox path re-locks state).
+            let is_free = matches!(
+                selection_ref.lock().unwrap().mode(),
+                selection::SelectionMode::Free
+            );
+            if is_free {
+                let cur = *selected_ref.lock().unwrap();
+                if let Some(cur) = cur {
+                    selection_ref.lock().unwrap().toggle(cur);
+                    selection_dirty_ref.store(true, Ordering::Relaxed);
+                    if let Some(w) = weak.upgrade() {
+                        push_statusline(&w, &selection_ref, &state_ref);
+                    }
+                }
+            } else if let Some(w) = weak.upgrade() {
+                // Normal mode: Space keeps its old behavior — open the lightbox.
+                w.invoke_grid_open_lightbox();
+            }
+        });
+    }
+
+    // --- grid-escape callback: clear an active selection, else close detail ---
+    {
+        let selection_ref = Arc::clone(&selection);
+        let selection_dirty_ref = Arc::clone(&selection_dirty);
+        let state_ref = Arc::clone(&state);
+        let weak = window.as_weak();
+        window.on_grid_escape(move || {
+            // Read active-state into a local so the guard drops before any
+            // `invoke_*`/`set_*`.
+            let was_active = selection_ref.lock().unwrap().is_active();
+            if was_active {
+                selection_ref.lock().unwrap().clear();
+                selection_dirty_ref.store(true, Ordering::Relaxed);
+                if let Some(w) = weak.upgrade() {
+                    push_statusline(&w, &selection_ref, &state_ref);
+                }
+            } else if let Some(w) = weak.upgrade()
+                && w.get_detail_open()
+            {
+                w.invoke_detail_close();
+            }
+        });
+    }
+
     // --- filter-bar debounce timer ---
     //
     // A single stable `FnMut` timer callback is registered once; the three
@@ -969,7 +1171,7 @@ fn main() -> Result<()> {
         let mode_ref = Arc::clone(&search_mode);
         let filters_ref = Arc::clone(&filters);
         let selected_exts_ref = Arc::clone(&selected_exts);
-        let selected_ref = Arc::clone(&selected);
+        let sel_handles = sel_handles.clone();
         let grid_gen_ref = Arc::clone(&grid_generation);
         let backend_fc = backend.clone();
         let timer = Rc::clone(&debounce_timer);
@@ -997,7 +1199,7 @@ fn main() -> Result<()> {
                 Arc::clone(&grid_gen_ref),
                 backend_fc.clone(),
                 new_filters,
-                Arc::clone(&selected_ref),
+                sel_handles.clone(),
             );
         });
     }
@@ -1009,7 +1211,7 @@ fn main() -> Result<()> {
         let mode_ref = Arc::clone(&search_mode);
         let filters_ref = Arc::clone(&filters);
         let selected_exts_ref = Arc::clone(&selected_exts);
-        let selected_ref = Arc::clone(&selected);
+        let sel_handles = sel_handles.clone();
         let grid_gen_ref = Arc::clone(&grid_generation);
         let all_exts_et = all_extensions.clone();
         let backend_et = backend.clone();
@@ -1047,7 +1249,7 @@ fn main() -> Result<()> {
                 Arc::clone(&grid_gen_ref),
                 backend_et.clone(),
                 new_filters,
-                Arc::clone(&selected_ref),
+                sel_handles.clone(),
             );
         });
     }
@@ -1059,7 +1261,7 @@ fn main() -> Result<()> {
         let mode_ref = Arc::clone(&search_mode);
         let filters_ref = Arc::clone(&filters);
         let selected_exts_ref = Arc::clone(&selected_exts);
-        let selected_ref = Arc::clone(&selected);
+        let sel_handles = sel_handles.clone();
         let grid_gen_ref = Arc::clone(&grid_generation);
         let backend_gps = backend.clone();
         let timer = Rc::clone(&debounce_timer);
@@ -1086,7 +1288,7 @@ fn main() -> Result<()> {
                 Arc::clone(&grid_gen_ref),
                 backend_gps.clone(),
                 new_filters,
-                Arc::clone(&selected_ref),
+                sel_handles.clone(),
             );
         });
     }
@@ -1099,7 +1301,7 @@ fn main() -> Result<()> {
         let state_ref = Arc::clone(&state);
         let mode_ref = Arc::clone(&search_mode);
         let filters_ref = Arc::clone(&filters);
-        let selected_ref = Arc::clone(&selected);
+        let sel_handles = sel_handles.clone();
         let grid_gen_ref = Arc::clone(&grid_generation);
         let backend_tc = backend.clone();
         let timer = Rc::clone(&debounce_timer);
@@ -1119,7 +1321,7 @@ fn main() -> Result<()> {
                 Arc::clone(&grid_gen_ref),
                 backend_tc.clone(),
                 new_filters,
-                Arc::clone(&selected_ref),
+                sel_handles.clone(),
             );
         });
     }
@@ -1130,7 +1332,7 @@ fn main() -> Result<()> {
         let state_ref = Arc::clone(&state);
         let mode_ref = Arc::clone(&search_mode);
         let filters_ref = Arc::clone(&filters);
-        let selected_ref = Arc::clone(&selected);
+        let sel_handles = sel_handles.clone();
         let grid_gen_ref = Arc::clone(&grid_generation);
         let backend_tr = backend.clone();
         let timer = Rc::clone(&debounce_timer);
@@ -1150,7 +1352,7 @@ fn main() -> Result<()> {
                 Arc::clone(&grid_gen_ref),
                 backend_tr.clone(),
                 new_filters,
-                Arc::clone(&selected_ref),
+                sel_handles.clone(),
             );
         });
     }
@@ -1162,7 +1364,7 @@ fn main() -> Result<()> {
         let state_ref = Arc::clone(&state);
         let mode_ref = Arc::clone(&search_mode);
         let filters_ref = Arc::clone(&filters);
-        let selected_ref = Arc::clone(&selected);
+        let sel_handles = sel_handles.clone();
         let grid_gen_ref = Arc::clone(&grid_generation);
         let backend_tm = backend.clone();
         let timer = Rc::clone(&debounce_timer);
@@ -1185,7 +1387,7 @@ fn main() -> Result<()> {
                 Arc::clone(&grid_gen_ref),
                 backend_tm.clone(),
                 new_filters,
-                Arc::clone(&selected_ref),
+                sel_handles.clone(),
             );
         });
     }
@@ -1196,7 +1398,7 @@ fn main() -> Result<()> {
         let state_ref = Arc::clone(&state);
         let mode_ref = Arc::clone(&search_mode);
         let filters_ref = Arc::clone(&filters);
-        let selected_ref = Arc::clone(&selected);
+        let sel_handles = sel_handles.clone();
         let grid_gen_ref = Arc::clone(&grid_generation);
         let backend_te = backend.clone();
         let timer = Rc::clone(&debounce_timer);
@@ -1216,7 +1418,7 @@ fn main() -> Result<()> {
                 Arc::clone(&grid_gen_ref),
                 backend_te.clone(),
                 new_filters,
-                Arc::clone(&selected_ref),
+                sel_handles.clone(),
             );
         });
     }
@@ -1227,7 +1429,7 @@ fn main() -> Result<()> {
         let state_ref = Arc::clone(&state);
         let mode_ref = Arc::clone(&search_mode);
         let filters_ref = Arc::clone(&filters);
-        let selected_ref = Arc::clone(&selected);
+        let sel_handles = sel_handles.clone();
         let grid_gen_ref = Arc::clone(&grid_generation);
         let backend_sc = backend.clone();
         window.on_sort_changed(move || {
@@ -1236,7 +1438,7 @@ fn main() -> Result<()> {
                 Arc::clone(&mode_ref),
                 Arc::clone(&state_ref),
                 Arc::clone(&filters_ref),
-                Arc::clone(&selected_ref),
+                sel_handles.clone(),
                 Arc::clone(&grid_gen_ref),
                 backend_sc.clone(),
                 SelectAfter::First,
@@ -1250,7 +1452,7 @@ fn main() -> Result<()> {
         let state_ref = Arc::clone(&state);
         let mode_ref = Arc::clone(&search_mode);
         let filters_ref = Arc::clone(&filters);
-        let selected_ref = Arc::clone(&selected);
+        let sel_handles = sel_handles.clone();
         let grid_gen_ref = Arc::clone(&grid_generation);
         let backend_sc = backend.clone();
         window.on_sort_dir_toggled(move || {
@@ -1260,7 +1462,7 @@ fn main() -> Result<()> {
             // Capture the currently selected item's id BEFORE the resort,
             // so we can follow it to its new position after the direction flip.
             let prev_id: Option<i64> = {
-                let sel = *selected_ref.lock().unwrap();
+                let sel = *sel_handles.selected.lock().unwrap();
                 let s = state_ref.lock().unwrap();
                 sel.and_then(|i| s.results.get(i)).map(|r| r.id)
             };
@@ -1269,7 +1471,7 @@ fn main() -> Result<()> {
                 Arc::clone(&mode_ref),
                 Arc::clone(&state_ref),
                 Arc::clone(&filters_ref),
-                Arc::clone(&selected_ref),
+                sel_handles.clone(),
                 Arc::clone(&grid_gen_ref),
                 backend_sc.clone(),
                 SelectAfter::ById(prev_id),
@@ -1376,6 +1578,8 @@ fn main() -> Result<()> {
         let filters_ref = Arc::clone(&filters);
         let detail_ref = Arc::clone(&detail);
         let selected_ref = Arc::clone(&selected);
+        let selection_ref = Arc::clone(&selection);
+        let sel_handles = sel_handles.clone();
         let lb_ref = Arc::clone(&lb_index);
         let state_ref = Arc::clone(&state);
         let mode_ref = Arc::clone(&search_mode);
@@ -1424,13 +1628,23 @@ fn main() -> Result<()> {
                 }
                 chords::Action::PaintBrush(c) => {
                     let tags = brushes_ref.lock().unwrap()[c.index()].clone();
-                    apply_tags_to_focused(&weak, &backend_key, &tag_ctx, tags.clone());
+                    let paths = selected_paths(&selection_ref, &state_ref);
+                    if paths.is_empty() {
+                        apply_tags_to_focused(&weak, &backend_key, &tag_ctx, tags.clone());
+                    } else {
+                        apply_tags_to_selection(&weak, &backend_key, &tag_ctx, paths, tags.clone());
+                    }
                     *mm_ref.lock().unwrap() = tags;
                     push_rail_models(&w, &brushes_ref.lock().unwrap(), &mm_ref.lock().unwrap());
                 }
                 chords::Action::RepeatLast => {
                     let tags = mm_ref.lock().unwrap().clone();
-                    apply_tags_to_focused(&weak, &backend_key, &tag_ctx, tags);
+                    let paths = selected_paths(&selection_ref, &state_ref);
+                    if paths.is_empty() {
+                        apply_tags_to_focused(&weak, &backend_key, &tag_ctx, tags);
+                    } else {
+                        apply_tags_to_selection(&weak, &backend_key, &tag_ctx, paths, tags);
+                    }
                 }
                 chords::Action::LoadBrushIntoFilter(c) => {
                     let new_filters = {
@@ -1448,7 +1662,7 @@ fn main() -> Result<()> {
                         Arc::clone(&grid_gen_ref),
                         backend_key.clone(),
                         new_filters,
-                        Arc::clone(&selected_ref),
+                        sel_handles.clone(),
                     );
                 }
                 chords::Action::ToggleTagFilter => {
@@ -1466,7 +1680,7 @@ fn main() -> Result<()> {
                         Arc::clone(&grid_gen_ref),
                         backend_key.clone(),
                         new_filters,
-                        Arc::clone(&selected_ref),
+                        sel_handles.clone(),
                     );
                 }
             }
@@ -1479,6 +1693,7 @@ fn main() -> Result<()> {
         let brushes_ref = Arc::clone(&brushes);
         let detail_ref = Arc::clone(&detail);
         let selected_ref = Arc::clone(&selected);
+        let selection_ref = Arc::clone(&selection);
         let lb_ref = Arc::clone(&lb_index);
         let state_ref = Arc::clone(&state);
         let backend_modal = backend.clone();
@@ -1493,7 +1708,12 @@ fn main() -> Result<()> {
                 lb_index: Arc::clone(&lb_ref),
                 state: Arc::clone(&state_ref),
             };
-            apply_tags_to_focused(&weak, &backend_modal, &tag_ctx, tags.clone());
+            let paths = selected_paths(&selection_ref, &state_ref);
+            if paths.is_empty() {
+                apply_tags_to_focused(&weak, &backend_modal, &tag_ctx, tags.clone());
+            } else {
+                apply_tags_to_selection(&weak, &backend_modal, &tag_ctx, paths, tags.clone());
+            }
             *mm_ref.lock().unwrap() = tags;
             push_rail_models(&w, &brushes_ref.lock().unwrap(), &mm_ref.lock().unwrap());
             w.set_tag_modal_open(false);
@@ -1525,6 +1745,8 @@ fn main() -> Result<()> {
         let weak = window.as_weak();
         let state_ref = Arc::clone(&state);
         let grid_gen_ref = Arc::clone(&grid_generation);
+        let selection_ref = Arc::clone(&selection);
+        let selection_dirty_ref = Arc::clone(&selection_dirty);
         // These are all !Send and owned solely by this UI-thread closure: never
         // wrap them in Arc/Mutex. `last_gen` lets the closure detect a new
         // result set (generation bumped elsewhere) and reset its window state.
@@ -1544,6 +1766,8 @@ fn main() -> Result<()> {
                 in_flight: &mut in_flight,
                 last_range: &mut last_range,
                 last_gen: &mut last_gen,
+                selection: &selection_ref,
+                selection_dirty: &selection_dirty_ref,
             });
         });
     }
@@ -1574,6 +1798,8 @@ fn main() -> Result<()> {
                 size_bounds,
                 brushes: Arc::clone(&brushes),
                 mm_buffer: Arc::clone(&mm_buffer),
+                selection: Arc::clone(&selection),
+                selection_dirty: Arc::clone(&selection_dirty),
             };
             restore_session(st, ctx);
         }
@@ -1585,7 +1811,7 @@ fn main() -> Result<()> {
                 Arc::clone(&state),
                 Arc::clone(&grid_generation),
                 backend.clone(),
-                Arc::clone(&selected),
+                sel_handles.clone(),
                 gui_config.resolved_sort(),
             );
         }
@@ -1598,7 +1824,7 @@ fn main() -> Result<()> {
                 Arc::clone(&state),
                 Arc::clone(&grid_generation),
                 backend.clone(),
-                Arc::clone(&selected),
+                sel_handles.clone(),
                 gui_config.resolved_sort(),
             );
         }
@@ -1748,7 +1974,7 @@ fn start_default_browse(
     state_ref: Arc<Mutex<SearchState>>,
     grid_gen: Arc<AtomicU64>,
     backend: Backend,
-    selected_ref: Arc<Mutex<Option<usize>>>,
+    selection: SelectionHandles,
     sort: Sort,
 ) {
     // Install sort and mark has_searched=true so view_state() returns Results
@@ -1763,18 +1989,14 @@ fn start_default_browse(
     // Pre-seed the selection to 0; apply_fetch_result re-clamps it to 0 when
     // results are non-empty (reset=false keeps an in-range index). A freshly
     // opened DB with zero images clears it to None via the filter.
-    let selected_for_policy = Arc::clone(&selected_ref);
-    *selected_ref.lock().unwrap() = Some(0);
+    *selection.selected.lock().unwrap() = Some(0);
     spawn_browse(
         weak,
         state_ref,
         grid_gen,
         backend,
         Filters::default(),
-        SelectionPolicy {
-            selected: selected_for_policy,
-            after: SelectAfter::KeepIndex,
-        },
+        selection.policy(SelectAfter::KeepIndex),
     );
 }
 
@@ -1796,6 +2018,8 @@ struct RestoreCtx<'a> {
     size_bounds: (i64, i64),
     brushes: Arc<Mutex<[Vec<String>; 5]>>,
     mm_buffer: Arc<Mutex<Vec<String>>>,
+    selection: Arc<Mutex<selection::Selection>>,
+    selection_dirty: Arc<AtomicBool>,
 }
 
 /// Whether a persisted [`PersistedMode`] is a search (text or similarity), as
@@ -1909,6 +2133,11 @@ fn restore_session(st: UiState, ctx: RestoreCtx<'_>) {
     w.set_total_items(results_len as i32);
     w.set_tiles(ModelRc::default());
     loader::bump_generation(&ctx.grid_gen);
+
+    // Fresh session has no multi-selection; ensure it is clear and mark dirty so
+    // the loader tick pushes a `NORMAL` statusline with the restored set's count.
+    ctx.selection.lock().unwrap().clear();
+    ctx.selection_dirty.store(true, Ordering::Relaxed);
 
     // 2. Search text — programmatic set does NOT fire `search` (only `accepted`
     //    on Enter does), and `restoring` guards the callback regardless.
@@ -2100,7 +2329,7 @@ fn start_debounce(
     grid_gen: Arc<AtomicU64>,
     backend: Backend,
     filters: Filters,
-    selected_ref: Arc<Mutex<Option<usize>>>,
+    selection: SelectionHandles,
 ) {
     timer.start(
         TimerMode::SingleShot,
@@ -2113,7 +2342,7 @@ fn start_debounce(
                 Arc::clone(&grid_gen),
                 backend.clone(),
                 filters.clone(),
-                Arc::clone(&selected_ref),
+                selection.clone(),
             );
         },
     );
@@ -2129,7 +2358,7 @@ fn apply_sort_change(
     mode_ref: Arc<Mutex<SearchMode>>,
     state_ref: Arc<Mutex<SearchState>>,
     filters_ref: Arc<Mutex<Filters>>,
-    selected_ref: Arc<Mutex<Option<usize>>>,
+    selection: SelectionHandles,
     grid_gen_ref: Arc<AtomicU64>,
     backend: Backend,
     after: SelectAfter,
@@ -2161,10 +2390,7 @@ fn apply_sort_change(
                 grid_gen_ref,
                 backend,
                 current_filters,
-                SelectionPolicy {
-                    selected: selected_ref,
-                    after,
-                },
+                selection.policy(after),
             );
         }
         _ => {
@@ -2186,8 +2412,11 @@ fn apply_sort_change(
             }
             // Bump generation so the loader timer rebuilds the tile model.
             loader::bump_generation(&grid_gen_ref);
+            // The row order changed: drop the multi-selection (its indices point
+            // into the old order) and mark dirty so the tick re-statuses.
+            selection.clear();
             let results = state_ref.lock().unwrap().results.clone();
-            apply_selection_after_results(&w, &selected_ref, &results, &after);
+            apply_selection_after_results(&w, &selection.selected, &results, &after);
         }
     }
 }
@@ -2205,7 +2434,7 @@ fn fire_debounced_query(
     grid_gen: Arc<AtomicU64>,
     backend: Backend,
     filters: Filters,
-    selected_ref: Arc<Mutex<Option<usize>>>,
+    selection: SelectionHandles,
 ) {
     let mode = mode_ref.lock().unwrap().clone();
     match mode {
@@ -2222,16 +2451,15 @@ fn fire_debounced_query(
                 backend,
                 query,
                 filters,
-                SelectionPolicy {
-                    selected: selected_ref,
-                    after: SelectAfter::Clear,
-                },
+                selection.policy(SelectAfter::Clear),
             );
         }
         // Text("") = browse mode (or idle — browse with filters anyway).
         // Text("") with default filters — restore idle state, nothing to browse.
         SearchMode::Text(_) if filters == Filters::default() => {
-            *selected_ref.lock().unwrap() = None;
+            *selection.selected.lock().unwrap() = None;
+            // Drop the multi-selection too: the result list is gone.
+            selection.clear();
             // Bump the generation so the loader timer resets and stops loading.
             loader::bump_generation(&grid_gen);
             if let Some(w) = weak.upgrade() {
@@ -2254,10 +2482,7 @@ fn fire_debounced_query(
                 grid_gen,
                 backend,
                 filters,
-                SelectionPolicy {
-                    selected: selected_ref,
-                    after: SelectAfter::Clear,
-                },
+                selection.policy(SelectAfter::Clear),
             );
         }
         SearchMode::Similar(seed) => {
@@ -2274,10 +2499,7 @@ fn fire_debounced_query(
                 backend,
                 seed,
                 filters,
-                SelectionPolicy {
-                    selected: selected_ref,
-                    after: SelectAfter::KeepIndex,
-                },
+                selection.policy(SelectAfter::KeepIndex),
             );
         }
     }
@@ -2295,6 +2517,7 @@ fn build_tiles_model(
     results: &[RowMeta],
     images: Vec<Option<Image>>,
     offset: usize,
+    selected: &BTreeSet<usize>,
 ) -> ModelRc<Tile> {
     let tiles: Vec<Tile> = results
         .iter()
@@ -2302,12 +2525,14 @@ fn build_tiles_model(
         .enumerate()
         .map(|(i, (r, maybe_img))| {
             let size_kb = r.size.unwrap_or(0) / 1024;
+            // Global index: window offset + position within this slice.
+            let index = offset + i;
             Tile {
                 path: r.path.clone().into(),
                 image: maybe_img.unwrap_or_default(),
                 size_kb: size_kb as i32,
-                // Global index: window offset + position within this slice.
-                index: (offset + i) as i32,
+                index: index as i32,
+                selected: selected.contains(&index),
             }
         })
         .collect();
@@ -2327,6 +2552,11 @@ struct LoaderTick<'a> {
     in_flight: &'a mut loader::InFlight,
     last_range: &'a mut Option<Range<usize>>,
     last_gen: &'a mut u64,
+    // Vim-style multi-image selection. `selection` is read each tick to paint the
+    // selected tiles; `selection_dirty` (set by the key handlers) forces one
+    // rebuild even when the visible window is otherwise unchanged.
+    selection: &'a Arc<Mutex<selection::Selection>>,
+    selection_dirty: &'a Arc<AtomicBool>,
 }
 
 /// One tick of the moving-window thumbnail loader, on the UI thread.
@@ -2384,9 +2614,11 @@ fn loader_tick(t: LoaderTick<'_>) {
     // 3. Rebuild only when the window/generation changed, or when a freshly
     // decoded thumbnail in the current window needs to appear. Otherwise the
     // tick does no UI work (cheap when idle).
+    let selection_changed = t.selection_dirty.swap(false, Ordering::Relaxed);
     let range_changed = t.last_range.as_ref() != Some(&range);
-    if range_changed || gen_changed || cached_new {
-        rebuild_window(t.window, t.state_ref, t.cache, &range);
+    if range_changed || gen_changed || cached_new || selection_changed {
+        let sel = t.selection.lock().unwrap().set().clone();
+        rebuild_window(t.window, t.state_ref, t.cache, &range, &sel);
         if range_changed || gen_changed {
             tracing::debug!(
                 start = range.start,
@@ -2395,6 +2627,13 @@ fn loader_tick(t: LoaderTick<'_>) {
             );
         }
         *t.last_range = Some(range.clone());
+    }
+
+    // The statusline (mode + image count + total size) depends only on the
+    // selection and the result set, so refresh it exactly when one of those
+    // changed — i.e. a new result set landed or the selection was mutated.
+    if gen_changed || selection_changed {
+        push_statusline(t.window, t.selection, t.state_ref);
     }
 
     // 4. Request missing thumbnails for the visible window.
@@ -2425,6 +2664,7 @@ fn rebuild_window(
     state_ref: &Arc<Mutex<SearchState>>,
     cache: &mut loader::ThumbCache,
     range: &Range<usize>,
+    selected: &BTreeSet<usize>,
 ) {
     let slice: Vec<RowMeta> = {
         let s = state_ref.lock().unwrap();
@@ -2434,8 +2674,24 @@ fn rebuild_window(
             .unwrap_or_default()
     };
     let images: Vec<Option<Image>> = slice.iter().map(|r| cache.get(&r.path).cloned()).collect();
-    let model = build_tiles_model(&slice, images, range.start);
+    let model = build_tiles_model(&slice, images, range.start, selected);
     window.set_tiles(model);
+}
+
+/// Recompute the bottom statusline (`MODE - N images - <size>`) from the current
+/// selection and result set, and push it to the window. Cheap; locks each handle
+/// only briefly and never across a re-entrant `invoke_*`.
+fn push_statusline(
+    w: &MainWindow,
+    selection: &Arc<Mutex<selection::Selection>>,
+    state: &Arc<Mutex<SearchState>>,
+) {
+    let line = {
+        let sel = selection.lock().unwrap();
+        let s = state.lock().unwrap();
+        format_statusline(&sel, &s.results)
+    };
+    w.set_statusline(line.into());
 }
 
 fn status_text_for(vs: ViewState, error_msg: Option<&str>) -> slint::SharedString {
@@ -2496,6 +2752,12 @@ fn apply_fetch_result(
             w.set_tiles(ModelRc::default());
             w.set_total_items(results.len() as i32);
         }
+
+        // The result list was replaced: drop the vim-style multi-selection (its
+        // indices would dangle into the old set) and mark it dirty so the loader
+        // tick rebuilds the grid and refreshes the statusline for the new set.
+        sel.selection.lock().unwrap().clear();
+        sel.selection_dirty.store(true, Ordering::Relaxed);
 
         apply_selection_after_results(&w, &sel.selected, &results, &sel.after);
 
@@ -2678,6 +2940,66 @@ fn apply_tags_to_focused(
         }
         if detail_shows_path {
             let fresh = backend.tags_for(&path).unwrap_or_default();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(w) = weak.upgrade() {
+                    push_detail_tags(&w, &fresh);
+                }
+            });
+        }
+    });
+}
+
+/// Resolve the active selection's indices to image paths via `SearchState`.
+///
+/// Returns an empty vec when the selection is inactive or empty, so callers can
+/// branch with `paths.is_empty()` to fall back to the single-focused-image path.
+/// Out-of-range indices (stale against the current results) are skipped.
+fn selected_paths(
+    selection: &Arc<Mutex<selection::Selection>>,
+    state: &Arc<Mutex<SearchState>>,
+) -> Vec<String> {
+    let sel = selection.lock().unwrap();
+    if !sel.is_active() || sel.is_empty() {
+        return Vec::new();
+    }
+    let s = state.lock().unwrap();
+    sel.set()
+        .iter()
+        .filter_map(|&i| s.results.get(i).map(|r| r.path.clone()))
+        .collect()
+}
+
+/// Apply `tags` to every path in `sel_paths` (background thread, batched writes).
+///
+/// Mirrors [`apply_tags_to_focused`] but fans the writes out across a whole
+/// selection. No-op when either input is empty. If the open detail panel shows
+/// one of the affected paths, its tag pills are re-fetched and pushed back on
+/// the UI thread so they update live.
+fn apply_tags_to_selection(
+    weak: &Weak<MainWindow>,
+    backend: &Backend,
+    ctx: &TagTargetCtx,
+    sel_paths: Vec<String>,
+    tags: Vec<String>,
+) {
+    if tags.is_empty() || sel_paths.is_empty() {
+        return;
+    }
+    let detail_path = ctx.detail.lock().unwrap().as_ref().map(|d| d.path.clone());
+    let backend = backend.clone();
+    let weak = weak.clone();
+    std::thread::spawn(move || {
+        for path in &sel_paths {
+            for t in &tags {
+                if let Err(e) = backend.add_tag(path, t) {
+                    tracing::warn!("failed to add tag {t} to {path}: {e}");
+                }
+            }
+        }
+        if let Some(dp) = detail_path
+            && sel_paths.contains(&dp)
+        {
+            let fresh = backend.tags_for(&dp).unwrap_or_default();
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(w) = weak.upgrade() {
                     push_detail_tags(&w, &fresh);
@@ -2971,9 +3293,10 @@ mod arg_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_size_label, clamp_next, clamp_prev, format_bytes, fraction_to_bytes,
-        is_current_generation,
+        build_size_label, clamp_next, clamp_prev, format_bytes, format_statusline,
+        fraction_to_bytes, is_current_generation,
     };
+    use imgfind::sort::RowMeta;
 
     #[test]
     fn latest_generation_applies_stale_is_dropped() {
@@ -3071,6 +3394,113 @@ mod tests {
         // lo=0 (unbounded), hi=0.5 → "0 – 4.8 MB" (5_000_000 bytes = 4.8 MB)
         let label = build_size_label(0.0, 0.5, (0, 10_000_000));
         assert!(label.contains("4.8 MB"), "got: {label}");
+    }
+
+    // --- format_statusline ---
+
+    #[test]
+    fn statusline_normal_shows_count_and_total() {
+        use crate::selection::Selection;
+        let rows = vec![
+            RowMeta {
+                id: 1,
+                path: "a".into(),
+                size: Some(1_000_000),
+                ext: "jpg".into(),
+            },
+            RowMeta {
+                id: 2,
+                path: "b".into(),
+                size: Some(1_000_000),
+                ext: "jpg".into(),
+            },
+        ];
+        let s = Selection::default();
+        let line = format_statusline(&s, &rows);
+        assert!(line.starts_with("NORMAL"), "got: {line}");
+        assert!(line.contains("2 images"), "got: {line}");
+        assert!(line.contains("MB"), "got: {line}");
+        assert!(!line.contains("selected"), "got: {line}");
+    }
+
+    #[test]
+    fn statusline_none_size_counts_as_zero() {
+        use crate::selection::Selection;
+        let rows = vec![RowMeta {
+            id: 1,
+            path: "a".into(),
+            size: None,
+            ext: "jpg".into(),
+        }];
+        let s = Selection::default();
+        let line = format_statusline(&s, &rows);
+        assert!(line.contains("1 images"), "got: {line}");
+        assert!(line.contains("0 B"), "got: {line}");
+    }
+
+    #[test]
+    fn statusline_free_shows_selection_stats() {
+        use crate::selection::Selection;
+        let rows = vec![
+            RowMeta {
+                id: 1,
+                path: "a".into(),
+                size: Some(2_000_000),
+                ext: "jpg".into(),
+            },
+            RowMeta {
+                id: 2,
+                path: "b".into(),
+                size: Some(3_000_000),
+                ext: "jpg".into(),
+            },
+            RowMeta {
+                id: 3,
+                path: "c".into(),
+                size: Some(4_000_000),
+                ext: "jpg".into(),
+            },
+        ];
+        let mut s = Selection::default();
+        s.enter_free();
+        s.toggle(0);
+        s.toggle(2);
+        let line = format_statusline(&s, &rows);
+        assert!(line.starts_with("VISUAL (FREE)"), "got: {line}");
+        assert!(line.contains("selected 2"), "got: {line}");
+    }
+
+    #[test]
+    fn statusline_range_label() {
+        use crate::selection::Selection;
+        let rows = vec![
+            RowMeta {
+                id: 1,
+                path: "a".into(),
+                size: Some(1),
+                ext: "jpg".into(),
+            },
+            RowMeta {
+                id: 2,
+                path: "b".into(),
+                size: Some(1),
+                ext: "jpg".into(),
+            },
+        ];
+        let mut s = Selection::default();
+        s.enter_range(0);
+        s.cursor_moved(1);
+        let line = format_statusline(&s, &rows);
+        assert!(line.starts_with("VISUAL (RANGE)"), "got: {line}");
+        assert!(line.contains("selected 2"), "got: {line}");
+    }
+
+    #[test]
+    fn statusline_empty_results() {
+        use crate::selection::Selection;
+        let s = Selection::default();
+        let line = format_statusline(&s, &[]);
+        assert!(line.contains("0 images"), "got: {line}");
     }
 }
 
