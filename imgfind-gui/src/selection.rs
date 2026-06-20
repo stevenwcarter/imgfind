@@ -218,10 +218,7 @@ mod tests {
     fn range_to_forward() {
         let mut s = Selection::default();
         s.range_to(2, 8);
-        assert_eq!(
-            s.set().iter().copied().collect::<Vec<_>>(),
-            vec![2, 3, 4, 5, 6, 7, 8]
-        );
+        assert_eq!(set_of(&s), vec![2, 3, 4, 5, 6, 7, 8]);
         assert_eq!(s.mode(), SelectionMode::Range { anchor: 2 });
     }
 
@@ -229,10 +226,7 @@ mod tests {
     fn range_to_backward() {
         let mut s = Selection::default();
         s.range_to(8, 2);
-        assert_eq!(
-            s.set().iter().copied().collect::<Vec<_>>(),
-            vec![2, 3, 4, 5, 6, 7, 8]
-        );
+        assert_eq!(set_of(&s), vec![2, 3, 4, 5, 6, 7, 8]);
         assert_eq!(s.mode(), SelectionMode::Range { anchor: 8 });
     }
 
@@ -240,7 +234,7 @@ mod tests {
     fn range_to_onto_anchor() {
         let mut s = Selection::default();
         s.range_to(5, 5);
-        assert_eq!(s.set().iter().copied().collect::<Vec<_>>(), vec![5]);
+        assert_eq!(set_of(&s), vec![5]);
     }
 
     #[test]
@@ -250,7 +244,7 @@ mod tests {
         s.toggle(1);
         s.toggle(9);
         s.range_to(3, 5); // fresh range; old free set gone
-        assert_eq!(s.set().iter().copied().collect::<Vec<_>>(), vec![3, 4, 5]);
+        assert_eq!(set_of(&s), vec![3, 4, 5]);
         assert_eq!(s.mode(), SelectionMode::Range { anchor: 3 });
     }
 
@@ -259,7 +253,7 @@ mod tests {
         let mut s = Selection::default();
         s.ctrl_toggle(4);
         assert_eq!(s.mode(), SelectionMode::Free);
-        assert_eq!(s.set().iter().copied().collect::<Vec<_>>(), vec![4]);
+        assert_eq!(set_of(&s), vec![4]);
     }
 
     #[test]
@@ -268,9 +262,9 @@ mod tests {
         s.enter_free();
         s.toggle(2);
         s.ctrl_toggle(9);
-        assert_eq!(s.set().iter().copied().collect::<Vec<_>>(), vec![2, 9]);
+        assert_eq!(set_of(&s), vec![2, 9]);
         s.ctrl_toggle(2);
-        assert_eq!(s.set().iter().copied().collect::<Vec<_>>(), vec![9]);
+        assert_eq!(set_of(&s), vec![9]);
     }
 
     #[test]
@@ -279,11 +273,8 @@ mod tests {
         s.range_to(2, 4); // Range {2,3,4}
         s.ctrl_toggle(9);
         assert_eq!(s.mode(), SelectionMode::Free);
-        assert_eq!(
-            s.set().iter().copied().collect::<Vec<_>>(),
-            vec![2, 3, 4, 9]
-        );
+        assert_eq!(set_of(&s), vec![2, 3, 4, 9]);
         s.ctrl_toggle(3);
-        assert_eq!(s.set().iter().copied().collect::<Vec<_>>(), vec![2, 4, 9]);
+        assert_eq!(set_of(&s), vec![2, 4, 9]);
     }
 }
