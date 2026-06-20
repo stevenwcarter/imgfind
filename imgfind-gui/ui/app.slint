@@ -14,6 +14,7 @@ export struct Tile {
     image: image,
     size-kb: int,
     index: int,
+    selected: bool,
 }
 
 // One left-rail color brush row. Index-aligned with `colors::BrushColor`.
@@ -141,6 +142,15 @@ export component MainWindow inherits Window {
     callback grid-nav(int, int);
     callback grid-open-detail();
     callback grid-open-lightbox();
+
+    // Multi-image selection (vim-style). The statusline reports mode/count/size;
+    // the callbacks are declared here for Task 4 to wire to keys (no markup
+    // wiring of keys this task).
+    in property <string> statusline;
+    callback selection-enter-range();
+    callback selection-enter-free();
+    callback grid-space();
+    callback grid-escape();
 
     // Grid geometry constants.
     private property <length> tile-size: 200px;
@@ -282,6 +292,11 @@ export component MainWindow inherits Window {
             return reject;
         }
 
+        // Wrap rail+main and the bottom statusline in a VerticalLayout so the
+        // 24px statusline sits below the content and the grid never hides under
+        // it. The lightbox / tag-modal overlays remain later FocusScope siblings
+        // so they still paint on top of everything.
+        VerticalLayout {
         HorizontalLayout {
             // --- Left rail: color brushes + Most Recent buffer ---
             if root.rail-visible: Rectangle {
@@ -615,8 +630,8 @@ export component MainWindow inherits Window {
                                 border-radius: 6px;
                                 clip: true;
                                 background: #2d3446;
-                                border-width: tile.index == root.selected-index ? 3px : 0px;
-                                border-color: #5b8cff;
+                                border-width: (tile.index == root.selected-index || tile.selected) ? 3px : 0px;
+                                border-color: tile.index == root.selected-index ? #3ad17a : #f2c94c;
 
                                 Image {
                                     source: tile.image;
@@ -716,6 +731,24 @@ export component MainWindow inherits Window {
                     }
                 }
             }
+        }
+
+        // --- Bottom statusline bar (always visible, full width) ---
+        // ASCII-only text (Slint default font has no glyph for many symbols).
+        Rectangle {
+            height: 24px;
+            background: #161a22;
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 10px;
+                Text {
+                    text: root.statusline;
+                    color: #9aa4b2;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+            }
+        }
         }
 
         // --- Lightbox overlay ---

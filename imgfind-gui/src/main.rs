@@ -13,7 +13,7 @@ mod state;
 mod tagset;
 mod window;
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -124,8 +124,6 @@ fn format_bytes(bytes: i64) -> String {
 
 /// Build the always-visible bottom statusline from the current selection and
 /// the full result set. ASCII separators only (Slint default-font glyph safety).
-// wired in Task 3
-#[allow(dead_code)]
 fn format_statusline(sel: &selection::Selection, results: &[RowMeta]) -> String {
     let total_bytes: i64 = results.iter().filter_map(|r| r.size).sum();
     let label = match sel.mode() {
@@ -292,6 +290,16 @@ fn main() -> Result<()> {
     // Index into `state.results` of the keyboard/mouse-selected tile (mirrors the
     // Slint `selected-index` property). Shares the index space with `lb_index`.
     let selected: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
+
+    // Vim-style multi-image selection (mode + selected index set). Task 4 wires
+    // the key handlers that mutate it; this task threads it through the tile
+    // builder so selected tiles paint a yellow border and the statusline reports
+    // the current mode/count. `selection_dirty` is set whenever the selection
+    // changes so the loader tick forces one rebuild even if the window is
+    // otherwise unchanged.
+    let selection: Arc<Mutex<selection::Selection>> =
+        Arc::new(Mutex::new(selection::Selection::default()));
+    let selection_dirty: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
     // Monotonic counter bumped on every lightbox load request. A background decode
     // only applies its result if its captured generation is still the latest, so a
@@ -1558,6 +1566,8 @@ fn main() -> Result<()> {
         let weak = window.as_weak();
         let state_ref = Arc::clone(&state);
         let grid_gen_ref = Arc::clone(&grid_generation);
+        let selection_ref = Arc::clone(&selection);
+        let selection_dirty_ref = Arc::clone(&selection_dirty);
         // These are all !Send and owned solely by this UI-thread closure: never
         // wrap them in Arc/Mutex. `last_gen` lets the closure detect a new
         // result set (generation bumped elsewhere) and reset its window state.
@@ -1577,6 +1587,8 @@ fn main() -> Result<()> {
                 in_flight: &mut in_flight,
                 last_range: &mut last_range,
                 last_gen: &mut last_gen,
+                selection: &selection_ref,
+                selection_dirty: &selection_dirty_ref,
             });
         });
     }
@@ -2328,6 +2340,7 @@ fn build_tiles_model(
     results: &[RowMeta],
     images: Vec<Option<Image>>,
     offset: usize,
+    selected: &BTreeSet<usize>,
 ) -> ModelRc<Tile> {
     let tiles: Vec<Tile> = results
         .iter()
@@ -2335,12 +2348,14 @@ fn build_tiles_model(
         .enumerate()
         .map(|(i, (r, maybe_img))| {
             let size_kb = r.size.unwrap_or(0) / 1024;
+            // Global index: window offset + position within this slice.
+            let index = offset + i;
             Tile {
                 path: r.path.clone().into(),
                 image: maybe_img.unwrap_or_default(),
                 size_kb: size_kb as i32,
-                // Global index: window offset + position within this slice.
-                index: (offset + i) as i32,
+                index: index as i32,
+                selected: selected.contains(&index),
             }
         })
         .collect();
@@ -2360,6 +2375,11 @@ struct LoaderTick<'a> {
     in_flight: &'a mut loader::InFlight,
     last_range: &'a mut Option<Range<usize>>,
     last_gen: &'a mut u64,
+    // Vim-style multi-image selection. `selection` is read each tick to paint the
+    // selected tiles; `selection_dirty` (set by the key handlers) forces one
+    // rebuild even when the visible window is otherwise unchanged.
+    selection: &'a Arc<Mutex<selection::Selection>>,
+    selection_dirty: &'a Arc<AtomicBool>,
 }
 
 /// One tick of the moving-window thumbnail loader, on the UI thread.
@@ -2417,9 +2437,11 @@ fn loader_tick(t: LoaderTick<'_>) {
     // 3. Rebuild only when the window/generation changed, or when a freshly
     // decoded thumbnail in the current window needs to appear. Otherwise the
     // tick does no UI work (cheap when idle).
+    let selection_changed = t.selection_dirty.swap(false, Ordering::Relaxed);
     let range_changed = t.last_range.as_ref() != Some(&range);
-    if range_changed || gen_changed || cached_new {
-        rebuild_window(t.window, t.state_ref, t.cache, &range);
+    if range_changed || gen_changed || cached_new || selection_changed {
+        let sel = t.selection.lock().unwrap().set().clone();
+        rebuild_window(t.window, t.state_ref, t.cache, &range, &sel);
         if range_changed || gen_changed {
             tracing::debug!(
                 start = range.start,
@@ -2428,6 +2450,13 @@ fn loader_tick(t: LoaderTick<'_>) {
             );
         }
         *t.last_range = Some(range.clone());
+    }
+
+    // The statusline (mode + image count + total size) depends only on the
+    // selection and the result set, so refresh it exactly when one of those
+    // changed — i.e. a new result set landed or the selection was mutated.
+    if gen_changed || selection_changed {
+        push_statusline(t.window, t.selection, t.state_ref);
     }
 
     // 4. Request missing thumbnails for the visible window.
@@ -2458,6 +2487,7 @@ fn rebuild_window(
     state_ref: &Arc<Mutex<SearchState>>,
     cache: &mut loader::ThumbCache,
     range: &Range<usize>,
+    selected: &BTreeSet<usize>,
 ) {
     let slice: Vec<RowMeta> = {
         let s = state_ref.lock().unwrap();
@@ -2467,8 +2497,24 @@ fn rebuild_window(
             .unwrap_or_default()
     };
     let images: Vec<Option<Image>> = slice.iter().map(|r| cache.get(&r.path).cloned()).collect();
-    let model = build_tiles_model(&slice, images, range.start);
+    let model = build_tiles_model(&slice, images, range.start, selected);
     window.set_tiles(model);
+}
+
+/// Recompute the bottom statusline (`MODE - N images - <size>`) from the current
+/// selection and result set, and push it to the window. Cheap; locks each handle
+/// only briefly and never across a re-entrant `invoke_*`.
+fn push_statusline(
+    w: &MainWindow,
+    selection: &Arc<Mutex<selection::Selection>>,
+    state: &Arc<Mutex<SearchState>>,
+) {
+    let line = {
+        let sel = selection.lock().unwrap();
+        let s = state.lock().unwrap();
+        format_statusline(&sel, &s.results)
+    };
+    w.set_statusline(line.into());
 }
 
 fn status_text_for(vs: ViewState, error_msg: Option<&str>) -> slint::SharedString {
@@ -3113,8 +3159,18 @@ mod tests {
     fn statusline_normal_shows_count_and_total() {
         use crate::selection::Selection;
         let rows = vec![
-            RowMeta { id: 1, path: "a".into(), size: Some(1_000_000), ext: "jpg".into() },
-            RowMeta { id: 2, path: "b".into(), size: Some(1_000_000), ext: "jpg".into() },
+            RowMeta {
+                id: 1,
+                path: "a".into(),
+                size: Some(1_000_000),
+                ext: "jpg".into(),
+            },
+            RowMeta {
+                id: 2,
+                path: "b".into(),
+                size: Some(1_000_000),
+                ext: "jpg".into(),
+            },
         ];
         let s = Selection::default();
         let line = format_statusline(&s, &rows);
@@ -3127,9 +3183,12 @@ mod tests {
     #[test]
     fn statusline_none_size_counts_as_zero() {
         use crate::selection::Selection;
-        let rows = vec![
-            RowMeta { id: 1, path: "a".into(), size: None, ext: "jpg".into() },
-        ];
+        let rows = vec![RowMeta {
+            id: 1,
+            path: "a".into(),
+            size: None,
+            ext: "jpg".into(),
+        }];
         let s = Selection::default();
         let line = format_statusline(&s, &rows);
         assert!(line.contains("1 images"), "got: {line}");
@@ -3140,9 +3199,24 @@ mod tests {
     fn statusline_free_shows_selection_stats() {
         use crate::selection::Selection;
         let rows = vec![
-            RowMeta { id: 1, path: "a".into(), size: Some(2_000_000), ext: "jpg".into() },
-            RowMeta { id: 2, path: "b".into(), size: Some(3_000_000), ext: "jpg".into() },
-            RowMeta { id: 3, path: "c".into(), size: Some(4_000_000), ext: "jpg".into() },
+            RowMeta {
+                id: 1,
+                path: "a".into(),
+                size: Some(2_000_000),
+                ext: "jpg".into(),
+            },
+            RowMeta {
+                id: 2,
+                path: "b".into(),
+                size: Some(3_000_000),
+                ext: "jpg".into(),
+            },
+            RowMeta {
+                id: 3,
+                path: "c".into(),
+                size: Some(4_000_000),
+                ext: "jpg".into(),
+            },
         ];
         let mut s = Selection::default();
         s.enter_free();
@@ -3157,8 +3231,18 @@ mod tests {
     fn statusline_range_label() {
         use crate::selection::Selection;
         let rows = vec![
-            RowMeta { id: 1, path: "a".into(), size: Some(1), ext: "jpg".into() },
-            RowMeta { id: 2, path: "b".into(), size: Some(1), ext: "jpg".into() },
+            RowMeta {
+                id: 1,
+                path: "a".into(),
+                size: Some(1),
+                ext: "jpg".into(),
+            },
+            RowMeta {
+                id: 2,
+                path: "b".into(),
+                size: Some(1),
+                ext: "jpg".into(),
+            },
         ];
         let mut s = Selection::default();
         s.enter_range(0);
