@@ -1480,6 +1480,45 @@ impl Database {
         let id: i64 = stmt.query_row(params![rel_path_str.as_ref()], |row| row.get(0))?;
         Ok(id)
     }
+
+    /// Read an image's stored EXIF/metadata from the `image_metadata` table by
+    /// its relative path, avoiding a fresh file decode.
+    ///
+    /// Returns `Ok(None)` when the path is unknown or has no metadata row.
+    /// Dimensions/size are stored as `i64` (see [`Self::insert_or_update_metadata`])
+    /// and cast back to `u64`/`u32` here.
+    pub fn get_image_metadata(&self, rel: &RelativePath) -> Result<Option<ImageMetadata>> {
+        let conn = self
+            .pool
+            .get()
+            .context("Failed to get DB connection to read stored metadata")?;
+        let mut stmt = conn.prepare(
+            "SELECT m.file_size, m.width, m.height, m.latitude, m.longitude,
+                    m.camera_make, m.camera_model, m.datetime_taken
+             FROM image_metadata m
+             JOIN images i ON i.id = m.image_id
+             WHERE i.path = ?1",
+        )?;
+        let meta = stmt
+            .query_row(params![rel.as_str().as_ref()], |row| {
+                let file_size: Option<i64> = row.get(0)?;
+                let width: Option<i64> = row.get(1)?;
+                let height: Option<i64> = row.get(2)?;
+                Ok(ImageMetadata {
+                    file_size: file_size.map(|s| s as u64),
+                    width: width.map(|w| w as u32),
+                    height: height.map(|h| h as u32),
+                    latitude: row.get(3)?,
+                    longitude: row.get(4)?,
+                    camera_make: row.get(5)?,
+                    camera_model: row.get(6)?,
+                    datetime_taken: row.get(7)?,
+                })
+            })
+            .optional()
+            .context("Failed to read stored image metadata")?;
+        Ok(meta)
+    }
 }
 
 /// Metadata extracted from image EXIF data
@@ -1710,6 +1749,67 @@ mod tests {
         assert_eq!(fk_on, 1, "foreign_keys should be ON for pooled connections");
 
         // Remove the unique temp dir (grandparent of the .imgfind/imgfind.db path).
+        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn get_image_metadata_reads_stored_row_without_decoding() {
+        let db_path = temp_db_path();
+        let db = Database::new(&db_path).expect("create db");
+        {
+            let conn = db.pool.get().expect("conn");
+            conn.execute(
+                "INSERT INTO images (id, path, hash) VALUES (1, 'a.jpg', 'h')",
+                [],
+            )
+            .expect("insert image");
+            conn.execute(
+                "INSERT INTO image_metadata
+                 (image_id, file_size, width, height, latitude, longitude,
+                  camera_make, camera_model, datetime_taken)
+                 VALUES (1, 4096, 800, 600, 12.5, -77.25, 'Canon', 'R5', '2026:06:20 12:00:00')",
+                [],
+            )
+            .expect("insert metadata");
+        }
+
+        let meta = db
+            .get_image_metadata(&RelativePath(PathBuf::from("a.jpg")))
+            .expect("query")
+            .expect("metadata row present");
+        assert_eq!(meta.file_size, Some(4096));
+        assert_eq!(meta.width, Some(800));
+        assert_eq!(meta.height, Some(600));
+        assert_eq!(meta.latitude, Some(12.5));
+        assert_eq!(meta.longitude, Some(-77.25));
+        assert_eq!(meta.camera_make.as_deref(), Some("Canon"));
+        assert_eq!(meta.camera_model.as_deref(), Some("R5"));
+        assert_eq!(meta.datetime_taken.as_deref(), Some("2026:06:20 12:00:00"));
+
+        // Image row exists but has no metadata row → Ok(None).
+        {
+            let conn = db.pool.get().expect("conn");
+            conn.execute(
+                "INSERT INTO images (id, path, hash) VALUES (2, 'b.jpg', 'h2')",
+                [],
+            )
+            .expect("insert image");
+        }
+        assert!(
+            db.get_image_metadata(&RelativePath(PathBuf::from("b.jpg")))
+                .expect("query")
+                .is_none(),
+            "image without a metadata row should yield Ok(None)"
+        );
+
+        // Unknown path → Ok(None).
+        assert!(
+            db.get_image_metadata(&RelativePath(PathBuf::from("nope.jpg")))
+                .expect("query")
+                .is_none(),
+            "unknown path should yield Ok(None)"
+        );
+
         let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
     }
 

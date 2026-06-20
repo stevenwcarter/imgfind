@@ -165,9 +165,20 @@ impl Backend {
         relative_to_abs_path(std::path::Path::new(rel_path), &self.parent_dir)
     }
 
-    /// EXIF/metadata for an indexed image, read fresh from the file (same fields
-    /// stored at index time).
+    /// EXIF/metadata for an indexed image.
+    ///
+    /// Reads the stored `image_metadata` row first (the same fields are persisted
+    /// at index time), avoiding a full file decode on the detail-panel critical
+    /// path. Falls back to decoding the file only when no stored row exists
+    /// (e.g. metadata not yet backfilled).
     pub fn metadata(&self, rel_path: &str) -> Result<ImageMetadata> {
+        if let Some(meta) = self
+            .db
+            .get_image_metadata(&Self::rel(rel_path))
+            .with_context(|| format!("Failed to read stored metadata for {rel_path}"))?
+        {
+            return Ok(meta);
+        }
         let abs = self.abs_path(rel_path);
         extract_image_metadata(&abs.to_string_lossy())
             .with_context(|| format!("Failed to read metadata for {rel_path}"))
@@ -395,6 +406,38 @@ mod tests {
         assert_eq!(gps.len(), 1);
         assert_eq!(gps[0].path, "a.jpg");
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `metadata` must read the stored `image_metadata` row, not decode the
+    /// file. We insert image + metadata rows but never create a file on disk;
+    /// the old decode-based path would fail (no file) — DB-first must succeed.
+    #[test]
+    fn metadata_reads_stored_row_without_touching_disk() {
+        let (db, root) = temp_db();
+        {
+            let conn = db.pool.get().expect("conn");
+            conn.execute(
+                "INSERT INTO images (id, path, hash) VALUES (1, 'ghost.jpg', 'h')",
+                [],
+            )
+            .expect("insert image");
+            conn.execute(
+                "INSERT INTO image_metadata
+                 (image_id, file_size, width, height, latitude, longitude)
+                 VALUES (1, 2048, 1024, 768, 5.5, 6.5)",
+                [],
+            )
+            .expect("insert metadata");
+        }
+        let backend = backend_with(db);
+        // No file at <parent_dir>/ghost.jpg exists; the decode fallback would fail.
+        let meta = backend.metadata("ghost.jpg").expect("stored metadata");
+        assert_eq!(meta.file_size, Some(2048));
+        assert_eq!(meta.width, Some(1024));
+        assert_eq!(meta.height, Some(768));
+        assert_eq!(meta.latitude, Some(5.5));
+        assert_eq!(meta.longitude, Some(6.5));
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -3,6 +3,7 @@ slint::include_modules!();
 mod backend;
 mod chords;
 mod detail;
+mod detail_cache;
 mod image_util;
 mod loader;
 mod nav;
@@ -458,53 +459,40 @@ fn main() -> Result<()> {
             let ds = select(path.clone());
             *detail_ref.lock().unwrap() = Some(ds.clone());
 
-            // Open the panel immediately with a placeholder while the worker loads.
+            // Open the panel immediately. A cache hit can show the image now;
+            // a miss shows a placeholder until the worker decodes it.
+            let cached = detail_cache::get(&path);
             if let Some(w) = weak.upgrade() {
                 w.set_detail_open(true);
                 w.set_detail_filename(ds.filename.into());
-                w.set_detail_image(Default::default());
+                match &cached {
+                    Some(img) => w.set_detail_image(img.clone()),
+                    None => w.set_detail_image(Default::default()),
+                }
                 w.set_detail_meta("Loading\u{2026}".into());
             }
 
-            // Load thumbnail + metadata on a background thread.
+            // Load the preview image (only on a cache miss) and metadata on
+            // background threads. The image is never held hostage by the
+            // (potentially slower) metadata read: each posts its own
+            // `invoke_from_event_loop`.
             let path_for_tags = path.clone();
-            let weak2 = weak.clone();
-            let backend2 = backend_detail.clone();
-            std::thread::spawn(move || {
-                let meta_result = backend2.metadata(&path);
-                let thumb_result = backend2.thumbnail(&path, 512);
+            spawn_detail_image(weak.clone(), backend_detail.clone(), path.clone(), cached);
+            spawn_detail_meta(weak.clone(), backend_detail.clone(), path.clone());
 
-                slint::invoke_from_event_loop(move || {
-                    let Some(w) = weak2.upgrade() else { return };
-                    match thumb_result {
-                        Ok(bytes) => match image_util::jpeg_to_slint_image(&bytes) {
-                            Ok(img) => w.set_detail_image(img),
-                            Err(e) => tracing::warn!("detail thumb decode failed: {e}"),
-                        },
-                        Err(e) => tracing::warn!("detail thumbnail failed: {e}"),
-                    }
-                    match meta_result {
-                        Ok(meta) => w.set_detail_meta(format_metadata(&meta).into()),
-                        Err(e) => {
-                            tracing::warn!("detail metadata failed: {e}");
-                            w.set_detail_meta("".into());
-                        }
-                    }
-                })
-                .ok();
-            });
-
-            // Preload neighbors at 512px for fast detail-panel switching.
+            // Preload neighbors at 512px for fast detail-panel switching, also
+            // decoding + caching them on the UI thread so back/forward lands an
+            // already-decoded image.
             {
                 let my_gen = preload_gen_detail.fetch_add(1, Ordering::SeqCst) + 1;
                 let paths = {
                     let s = state_ref.lock().unwrap();
                     neighbor_paths(&s.results, idx, preload_n)
                 };
-                spawn_preload(
+                spawn_detail_preload(
+                    weak.clone(),
                     backend_detail.clone(),
                     paths,
-                    512,
                     Arc::clone(&preload_gen_detail),
                     my_gen,
                 );
@@ -1966,36 +1954,18 @@ fn restore_session(st: UiState, ctx: RestoreCtx<'_>) {
         if let Some(path) = path {
             let ds = select(path.clone());
             *ctx.detail.lock().unwrap() = Some(ds.clone());
+            let cached = detail_cache::get(&path);
             w.set_detail_open(true);
             w.set_detail_filename(ds.filename.into());
-            w.set_detail_image(Default::default());
+            match &cached {
+                Some(img) => w.set_detail_image(img.clone()),
+                None => w.set_detail_image(Default::default()),
+            }
             w.set_detail_meta("Loading\u{2026}".into());
 
             let path_for_tags = path.clone();
-            let weak2 = ctx.weak.clone();
-            let backend2 = ctx.backend.clone();
-            std::thread::spawn(move || {
-                let meta_result = backend2.metadata(&path);
-                let thumb_result = backend2.thumbnail(&path, 512);
-                slint::invoke_from_event_loop(move || {
-                    let Some(w) = weak2.upgrade() else { return };
-                    match thumb_result {
-                        Ok(bytes) => match image_util::jpeg_to_slint_image(&bytes) {
-                            Ok(img) => w.set_detail_image(img),
-                            Err(e) => tracing::warn!("restore detail thumb decode failed: {e}"),
-                        },
-                        Err(e) => tracing::warn!("restore detail thumbnail failed: {e}"),
-                    }
-                    match meta_result {
-                        Ok(meta) => w.set_detail_meta(format_metadata(&meta).into()),
-                        Err(e) => {
-                            tracing::warn!("restore detail metadata failed: {e}");
-                            w.set_detail_meta("".into());
-                        }
-                    }
-                })
-                .ok();
-            });
+            spawn_detail_image(ctx.weak.clone(), ctx.backend.clone(), path.clone(), cached);
+            spawn_detail_meta(ctx.weak.clone(), ctx.backend.clone(), path.clone());
 
             // Load tags for the restored detail panel.
             {
@@ -2740,6 +2710,115 @@ fn spawn_preload(
             if let Err(e) = backend.thumbnail(&path, size) {
                 tracing::debug!("preload: thumbnail failed for {path}: {e}");
             }
+        }
+    });
+}
+
+/// 512px is the detail-panel preview size (matches `GUI_THUMBNAIL_SIZES`).
+const DETAIL_SIZE: u32 = 512;
+
+/// Load the detail-panel preview image for `path`, setting ONLY `detail_image`
+/// (never blocked on metadata).
+///
+/// On a cache hit (`cached` is `Some`) the image was already applied
+/// synchronously by the caller, so this is a no-op. On a miss it spawns a
+/// background thread that fetches the 512px JPEG bytes, then posts an
+/// `invoke_from_event_loop` that — on the UI thread — decodes the bytes to a
+/// `slint::Image`, inserts it into the thread-local detail cache, and sets
+/// `detail_image`. The cache and `Image` never leave the UI thread.
+fn spawn_detail_image(
+    weak: Weak<MainWindow>,
+    backend: Backend,
+    path: String,
+    cached: Option<Image>,
+) {
+    if cached.is_some() {
+        return; // Already displayed synchronously; nothing to fetch.
+    }
+    std::thread::spawn(move || {
+        let thumb_result = backend.thumbnail(&path, DETAIL_SIZE);
+        slint::invoke_from_event_loop(move || {
+            let Some(w) = weak.upgrade() else { return };
+            match thumb_result {
+                Ok(bytes) => match image_util::jpeg_to_slint_image(&bytes) {
+                    Ok(img) => {
+                        detail_cache::insert(path, img.clone());
+                        w.set_detail_image(img);
+                    }
+                    Err(e) => tracing::warn!("detail thumb decode failed: {e}"),
+                },
+                Err(e) => tracing::warn!("detail thumbnail failed: {e}"),
+            }
+        })
+        .ok();
+    });
+}
+
+/// Load the detail-panel metadata for `path` on a background thread and post it
+/// to the UI thread, setting ONLY `detail_meta`. Decoupled from the image so a
+/// slow metadata read can never delay the cheap cached preview.
+fn spawn_detail_meta(weak: Weak<MainWindow>, backend: Backend, path: String) {
+    std::thread::spawn(move || {
+        let meta_result = backend.metadata(&path);
+        slint::invoke_from_event_loop(move || {
+            let Some(w) = weak.upgrade() else { return };
+            match meta_result {
+                Ok(meta) => w.set_detail_meta(format_metadata(&meta).into()),
+                Err(e) => {
+                    tracing::warn!("detail metadata failed: {e}");
+                    w.set_detail_meta("".into());
+                }
+            }
+        })
+        .ok();
+    });
+}
+
+/// Preload detail-panel neighbors: fetch each 512px JPEG on a background thread
+/// (warming the DB blob cache) and decode + insert it into the thread-local
+/// detail cache on the UI thread, WITHOUT changing the visible `detail_image`.
+///
+/// `paths` is in arc order (closest neighbor first). The background thread stops
+/// once `preload_generation` advances past `my_gen`, and each UI-thread decode
+/// re-checks the generation so a stale focus's neighbors don't pollute the cache.
+fn spawn_detail_preload(
+    weak: Weak<MainWindow>,
+    backend: Backend,
+    paths: Vec<String>,
+    preload_generation: Arc<AtomicU64>,
+    my_gen: u64,
+) {
+    if paths.is_empty() {
+        return;
+    }
+    std::thread::spawn(move || {
+        for path in paths {
+            if !is_current_generation(my_gen, preload_generation.load(Ordering::SeqCst)) {
+                break;
+            }
+            let bytes = match backend.thumbnail(&path, DETAIL_SIZE) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::debug!("detail preload: thumbnail failed for {path}: {e}");
+                    continue;
+                }
+            };
+            let weak = weak.clone();
+            let gen_check = Arc::clone(&preload_generation);
+            slint::invoke_from_event_loop(move || {
+                // Drop stale decodes; only warm the cache for the current focus.
+                if !is_current_generation(my_gen, gen_check.load(Ordering::SeqCst)) {
+                    return;
+                }
+                if weak.upgrade().is_none() {
+                    return;
+                }
+                match image_util::jpeg_to_slint_image(&bytes) {
+                    Ok(img) => detail_cache::insert(path, img),
+                    Err(e) => tracing::debug!("detail preload decode failed: {e}"),
+                }
+            })
+            .ok();
         }
     });
 }
