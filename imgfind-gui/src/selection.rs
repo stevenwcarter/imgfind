@@ -196,6 +196,16 @@ mod tests {
     }
 
     #[test]
+    fn re_entering_free_after_range_resets_set() {
+        let mut s = Selection::default();
+        s.enter_range(3);
+        s.cursor_moved(7); // range materializes 3..=7
+        s.enter_free(); // re-enter: empties the set
+        assert!(s.is_empty());
+        assert_eq!(s.mode(), SelectionMode::Free);
+    }
+
+    #[test]
     fn contains_reflects_set() {
         let mut s = Selection::default();
         s.enter_range(2);
