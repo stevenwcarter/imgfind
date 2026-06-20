@@ -153,7 +153,7 @@ impl Backend {
     pub fn thumbnail(&self, rel_path: &str, size: u32) -> Result<Vec<u8>> {
         let hash = self
             .db
-            .get_image_hash(&RelativePath(PathBuf::from(rel_path)))
+            .get_image_hash(&Self::rel(rel_path))
             .with_context(|| format!("No hash for {rel_path}"))?;
         let abs = self.abs_path(rel_path);
         let abs_str = abs.to_string_lossy();
@@ -173,6 +173,40 @@ impl Backend {
             .with_context(|| format!("Failed to read metadata for {rel_path}"))
     }
 
+    /// Assign `tag` to the image at `rel_path` (creates the tag if new).
+    #[allow(dead_code)] // consumed by upcoming tag-panel task; not yet wired into main.rs
+    pub fn add_tag(&self, rel_path: &str, tag: &str) -> Result<()> {
+        self.db
+            .tag_image(&Self::rel(rel_path), tag)
+            .with_context(|| format!("add tag {tag} to {rel_path}"))
+    }
+
+    /// Remove `tag` from the image at `rel_path`.
+    #[allow(dead_code)] // consumed by upcoming tag-panel task; not yet wired into main.rs
+    pub fn remove_tag(&self, rel_path: &str, tag: &str) -> Result<()> {
+        self.db
+            .untag_image(&Self::rel(rel_path), tag)
+            .with_context(|| format!("remove tag {tag} from {rel_path}"))
+    }
+
+    /// Tags currently assigned to the image at `rel_path`.
+    #[allow(dead_code)] // consumed by upcoming tag-panel task; not yet wired into main.rs
+    pub fn tags_for(&self, rel_path: &str) -> Result<Vec<String>> {
+        self.db
+            .tags_for_image(&Self::rel(rel_path))
+            .with_context(|| format!("tags for {rel_path}"))
+    }
+
+    /// All tag names in the database (alphabetical).
+    #[allow(dead_code)] // consumed by upcoming tag-panel task; not yet wired into main.rs
+    pub fn all_tags(&self) -> Result<Vec<String>> {
+        self.db.list_tags().context("list all tags")
+    }
+
+    fn rel(p: &str) -> RelativePath {
+        RelativePath(PathBuf::from(p))
+    }
+
     /// Images similar to `rel_path`, using its stored embedding. The seed itself
     /// is filtered out of the results.
     pub fn search_similar(&self, rel_path: &str, filters: &Filters) -> Result<Vec<RowMeta>> {
@@ -180,7 +214,7 @@ impl Backend {
         let rows = self
             .db
             .find_similar_to_path(
-                &RelativePath(PathBuf::from(rel_path)),
+                &Self::rel(rel_path),
                 SEARCH_LIMIT,
                 0,
                 sc.distance_threshold,
@@ -364,6 +398,35 @@ mod tests {
         assert_eq!(gps.len(), 1);
         assert_eq!(gps[0].path, "a.jpg");
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn add_list_remove_tag_roundtrip() {
+        let (db, root) = temp_db();
+        {
+            let conn = db.pool.get().expect("conn");
+            conn.execute(
+                "INSERT INTO images (id, path, hash) VALUES (1, 'a.jpg', 'h')",
+                [],
+            )
+            .expect("insert image");
+        }
+        let backend = backend_with(db);
+        backend.add_tag("a.jpg", "beach").unwrap();
+        backend.add_tag("a.jpg", "sunset").unwrap();
+        let mut tags = backend.tags_for("a.jpg").unwrap();
+        tags.sort();
+        assert_eq!(tags, vec!["beach".to_string(), "sunset".to_string()]);
+        backend.remove_tag("a.jpg", "beach").unwrap();
+        assert_eq!(
+            backend.tags_for("a.jpg").unwrap(),
+            vec!["sunset".to_string()]
+        );
+        assert!(backend
+            .all_tags()
+            .unwrap()
+            .contains(&"sunset".to_string()));
         let _ = std::fs::remove_dir_all(root);
     }
 
