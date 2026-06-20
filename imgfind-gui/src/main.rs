@@ -3045,7 +3045,9 @@ fn paint_brush_by_index(idx: usize, ctx: &PaintCtx) {
     let Some(w) = ctx.weak.upgrade() else {
         return;
     };
-    let tags = ctx.brushes.lock().unwrap()[idx].clone();
+    let Some(tags) = ctx.brushes.lock().unwrap().get(idx).cloned() else {
+        return;
+    };
     let paths = selected_paths(&ctx.selection, &ctx.state);
     if paths.is_empty() {
         apply_tags_to_focused(&ctx.weak, &ctx.backend, &ctx.tag_ctx, tags.clone());
