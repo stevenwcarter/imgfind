@@ -14,7 +14,7 @@ The project ships as a **2-crate workspace**: a core `imgfind` binary (CLI + rat
 - **SQLite Storage**: Reliable database storage with efficient vector similarity search
 - **CLI Interface**: Simple command-line interface with helpful status information
 - **Interactive TUI**: Browse results in a ratatui-based terminal UI with inline image previews
-- **Native GUI**: Slint desktop app — search results in a thumbnail grid, click to open a lightbox; map view not yet ported
+- **Native GUI**: Slint desktop app — virtualized thumbnail grid, detail panel, lightbox, filter bar (size/type/GPS/tags), keyboard navigation, and a keyboard-driven tagging system with color brushes; map view not yet ported
 - **Shell Completions**: Generate completion scripts for bash, zsh, and fish
 
 ## Quick Start
@@ -152,6 +152,25 @@ Launch the terminal UI with `imgfind tui`. It shows a 3x3 grid (9 images per pag
 | right-click | reset zoom |
 | `?` | toggle help overlay |
 | `q` / `Ctrl-C` | quit |
+
+## Native GUI
+
+Launch with `imgfind gui` (or `imgfind-gui` directly). The GUI restores the previous session on startup: last search/filter, selection, scroll position, and result list — no query re-executed.
+
+**Navigation & panels**: `h/j/k/l` or arrow keys move the selection in the virtualized grid; `Enter` opens a right-side detail panel (metadata + "Search similar"); `Space` opens the full-screen lightbox (prev/next, Esc closes); right-click opens the original in the OS viewer.
+
+**Tagging**: assign free-text tags to images using keyboard chords (active in grid, detail panel, and lightbox):
+
+| Key(s) | Action |
+|--------|--------|
+| `` ` `` | Toggle the left rail (brush editors + Most Recent staging area) |
+| `t` | Open add-tags modal (space-separated words) |
+| `m` + `r`/`g`/`y`/`p`/`b` | Paint the red/green/yellow/purple/blue brush's tags onto the focused image |
+| `mm` | Re-apply the Most Recent tag buffer |
+| `f` + `r`/`g`/`y`/`p`/`b` | Load a brush into the tag filter |
+| `ft` | Toggle the tag filter on/off |
+
+Color brushes are input shortcuts only — a brush is a set of tags; no color is stored on an image. Brushes and filter state persist across sessions. Tag filtering (AND/OR, enable toggle) appears in the filter pane and combines with the size/type/GPS filters.
 
 ## Configuration
 

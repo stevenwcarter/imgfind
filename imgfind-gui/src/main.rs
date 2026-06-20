@@ -1,12 +1,14 @@
 slint::include_modules!();
 
 mod backend;
+mod chords;
 mod detail;
 mod image_util;
 mod loader;
 mod nav;
 mod preload;
 mod state;
+mod tagset;
 mod window;
 
 use std::collections::HashSet;
@@ -23,7 +25,7 @@ use slint::{Image, Model, ModelRc, SharedString, Timer, TimerMode, VecModel, Wea
 
 use backend::Backend;
 use detail::{DetailState, filename_of, format_metadata, select};
-use imgfind::filters::{Filters, GpsFilter};
+use imgfind::filters::{Filters, GpsFilter, TagMatch};
 use imgfind::sort::{RowMeta, Sort, SortDir, SortKey};
 use imgfind::ui_state::{PersistedMode, UiState};
 use state::{SearchState, ViewState};
@@ -144,6 +146,7 @@ fn build_filters(
         size_max,
         extensions,
         gps,
+        ..Default::default()
     }
 }
 
@@ -274,6 +277,26 @@ fn main() -> Result<()> {
     // setting the search field (or any restore side effect) can never kick off a
     // re-query — the restored result list must survive verbatim.
     let restoring: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+
+    // Left-rail tag state. `brushes` holds the five color brushes' tag lists
+    // (index-aligned with `colors::BrushColor`); `mm_buffer` is the editable
+    // "Most Recent" staging set. Both are pure in-memory + persisted to
+    // `UiState` on exit (no DB writes or background threads while editing).
+    let brushes: Arc<Mutex<[Vec<String>; 5]>> = Arc::new(Mutex::new(Default::default()));
+    let mm_buffer: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // Pending keyboard-chord prefix (e.g. after `m` we await a brush letter) and
+    // the single-shot timer that resets a stale prefix after ~800ms. Both live on
+    // the UI thread; the timer is !Send so `Rc` (not `Arc`) is correct.
+    let pending_chord: Arc<Mutex<chords::Pending>> = Arc::new(Mutex::new(chords::Pending::None));
+    let chord_timer: Rc<Timer> = Rc::new(Timer::default());
+
+    // Count of tag text editors currently in edit mode. Each TagEditor bumps it
+    // via `editor-editing-changed`; while it's > 0 the window's
+    // `chords-suppressed` flag is set so chord keys go to the editor, not the
+    // chord machine. A counter (vs a bool) is robust to a transient overlap when
+    // one editor commits-on-blur as another gains focus. UI-thread-only → `Cell`.
+    let editing_count: Rc<std::cell::Cell<i32>> = Rc::new(std::cell::Cell::new(0));
 
     // Poll for model readiness every 250 ms.  The timer performs exactly ONE
     // job: detect the loading→ready transition, enable the search box, and
@@ -444,6 +467,7 @@ fn main() -> Result<()> {
             }
 
             // Load thumbnail + metadata on a background thread.
+            let path_for_tags = path.clone();
             let weak2 = weak.clone();
             let backend2 = backend_detail.clone();
             std::thread::spawn(move || {
@@ -484,6 +508,20 @@ fn main() -> Result<()> {
                     Arc::clone(&preload_gen_detail),
                     my_gen,
                 );
+            }
+
+            // Load tags on a background thread; marshal back to the UI thread.
+            {
+                let backend3 = backend_detail.clone();
+                let w = weak.clone();
+                std::thread::spawn(move || {
+                    let tags = backend3.tags_for(&path_for_tags).unwrap_or_default();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(w) = w.upgrade() {
+                            push_detail_tags(&w, &tags);
+                        }
+                    });
+                });
             }
         });
     }
@@ -559,6 +597,64 @@ fn main() -> Result<()> {
             if let Some(w) = weak.upgrade() {
                 w.set_detail_open(false);
             }
+        });
+    }
+
+    // --- detail-tag-committed callback: diff desired vs current, apply adds/removes ---
+    {
+        let backend = backend.clone();
+        let detail_ref = Arc::clone(&detail);
+        let w = window.as_weak();
+        window.on_detail_tag_committed(move |text| {
+            let Some(path) = detail_ref.lock().unwrap().as_ref().map(|d| d.path.clone()) else {
+                return;
+            };
+            let backend = backend.clone();
+            let w = w.clone();
+            std::thread::spawn(move || {
+                let mut desired = Vec::new();
+                tagset::set_words(&mut desired, text.as_str());
+                let current = backend.tags_for(&path).unwrap_or_default();
+                for t in &desired {
+                    if !current.contains(t) {
+                        let _ = backend.add_tag(&path, t);
+                    }
+                }
+                for t in &current {
+                    if !desired.contains(t) {
+                        let _ = backend.remove_tag(&path, t);
+                    }
+                }
+                let tags = backend.tags_for(&path).unwrap_or_default();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(w) = w.upgrade() {
+                        push_detail_tags(&w, &tags);
+                    }
+                });
+            });
+        });
+    }
+
+    // --- detail-tag-remove callback: remove one tag from the current image ---
+    {
+        let backend = backend.clone();
+        let detail_ref = Arc::clone(&detail);
+        let w = window.as_weak();
+        window.on_detail_tag_remove(move |tag| {
+            let Some(path) = detail_ref.lock().unwrap().as_ref().map(|d| d.path.clone()) else {
+                return;
+            };
+            let backend = backend.clone();
+            let w = w.clone();
+            std::thread::spawn(move || {
+                let _ = backend.remove_tag(&path, tag.as_str());
+                let tags = backend.tags_for(&path).unwrap_or_default();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(w) = w.upgrade() {
+                        push_detail_tags(&w, &tags);
+                    }
+                });
+            });
         });
     }
 
@@ -878,12 +974,16 @@ fn main() -> Result<()> {
                 None => return,
             };
             let exts = selected_exts_ref.lock().unwrap().clone();
-            let new_filters = build_filters(lo, hi, size_bounds, &exts, gps_mode);
+            let mut new_filters = build_filters(lo, hi, size_bounds, &exts, gps_mode);
             let label = build_size_label(lo, hi, size_bounds);
             if let Some(w) = weak.upgrade() {
                 w.set_size_label(label);
             }
-            *filters_ref.lock().unwrap() = new_filters.clone();
+            {
+                let mut stored = filters_ref.lock().unwrap();
+                new_filters.carry_tag_filter_from(&stored);
+                *stored = new_filters.clone();
+            }
             start_debounce(
                 &timer,
                 weak.clone(),
@@ -928,8 +1028,12 @@ fn main() -> Result<()> {
             if let Some(w) = weak.upgrade() {
                 w.set_type_chips(model);
             }
-            let new_filters = build_filters(lo, hi, size_bounds, &active_exts, gps_mode);
-            *filters_ref.lock().unwrap() = new_filters.clone();
+            let mut new_filters = build_filters(lo, hi, size_bounds, &active_exts, gps_mode);
+            {
+                let mut stored = filters_ref.lock().unwrap();
+                new_filters.carry_tag_filter_from(&stored);
+                *stored = new_filters.clone();
+            }
             start_debounce(
                 &timer,
                 weak.clone(),
@@ -963,8 +1067,12 @@ fn main() -> Result<()> {
                 .map(|w| (w.get_size_lo(), w.get_size_hi()))
                 .unwrap_or((0.0, 1.0));
             let exts = selected_exts_ref.lock().unwrap().clone();
-            let new_filters = build_filters(lo, hi, size_bounds, &exts, mode);
-            *filters_ref.lock().unwrap() = new_filters.clone();
+            let mut new_filters = build_filters(lo, hi, size_bounds, &exts, mode);
+            {
+                let mut stored = filters_ref.lock().unwrap();
+                new_filters.carry_tag_filter_from(&stored);
+                *stored = new_filters.clone();
+            }
             start_debounce(
                 &timer,
                 weak.clone(),
@@ -972,6 +1080,136 @@ fn main() -> Result<()> {
                 Arc::clone(&mode_ref),
                 Arc::clone(&grid_gen_ref),
                 backend_gps.clone(),
+                new_filters,
+                Arc::clone(&selected_ref),
+            );
+        });
+    }
+
+    // `on_filter_tags_committed` — fired when the user commits text in the tag
+    // filter editor; replaces the tag set, reflects it to the UI, then kicks the
+    // shared debounce so the current-mode query re-runs filtered.
+    {
+        let weak = window.as_weak();
+        let state_ref = Arc::clone(&state);
+        let mode_ref = Arc::clone(&search_mode);
+        let filters_ref = Arc::clone(&filters);
+        let selected_ref = Arc::clone(&selected);
+        let grid_gen_ref = Arc::clone(&grid_generation);
+        let backend_tc = backend.clone();
+        let timer = Rc::clone(&debounce_timer);
+        window.on_filter_tags_committed(move |text| {
+            let Some(w) = weak.upgrade() else { return };
+            let new_filters = {
+                let mut f = filters_ref.lock().unwrap();
+                tagset::set_words(&mut f.tags, text.as_str());
+                push_filter_tags(&w, &f);
+                f.clone()
+            };
+            start_debounce(
+                &timer,
+                weak.clone(),
+                Arc::clone(&state_ref),
+                Arc::clone(&mode_ref),
+                Arc::clone(&grid_gen_ref),
+                backend_tc.clone(),
+                new_filters,
+                Arc::clone(&selected_ref),
+            );
+        });
+    }
+
+    // `on_filter_tag_remove` — fired when the user removes a single tag pill.
+    {
+        let weak = window.as_weak();
+        let state_ref = Arc::clone(&state);
+        let mode_ref = Arc::clone(&search_mode);
+        let filters_ref = Arc::clone(&filters);
+        let selected_ref = Arc::clone(&selected);
+        let grid_gen_ref = Arc::clone(&grid_generation);
+        let backend_tr = backend.clone();
+        let timer = Rc::clone(&debounce_timer);
+        window.on_filter_tag_remove(move |tag| {
+            let Some(w) = weak.upgrade() else { return };
+            let new_filters = {
+                let mut f = filters_ref.lock().unwrap();
+                tagset::remove(&mut f.tags, tag.as_str());
+                push_filter_tags(&w, &f);
+                f.clone()
+            };
+            start_debounce(
+                &timer,
+                weak.clone(),
+                Arc::clone(&state_ref),
+                Arc::clone(&mode_ref),
+                Arc::clone(&grid_gen_ref),
+                backend_tr.clone(),
+                new_filters,
+                Arc::clone(&selected_ref),
+            );
+        });
+    }
+
+    // `on_tag_match_toggled` — flips the tag-filter mode between AND (AllOf) and
+    // OR (AnyOf).
+    {
+        let weak = window.as_weak();
+        let state_ref = Arc::clone(&state);
+        let mode_ref = Arc::clone(&search_mode);
+        let filters_ref = Arc::clone(&filters);
+        let selected_ref = Arc::clone(&selected);
+        let grid_gen_ref = Arc::clone(&grid_generation);
+        let backend_tm = backend.clone();
+        let timer = Rc::clone(&debounce_timer);
+        window.on_tag_match_toggled(move || {
+            let Some(w) = weak.upgrade() else { return };
+            let new_filters = {
+                let mut f = filters_ref.lock().unwrap();
+                f.tag_match = match f.tag_match {
+                    TagMatch::AllOf => TagMatch::AnyOf,
+                    TagMatch::AnyOf => TagMatch::AllOf,
+                };
+                push_filter_tags(&w, &f);
+                f.clone()
+            };
+            start_debounce(
+                &timer,
+                weak.clone(),
+                Arc::clone(&state_ref),
+                Arc::clone(&mode_ref),
+                Arc::clone(&grid_gen_ref),
+                backend_tm.clone(),
+                new_filters,
+                Arc::clone(&selected_ref),
+            );
+        });
+    }
+
+    // `on_tags_enabled_toggled` — flips the master enable for the tag filter.
+    {
+        let weak = window.as_weak();
+        let state_ref = Arc::clone(&state);
+        let mode_ref = Arc::clone(&search_mode);
+        let filters_ref = Arc::clone(&filters);
+        let selected_ref = Arc::clone(&selected);
+        let grid_gen_ref = Arc::clone(&grid_generation);
+        let backend_te = backend.clone();
+        let timer = Rc::clone(&debounce_timer);
+        window.on_tags_enabled_toggled(move || {
+            let Some(w) = weak.upgrade() else { return };
+            let new_filters = {
+                let mut f = filters_ref.lock().unwrap();
+                f.tags_enabled = !f.tags_enabled;
+                push_filter_tags(&w, &f);
+                f.clone()
+            };
+            start_debounce(
+                &timer,
+                weak.clone(),
+                Arc::clone(&state_ref),
+                Arc::clone(&mode_ref),
+                Arc::clone(&grid_gen_ref),
+                backend_te.clone(),
                 new_filters,
                 Arc::clone(&selected_ref),
             );
@@ -1034,6 +1272,239 @@ fn main() -> Result<()> {
         });
     }
 
+    // --- brush-committed callback: set a brush's tags from raw editor text ---
+    {
+        let brushes_ref = Arc::clone(&brushes);
+        let mm_ref = Arc::clone(&mm_buffer);
+        let weak = window.as_weak();
+        let backend_bc = backend.clone();
+        window.on_brush_committed(move |idx, text| {
+            let Some(w) = weak.upgrade() else { return };
+            {
+                let mut b = brushes_ref.lock().unwrap();
+                if let Some(slot) = b.get_mut(idx as usize) {
+                    tagset::set_words(slot, text.as_str());
+                }
+                let recent = mm_ref.lock().unwrap();
+                push_rail_models(&w, &b, &recent);
+            }
+            persist_rail(&backend_bc, &brushes_ref, &mm_ref, w.get_rail_visible());
+        });
+    }
+
+    // --- brush-remove callback: remove one tag from a brush ---
+    {
+        let brushes_ref = Arc::clone(&brushes);
+        let mm_ref = Arc::clone(&mm_buffer);
+        let weak = window.as_weak();
+        let backend_br = backend.clone();
+        window.on_brush_remove(move |idx, tag| {
+            let Some(w) = weak.upgrade() else { return };
+            {
+                let mut b = brushes_ref.lock().unwrap();
+                if let Some(slot) = b.get_mut(idx as usize) {
+                    tagset::remove(slot, tag.as_str());
+                }
+                let recent = mm_ref.lock().unwrap();
+                push_rail_models(&w, &b, &recent);
+            }
+            persist_rail(&backend_br, &brushes_ref, &mm_ref, w.get_rail_visible());
+        });
+    }
+
+    // --- recent-remove callback: remove one tag from the Most Recent buffer ---
+    {
+        let brushes_ref = Arc::clone(&brushes);
+        let mm_ref = Arc::clone(&mm_buffer);
+        let weak = window.as_weak();
+        let backend_rr = backend.clone();
+        window.on_recent_remove(move |tag| {
+            let Some(w) = weak.upgrade() else { return };
+            {
+                let b = brushes_ref.lock().unwrap();
+                let mut recent = mm_ref.lock().unwrap();
+                tagset::remove(&mut recent, tag.as_str());
+                push_rail_models(&w, &b, &recent);
+            }
+            persist_rail(&backend_rr, &brushes_ref, &mm_ref, w.get_rail_visible());
+        });
+    }
+
+    // --- toggle-rail callback: flip left-rail visibility ---
+    {
+        let weak = window.as_weak();
+        window.on_toggle_rail(move || {
+            if let Some(w) = weak.upgrade() {
+                w.set_rail_visible(!w.get_rail_visible());
+            }
+        });
+    }
+
+    // --- editor-editing-changed callback: track active tag editors ---
+    //
+    // Each TagEditor fires this on entering (true) / leaving (false) edit mode.
+    // We keep a UI-thread count and reflect "any editor editing" into the window
+    // so `capture-key-pressed` suppresses chord forwarding while a tag field types.
+    {
+        let weak = window.as_weak();
+        let editing_count = Rc::clone(&editing_count);
+        window.on_editor_editing_changed(move |editing| {
+            let n = (editing_count.get() + if editing { 1 } else { -1 }).max(0);
+            editing_count.set(n);
+            if let Some(w) = weak.upgrade() {
+                w.set_chords_suppressed(n > 0);
+            }
+        });
+    }
+
+    // --- key callback: keyboard-chord dispatcher ---
+    //
+    // app.slint forwards one chord trigger/completion key per press here (only
+    // when no text editor or the modal has focus). `chords::resolve` advances the
+    // pure state machine; we arm/cancel an ~800ms prefix-reset timer and execute
+    // the resolved action. All Backend writes happen on background threads.
+    {
+        let pending_chord = Arc::clone(&pending_chord);
+        let chord_timer = Rc::clone(&chord_timer);
+        let brushes_ref = Arc::clone(&brushes);
+        let mm_ref = Arc::clone(&mm_buffer);
+        let filters_ref = Arc::clone(&filters);
+        let detail_ref = Arc::clone(&detail);
+        let selected_ref = Arc::clone(&selected);
+        let lb_ref = Arc::clone(&lb_index);
+        let state_ref = Arc::clone(&state);
+        let mode_ref = Arc::clone(&search_mode);
+        let grid_gen_ref = Arc::clone(&grid_generation);
+        let backend_key = backend.clone();
+        let timer = Rc::clone(&debounce_timer);
+        let weak = window.as_weak();
+        window.on_key(move |key| {
+            let Some(w) = weak.upgrade() else { return };
+
+            // Advance the pure chord state machine.
+            let (next, action) = {
+                let mut pend = pending_chord.lock().unwrap();
+                let (next, action) = chords::resolve(*pend, key.as_str());
+                *pend = next;
+                (next, action)
+            };
+
+            // Arm an ~800ms reset while a prefix is pending; otherwise cancel it.
+            if matches!(next, chords::Pending::AwaitM | chords::Pending::AwaitF) {
+                let pc = Arc::clone(&pending_chord);
+                chord_timer.start(
+                    TimerMode::SingleShot,
+                    Duration::from_millis(800),
+                    move || {
+                        *pc.lock().unwrap() = chords::Pending::None;
+                    },
+                );
+            } else {
+                chord_timer.stop();
+            }
+
+            let Some(action) = action else { return };
+            let tag_ctx = TagTargetCtx {
+                detail: Arc::clone(&detail_ref),
+                selected: Arc::clone(&selected_ref),
+                lb_index: Arc::clone(&lb_ref),
+                state: Arc::clone(&state_ref),
+            };
+            match action {
+                chords::Action::ToggleRail => {
+                    w.set_rail_visible(!w.get_rail_visible());
+                }
+                chords::Action::OpenTagModal => {
+                    w.set_tag_modal_open(true);
+                }
+                chords::Action::PaintBrush(c) => {
+                    let tags = brushes_ref.lock().unwrap()[c.index()].clone();
+                    apply_tags_to_focused(&weak, &backend_key, &tag_ctx, tags.clone());
+                    *mm_ref.lock().unwrap() = tags;
+                    push_rail_models(&w, &brushes_ref.lock().unwrap(), &mm_ref.lock().unwrap());
+                }
+                chords::Action::RepeatLast => {
+                    let tags = mm_ref.lock().unwrap().clone();
+                    apply_tags_to_focused(&weak, &backend_key, &tag_ctx, tags);
+                }
+                chords::Action::LoadBrushIntoFilter(c) => {
+                    let new_filters = {
+                        let tags = brushes_ref.lock().unwrap()[c.index()].clone();
+                        let mut f = filters_ref.lock().unwrap();
+                        f.tags = tags;
+                        push_filter_tags(&w, &f);
+                        f.clone()
+                    };
+                    start_debounce(
+                        &timer,
+                        weak.clone(),
+                        Arc::clone(&state_ref),
+                        Arc::clone(&mode_ref),
+                        Arc::clone(&grid_gen_ref),
+                        backend_key.clone(),
+                        new_filters,
+                        Arc::clone(&selected_ref),
+                    );
+                }
+                chords::Action::ToggleTagFilter => {
+                    let new_filters = {
+                        let mut f = filters_ref.lock().unwrap();
+                        f.tags_enabled = !f.tags_enabled;
+                        push_filter_tags(&w, &f);
+                        f.clone()
+                    };
+                    start_debounce(
+                        &timer,
+                        weak.clone(),
+                        Arc::clone(&state_ref),
+                        Arc::clone(&mode_ref),
+                        Arc::clone(&grid_gen_ref),
+                        backend_key.clone(),
+                        new_filters,
+                        Arc::clone(&selected_ref),
+                    );
+                }
+            }
+        });
+    }
+
+    // --- tag-modal-commit callback: apply typed tags to the focused image ---
+    {
+        let mm_ref = Arc::clone(&mm_buffer);
+        let brushes_ref = Arc::clone(&brushes);
+        let detail_ref = Arc::clone(&detail);
+        let selected_ref = Arc::clone(&selected);
+        let lb_ref = Arc::clone(&lb_index);
+        let state_ref = Arc::clone(&state);
+        let backend_modal = backend.clone();
+        let weak = window.as_weak();
+        window.on_tag_modal_commit(move |text| {
+            let Some(w) = weak.upgrade() else { return };
+            let mut tags = Vec::new();
+            tagset::set_words(&mut tags, text.as_str());
+            let tag_ctx = TagTargetCtx {
+                detail: Arc::clone(&detail_ref),
+                selected: Arc::clone(&selected_ref),
+                lb_index: Arc::clone(&lb_ref),
+                state: Arc::clone(&state_ref),
+            };
+            apply_tags_to_focused(&weak, &backend_modal, &tag_ctx, tags.clone());
+            *mm_ref.lock().unwrap() = tags;
+            push_rail_models(&w, &brushes_ref.lock().unwrap(), &mm_ref.lock().unwrap());
+            w.set_tag_modal_open(false);
+        });
+    }
+
+    // --- tag-modal-cancel callback: close the modal without applying ---
+    {
+        let weak = window.as_weak();
+        window.on_tag_modal_cancel(move || {
+            if let Some(w) = weak.upgrade() {
+                w.set_tag_modal_open(false);
+            }
+        });
+    }
+
     // --- moving-window thumbnail loader ---
     //
     // A single background worker decodes/persists thumbnails (one writer to
@@ -1076,6 +1547,7 @@ fn main() -> Result<()> {
     let _ = model_timer;
     let _ = debounce_timer;
     let _ = loader_timer;
+    let _ = chord_timer;
 
     // T20: Startup gate — restore the persisted session if one exists, else
     // fall back to the T19 default browse-all. A malformed blob reads as
@@ -1095,19 +1567,27 @@ fn main() -> Result<()> {
                 restoring: Arc::clone(&restoring),
                 all_extensions: &all_extensions,
                 size_bounds,
+                brushes: Arc::clone(&brushes),
+                mm_buffer: Arc::clone(&mm_buffer),
             };
             restore_session(st, ctx);
         }
-        Ok(None) => start_default_browse(
-            window.as_weak(),
-            Arc::clone(&state),
-            Arc::clone(&grid_generation),
-            backend.clone(),
-            Arc::clone(&selected),
-            gui_config.resolved_sort(),
-        ),
+        Ok(None) => {
+            init_fresh_rail(&window, &brushes, &mm_buffer);
+            push_filter_tags(&window, &filters.lock().unwrap());
+            start_default_browse(
+                window.as_weak(),
+                Arc::clone(&state),
+                Arc::clone(&grid_generation),
+                backend.clone(),
+                Arc::clone(&selected),
+                gui_config.resolved_sort(),
+            );
+        }
         Err(e) => {
             tracing::warn!("Failed to read persisted session, starting fresh: {e:#}");
+            init_fresh_rail(&window, &brushes, &mm_buffer);
+            push_filter_tags(&window, &filters.lock().unwrap());
             start_default_browse(
                 window.as_weak(),
                 Arc::clone(&state),
@@ -1133,6 +1613,8 @@ fn main() -> Result<()> {
         &detail,
         &search_mode,
         &backend,
+        &brushes,
+        &mm_buffer,
     );
 
     Ok(())
@@ -1149,6 +1631,100 @@ fn sort_key_to_browse_index(key: SortKey) -> i32 {
         SortKey::Name => 0,
         SortKey::Size => 1,
         SortKey::Type => 2,
+    }
+}
+
+/// Slint swatch color for a [`BrushColor`].
+fn brush_swatch(c: imgfind::colors::BrushColor) -> slint::Color {
+    use imgfind::colors::BrushColor;
+    match c {
+        BrushColor::Red => slint::Color::from_rgb_u8(0xd0, 0x4a, 0x4a),
+        BrushColor::Green => slint::Color::from_rgb_u8(0x3a, 0xa6, 0x60),
+        BrushColor::Yellow => slint::Color::from_rgb_u8(0xd2, 0xb0, 0x3a),
+        BrushColor::Purple => slint::Color::from_rgb_u8(0x9a, 0x5a, 0xc8),
+        BrushColor::Blue => slint::Color::from_rgb_u8(0x4a, 0x7c, 0xd0),
+    }
+}
+
+/// Build a `[string]` Slint model from a slice of owned strings.
+fn string_model(items: &[String]) -> ModelRc<SharedString> {
+    let rows: Vec<SharedString> = items.iter().map(|s| s.as_str().into()).collect();
+    ModelRc::new(VecModel::from(rows))
+}
+
+/// Push the brush rows and Most-Recent model into the window. Called after any
+/// rail edit and during restore/fresh-start setup.
+fn push_rail_models(w: &MainWindow, brushes: &[Vec<String>; 5], recent: &[String]) {
+    use imgfind::colors::BrushColor;
+    let rows: Vec<BrushRow> = BrushColor::ALL
+        .iter()
+        .map(|&c| {
+            let tags = &brushes[c.index()];
+            BrushRow {
+                letter: c.letter().into(),
+                color: brush_swatch(c),
+                tags: string_model(tags),
+                joined: tags.join(" ").into(),
+            }
+        })
+        .collect();
+    w.set_brushes(ModelRc::new(VecModel::from(rows)));
+    w.set_recent_tags(string_model(recent));
+}
+
+/// Push the tag list for the currently open detail image into the window.
+fn push_detail_tags(w: &MainWindow, tags: &[String]) {
+    w.set_detail_tags(ModelRc::new(VecModel::from(
+        tags.iter()
+            .map(|s| SharedString::from(s.as_str()))
+            .collect::<Vec<SharedString>>(),
+    )));
+    w.set_detail_tags_joined(tags.join(" ").into());
+}
+
+/// Reflect the tag-filter slice of `filters` into the window: the tag pills,
+/// the joined editor text, the AND/OR mode bool, and the master enable. Called
+/// after every tag-filter edit and during restore/fresh-start setup.
+fn push_filter_tags(w: &MainWindow, f: &Filters) {
+    w.set_filter_tags(string_model(&f.tags));
+    w.set_filter_tags_joined(f.tags.join(" ").into());
+    w.set_tag_match_and(matches!(f.tag_match, TagMatch::AllOf));
+    w.set_tags_enabled(f.tags_enabled);
+}
+
+/// Show the rail with empty contents on a fresh DB (no persisted session). The
+/// derived `UiState::default().rail_visible` is `false`, so the rail must be
+/// turned on explicitly here for first-launch visibility.
+fn init_fresh_rail(
+    window: &MainWindow,
+    brushes: &Arc<Mutex<[Vec<String>; 5]>>,
+    mm_buffer: &Arc<Mutex<Vec<String>>>,
+) {
+    let b = brushes.lock().unwrap();
+    let recent = mm_buffer.lock().unwrap();
+    push_rail_models(window, &b, &recent);
+    window.set_rail_visible(true);
+}
+
+/// Persist just the rail-related fields by merging them into the stored
+/// [`UiState`]. Reads the current persisted state, overwrites the rail fields,
+/// and writes it back, so rail edits survive even though the full session is
+/// only persisted on exit. Failures are logged and swallowed.
+fn persist_rail(
+    backend: &Backend,
+    brushes: &Arc<Mutex<[Vec<String>; 5]>>,
+    mm_buffer: &Arc<Mutex<Vec<String>>>,
+    rail_visible: bool,
+) {
+    let mut st = backend.get_ui_state().ok().flatten().unwrap_or_default();
+    {
+        let b = brushes.lock().unwrap();
+        st.brushes = std::array::from_fn(|i| imgfind::ui_state::TagBrush { tags: b[i].clone() });
+    }
+    st.recent_tags = mm_buffer.lock().unwrap().clone();
+    st.rail_visible = rail_visible;
+    if let Err(e) = backend.set_ui_state(&st) {
+        tracing::warn!("Failed to persist rail state: {e:#}");
     }
 }
 
@@ -1213,6 +1789,8 @@ struct RestoreCtx<'a> {
     restoring: Arc<AtomicBool>,
     all_extensions: &'a [String],
     size_bounds: (i64, i64),
+    brushes: Arc<Mutex<[Vec<String>; 5]>>,
+    mm_buffer: Arc<Mutex<Vec<String>>>,
 }
 
 /// Whether a persisted [`PersistedMode`] is a search (text or similarity), as
@@ -1370,6 +1948,9 @@ fn restore_session(st: UiState, ctx: RestoreCtx<'_>) {
         w.set_size_label(build_size_label(lo, hi, ctx.size_bounds));
         w.set_type_chips(build_chips_model(ctx.all_extensions, &exts));
         w.set_gps_mode(gps_to_mode(st.filters.gps));
+        // Reflect the persisted tag filter into the UI under the `restoring`
+        // guard (no query fired); the result list already reflects these tags.
+        push_filter_tags(&w, &st.filters);
     }
 
     // 6. Detail panel — open it for the selected image (best-effort). Mirror
@@ -1390,6 +1971,7 @@ fn restore_session(st: UiState, ctx: RestoreCtx<'_>) {
             w.set_detail_image(Default::default());
             w.set_detail_meta("Loading\u{2026}".into());
 
+            let path_for_tags = path.clone();
             let weak2 = ctx.weak.clone();
             let backend2 = ctx.backend.clone();
             std::thread::spawn(move || {
@@ -1414,8 +1996,35 @@ fn restore_session(st: UiState, ctx: RestoreCtx<'_>) {
                 })
                 .ok();
             });
+
+            // Load tags for the restored detail panel.
+            {
+                let backend3 = ctx.backend.clone();
+                let weak3 = ctx.weak.clone();
+                std::thread::spawn(move || {
+                    let tags = backend3.tags_for(&path_for_tags).unwrap_or_default();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(w) = weak3.upgrade() {
+                            push_detail_tags(&w, &tags);
+                        }
+                    });
+                });
+            }
         }
     }
+
+    // 8. Left rail — load the brushes/recent buffer from the persisted state,
+    //    push the models, and restore rail visibility.
+    {
+        let mut b = ctx.brushes.lock().unwrap();
+        for (i, slot) in b.iter_mut().enumerate() {
+            *slot = st.brushes[i].tags.clone();
+        }
+        let mut recent = ctx.mm_buffer.lock().unwrap();
+        *recent = st.recent_tags.clone();
+        push_rail_models(&w, &b, &recent);
+    }
+    w.set_rail_visible(st.rail_visible);
 
     ctx.restoring.store(false, Ordering::SeqCst);
 }
@@ -1423,6 +2032,7 @@ fn restore_session(st: UiState, ctx: RestoreCtx<'_>) {
 /// Persist the current session to the DB after the event loop returns. Reads
 /// the live window scroll position plus the shared state holders. Any failure
 /// is logged and swallowed so it can never crash process exit.
+#[allow(clippy::too_many_arguments)]
 fn persist_session(
     window: &MainWindow,
     state: &Arc<Mutex<SearchState>>,
@@ -1431,6 +2041,8 @@ fn persist_session(
     detail: &Arc<Mutex<Option<DetailState>>>,
     search_mode: &Arc<Mutex<SearchMode>>,
     backend: &Backend,
+    brushes: &Arc<Mutex<[Vec<String>; 5]>>,
+    mm_buffer: &Arc<Mutex<Vec<String>>>,
 ) {
     let (result_ids, sort) = {
         let s = state.lock().unwrap();
@@ -1472,6 +2084,12 @@ fn persist_session(
         selected_index: *selected.lock().unwrap(),
         detail_open: detail.lock().unwrap().is_some(),
         scroll_y: window.get_grid_viewport_y(),
+        brushes: {
+            let b = brushes.lock().unwrap();
+            std::array::from_fn(|i| imgfind::ui_state::TagBrush { tags: b[i].clone() })
+        },
+        recent_tags: mm_buffer.lock().unwrap().clone(),
+        rail_visible: window.get_rail_visible(),
     };
 
     if let Err(e) = backend.set_ui_state(&st) {
@@ -1998,6 +2616,90 @@ fn apply_selection_after_results(
     w.set_selected_index(new_sel.map(|i| i as i32).unwrap_or(-1));
 }
 
+/// Relative path of the currently-focused image, in priority order: the
+/// lightbox image if the lightbox is open, else the detail-panel image if the
+/// panel is open, else the selected grid tile. `None` when nothing is focused —
+/// tag-paint actions are then no-ops.
+fn focused_path(
+    detail: &Arc<Mutex<Option<DetailState>>>,
+    selected: &Arc<Mutex<Option<usize>>>,
+    lb_index: &Arc<Mutex<Option<usize>>>,
+    state: &Arc<Mutex<SearchState>>,
+) -> Option<String> {
+    // Copy the index out before locking `state` so we never hold two locks at
+    // once in an order that could deadlock against another path.
+    let lb = *lb_index.lock().unwrap();
+    if let Some(i) = lb {
+        return state.lock().unwrap().results.get(i).map(|r| r.path.clone());
+    }
+    let detail_path = detail.lock().unwrap().as_ref().map(|d| d.path.clone());
+    if let Some(p) = detail_path {
+        return Some(p);
+    }
+    let sel = (*selected.lock().unwrap())?;
+    state
+        .lock()
+        .unwrap()
+        .results
+        .get(sel)
+        .map(|r| r.path.clone())
+}
+
+/// Holders needed to resolve the focused image and refresh the detail panel
+/// after a tag paint. Bundled to keep [`apply_tags_to_focused`] under clippy's
+/// argument limit and the chord call sites readable.
+struct TagTargetCtx {
+    detail: Arc<Mutex<Option<DetailState>>>,
+    selected: Arc<Mutex<Option<usize>>>,
+    lb_index: Arc<Mutex<Option<usize>>>,
+    state: Arc<Mutex<SearchState>>,
+}
+
+/// Apply `tags` to the currently-focused image (see [`focused_path`]).
+///
+/// No-op when nothing is focused or `tags` is empty. The `Backend::add_tag`
+/// writes run on a background thread (never on the UI thread); if the detail
+/// panel is currently showing the same image, its tag list is re-fetched and
+/// pushed back on the UI thread so the pills update live.
+fn apply_tags_to_focused(
+    weak: &Weak<MainWindow>,
+    backend: &Backend,
+    ctx: &TagTargetCtx,
+    tags: Vec<String>,
+) {
+    if tags.is_empty() {
+        return;
+    }
+    let Some(path) = focused_path(&ctx.detail, &ctx.selected, &ctx.lb_index, &ctx.state) else {
+        return;
+    };
+    // Whether the open detail panel is showing this image — decides if we need to
+    // re-push its tag pills after the writes land.
+    let detail_shows_path = ctx
+        .detail
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|d| d.path == path);
+    let backend = backend.clone();
+    let weak = weak.clone();
+    std::thread::spawn(move || {
+        for t in &tags {
+            if let Err(e) = backend.add_tag(&path, t) {
+                tracing::warn!("failed to add tag {t} to {path}: {e}");
+            }
+        }
+        if detail_shows_path {
+            let fresh = backend.tags_for(&path).unwrap_or_default();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(w) = weak.upgrade() {
+                    push_detail_tags(&w, &fresh);
+                }
+            });
+        }
+    });
+}
+
 /// Paths of the `n` neighbors around `center` in arc order (closest first),
 /// skipping the center itself (which is already being loaded by the display path).
 ///
@@ -2384,12 +3086,18 @@ mod sort_sel_tests {
     #[test]
     fn resolve_keep_index_out_of_range() {
         let rows = vec![make_row(1)];
-        assert_eq!(resolve_selection(&SelectAfter::KeepIndex, &rows, Some(5)), None);
+        assert_eq!(
+            resolve_selection(&SelectAfter::KeepIndex, &rows, Some(5)),
+            None
+        );
     }
 
     #[test]
     fn resolve_keep_index_empty() {
-        assert_eq!(resolve_selection(&SelectAfter::KeepIndex, &[], Some(0)), None);
+        assert_eq!(
+            resolve_selection(&SelectAfter::KeepIndex, &[], Some(0)),
+            None
+        );
     }
 
     #[test]
@@ -2424,6 +3132,9 @@ mod sort_sel_tests {
     #[test]
     fn resolve_by_id_none() {
         let rows = vec![make_row(10)];
-        assert_eq!(resolve_selection(&SelectAfter::ById(None), &rows, None), None);
+        assert_eq!(
+            resolve_selection(&SelectAfter::ById(None), &rows, None),
+            None
+        );
     }
 }

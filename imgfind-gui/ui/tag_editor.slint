@@ -1,0 +1,71 @@
+// Text <-> pills tag editor.
+//
+// Display state: shows pills, one per tag. Click any pill's × glyph area to
+// fire remove(tag); click the empty background to enter editing mode.
+//
+// Editing state: a LineEdit pre-filled from `joined` (space-joined tags, set
+// by Rust). Commits raw text via committed-text(string) on Enter OR focus
+// loss; Rust is responsible for splitting on whitespace and deduplicating.
+//
+// Glyph note: the × remove glyph is U+00D7 (Latin-1 MULTIPLICATION SIGN),
+// which the Slint default font covers. Do NOT change it to ✕ (U+2715) or
+// any other symbol-range glyph — those render as tofu boxes.
+import { LineEdit } from "std-widgets.slint";
+
+export component TagEditor inherits Rectangle {
+    in property <[string]> tags;
+    in property <string> joined;          // space-joined tags, set by Rust
+    in property <string> placeholder: "add tags...";
+    in property <color> pill-color: #3d4663;
+    callback committed-text(string);      // raw text; Rust splits + dedupes
+    callback remove(string);
+    // Fired whenever this editor enters/leaves text-edit mode. The root window
+    // listens so it can suppress keyboard chord forwarding while a tag field is
+    // being typed into (otherwise letters like m/f/t/r are stolen by chords).
+    callback editing-changed(bool);
+
+    property <bool> editing: false;
+    changed editing => { root.editing-changed(self.editing); }
+
+    min-height: 28px;
+    border-radius: 4px;
+    background: #232838;
+    border-width: 1px;
+    border-color: #3a4255;
+
+    // --- Display state: pills + click-to-edit background ---
+    if !root.editing: Rectangle {
+        TouchArea { clicked => { root.editing = true; } }
+        HorizontalLayout {
+            padding: 4px;
+            spacing: 4px;
+            alignment: start;
+            for tag in root.tags: Rectangle {
+                width: pill-text.preferred-width + 18px;
+                height: 20px;
+                border-radius: 10px;
+                background: root.pill-color;
+                pill-text := Text {
+                    text: tag + "  ×"; // × = U+00D7, Latin-1, safe for default font
+                    color: #fff;
+                    font-size: 11px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    width: 100%;
+                    height: 100%;
+                }
+                TouchArea { clicked => { root.remove(tag); } }
+            }
+        }
+    }
+
+    // --- Editing state: LineEdit pre-filled from `joined` ---
+    if root.editing: LineEdit {
+        placeholder-text: root.placeholder;
+        init => { self.text = root.joined; self.focus(); }
+        accepted(t) => { root.committed-text(t); root.editing = false; }
+        changed has-focus => {
+            if (!self.has-focus) { root.committed-text(self.text); root.editing = false; }
+        }
+    }
+}

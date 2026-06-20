@@ -99,6 +99,23 @@ Click a thumbnail to open a **detail panel** on the right (512px thumbnail + met
 
 Keyboard navigation: `h/j/k/l` or arrow keys move the selection; `Enter` opens the detail panel; `Space` opens the lightbox; `Esc` closes the panel.
 
+#### Tagging
+
+Assign free-text tags to images from the keyboard (all chord keys work in the grid, detail panel, and lightbox, and are suppressed while typing in a text field or modal):
+
+| Key(s) | Action |
+|--------|--------|
+| `` ` `` | Toggle the **left rail** (five color brushes + Most Recent staging area) |
+| `t` | Open the **add-tags modal** — type space-separated words and press Enter |
+| `m` then `r`/`g`/`y`/`p`/`b` | **Paint** the red/green/yellow/purple/blue brush's tags onto the focused image (also copies them into the Most Recent buffer) |
+| `mm` | **Re-apply** the current Most Recent buffer to the focused image |
+| `f` then `r`/`g`/`y`/`p`/`b` | **Load** that brush's tags into the tag filter (keeps the current AND/OR mode) |
+| `ft` | **Toggle** the tag filter on/off without losing the chosen tags |
+
+Color brushes are pure input shortcuts — a brush is a named set of tags. Applying it assigns those tags as ordinary (colorless) tags; no color is ever stored on the image. Edit a brush's tag set in the left rail; click a tag in the Most Recent area to remove it before re-applying with `mm`. Per-image tags can also be edited directly in the right-side detail panel.
+
+Tag filtering appears as a row in the filter pane below the search bar: a tag editor, an AND/OR toggle (match-all vs. match-any), and a slide Toggle to enable/disable without losing the chosen tags. The tag filter combines with the existing size, type, and GPS filters.
+
 Note: the map view is not yet ported to the GUI.
 
 ### 5. Generate Thumbnails

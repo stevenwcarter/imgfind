@@ -13,6 +13,16 @@ pub struct Filters {
     /// Lowercased extensions without the dot (e.g. "jpg"); empty = all types.
     pub extensions: Vec<String>,
     pub gps: GpsFilter,
+    /// Tag names to filter by; empty = no tag filtering.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Whether all tags must match (AND) or any (OR).
+    #[serde(default)]
+    pub tag_match: TagMatch,
+    /// Master enable for the tag filter (`ft`); when false, tags are ignored
+    /// but retained.
+    #[serde(default)]
+    pub tags_enabled: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,6 +32,28 @@ pub enum GpsFilter {
     Any,
     HasGps,
     NoGps,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TagMatch {
+    /// Image must have every selected tag (AND).
+    #[default]
+    AllOf,
+    /// Image must have at least one selected tag (OR).
+    AnyOf,
+}
+
+impl Filters {
+    /// Copy the tag-filter fields (`tags`, `tag_match`, `tags_enabled`) from
+    /// `other` into `self`. Call this after rebuilding size/type/GPS fields
+    /// from UI state so an active tag filter is preserved rather than reset
+    /// to defaults.
+    pub fn carry_tag_filter_from(&mut self, other: &Filters) {
+        self.tags = other.tags.clone();
+        self.tag_match = other.tag_match;
+        self.tags_enabled = other.tags_enabled;
+    }
 }
 
 /// Build the SQL predicate fragment + ordered bound params for `f`.
@@ -58,6 +90,31 @@ pub fn build_filter_clause(f: &Filters) -> (String, Vec<Value>) {
         }
     }
 
+    if f.tags_enabled && !f.tags.is_empty() {
+        match f.tag_match {
+            TagMatch::AllOf => {
+                for tag in &f.tags {
+                    clauses.push(
+                        "EXISTS (SELECT 1 FROM image_tags it JOIN tags t ON t.id = it.tag_id \
+                         WHERE it.image_id = i.id AND t.name = ?)"
+                            .into(),
+                    );
+                    params.push(Value::Text(tag.clone()));
+                }
+            }
+            TagMatch::AnyOf => {
+                let placeholders = vec!["?"; f.tags.len()].join(", ");
+                clauses.push(format!(
+                    "EXISTS (SELECT 1 FROM image_tags it JOIN tags t ON t.id = it.tag_id \
+                     WHERE it.image_id = i.id AND t.name IN ({placeholders}))"
+                ));
+                for tag in &f.tags {
+                    params.push(Value::Text(tag.clone()));
+                }
+            }
+        }
+    }
+
     if clauses.is_empty() {
         (String::new(), params)
     } else {
@@ -68,6 +125,28 @@ pub fn build_filter_clause(f: &Filters) -> (String, Vec<Value>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn carry_tag_filter_preserves_tags_and_size() {
+        let mut rebuilt = Filters {
+            size_min: Some(1024),
+            size_max: Some(10 * 1024 * 1024),
+            ..Default::default()
+        };
+        let existing = Filters {
+            tags: vec!["a".into(), "b".into()],
+            tag_match: TagMatch::AnyOf,
+            tags_enabled: true,
+            ..Default::default()
+        };
+        rebuilt.carry_tag_filter_from(&existing);
+        assert_eq!(rebuilt.tags, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(rebuilt.tag_match, TagMatch::AnyOf);
+        assert!(rebuilt.tags_enabled);
+        // size fields must be untouched
+        assert_eq!(rebuilt.size_min, Some(1024));
+        assert_eq!(rebuilt.size_max, Some(10 * 1024 * 1024));
+    }
 
     #[test]
     fn empty_filters_yield_no_clause() {
@@ -139,6 +218,7 @@ mod tests {
             size_max: None,
             extensions: vec!["nef".into()],
             gps: GpsFilter::HasGps,
+            ..Default::default()
         };
         let (sql, params) = build_filter_clause(&f);
         assert_eq!(
@@ -149,5 +229,69 @@ mod tests {
             params,
             vec![Value::Integer(10), Value::Text("%.nef".into())]
         );
+    }
+
+    #[test]
+    fn tags_disabled_yields_no_clause() {
+        let f = Filters {
+            tags: vec!["a".into(), "b".into()],
+            tags_enabled: false,
+            ..Default::default()
+        };
+        assert_eq!(build_filter_clause(&f).0, "");
+    }
+
+    #[test]
+    fn tags_all_of_emits_exists_per_tag() {
+        let f = Filters {
+            tags: vec!["a".into(), "b".into()],
+            tag_match: TagMatch::AllOf,
+            tags_enabled: true,
+            ..Default::default()
+        };
+        let (sql, params) = build_filter_clause(&f);
+        assert_eq!(
+            sql,
+            " AND EXISTS (SELECT 1 FROM image_tags it JOIN tags t ON t.id = it.tag_id WHERE it.image_id = i.id AND t.name = ?) AND EXISTS (SELECT 1 FROM image_tags it JOIN tags t ON t.id = it.tag_id WHERE it.image_id = i.id AND t.name = ?)"
+        );
+        assert_eq!(
+            params,
+            vec![Value::Text("a".into()), Value::Text("b".into())]
+        );
+    }
+
+    #[test]
+    fn tags_any_of_emits_single_in_clause() {
+        let f = Filters {
+            tags: vec!["a".into(), "b".into()],
+            tag_match: TagMatch::AnyOf,
+            tags_enabled: true,
+            ..Default::default()
+        };
+        let (sql, params) = build_filter_clause(&f);
+        assert_eq!(
+            sql,
+            " AND EXISTS (SELECT 1 FROM image_tags it JOIN tags t ON t.id = it.tag_id WHERE it.image_id = i.id AND t.name IN (?, ?))"
+        );
+        assert_eq!(
+            params,
+            vec![Value::Text("a".into()), Value::Text("b".into())]
+        );
+    }
+
+    #[test]
+    fn tags_combine_after_size() {
+        let f = Filters {
+            size_min: Some(5),
+            tags: vec!["x".into()],
+            tags_enabled: true,
+            ..Default::default()
+        };
+        let (sql, params) = build_filter_clause(&f);
+        assert_eq!(
+            sql,
+            " AND m.file_size >= ? AND EXISTS (SELECT 1 FROM image_tags it JOIN tags t ON t.id = it.tag_id WHERE it.image_id = i.id AND t.name = ?)"
+        );
+        assert_eq!(params, vec![Value::Integer(5), Value::Text("x".into())]);
     }
 }

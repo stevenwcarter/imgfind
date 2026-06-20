@@ -5,6 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub mod colors;
 pub mod config;
 pub mod database;
 pub mod decode;

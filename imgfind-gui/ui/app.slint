@@ -1,11 +1,23 @@
 import { LineEdit, Button, ScrollView, ComboBox } from "std-widgets.slint";
 import { RangeSlider } from "range_slider.slint";
+// Tag widgets imported here once; do not re-import in other blocks (Slint
+// errors on duplicate imports from the same path).
+import { Toggle } from "toggle.slint";
+import { TagEditor } from "tag_editor.slint";
 
 export struct Tile {
     path: string,
     image: image,
     size-kb: int,
     index: int,
+}
+
+// One left-rail color brush row. Index-aligned with `colors::BrushColor`.
+export struct BrushRow {
+    letter: string,
+    color: color,
+    tags: [string],
+    joined: string,
 }
 
 export component MainWindow inherits Window {
@@ -33,6 +45,8 @@ export component MainWindow inherits Window {
     in property <image> detail-image;
     in property <string> detail-filename;
     in property <string> detail-meta;
+    in property <[string]> detail-tags;
+    in property <string> detail-tags-joined;
 
     // Filter-bar properties (set from Rust; UI emits changes via callbacks below).
     in-out property <float> size-lo: 0.0;
@@ -43,6 +57,11 @@ export component MainWindow inherits Window {
     in property <[{name: string, on: bool}]> type-chips;
     // 0 = Any, 1 = Has GPS, 2 = No GPS.
     in property <int> gps-mode: 0;
+    // Tag filter (set from Rust; UI emits edits via the callbacks below).
+    in property <[string]> filter-tags;
+    in property <string> filter-tags-joined;
+    in property <bool> tag-match-and: true;   // true = AND (AllOf), false = OR
+    in property <bool> tags-enabled: false;
 
     callback search(string);
     callback tile-selected(int);
@@ -51,6 +70,8 @@ export component MainWindow inherits Window {
     callback detail-close();
     callback search-similar();
     callback detail-view-full();
+    callback detail-tag-committed(string);
+    callback detail-tag-remove(string);
     callback lightbox-close();
     callback lightbox-prev();
     callback lightbox-next();
@@ -58,6 +79,11 @@ export component MainWindow inherits Window {
     callback filters-changed();
     callback ext-toggled(string);
     callback gps-mode-changed(int);
+    // Tag-filter callbacks.
+    callback filter-tags-committed(string);
+    callback filter-tag-remove(string);
+    callback tag-match-toggled();
+    callback tags-enabled-toggled();
 
     // Sort selector (set from Rust; see sort-changed / sort-dir-toggled callbacks).
     // ASCII "Asc"/"Desc" for the direction button — no arrow glyphs (tofu in Slint's default font).
@@ -66,6 +92,43 @@ export component MainWindow inherits Window {
     in property <bool> sort-desc: false;
     callback sort-changed();
     callback sort-dir-toggled();
+
+    // Left rail (color brushes + Most Recent buffer). Set from Rust; the rail
+    // emits edits via the callbacks below.
+    in property <bool> rail-visible: true;
+    in property <[BrushRow]> brushes;
+    in property <[string]> recent-tags;
+    callback brush-committed(int, string);   // (brush index, raw text)
+    callback brush-remove(int, string);      // (brush index, tag)
+    callback recent-remove(string);          // remove from Most Recent buffer
+    callback toggle-rail();
+
+    // --- Tag modal + keyboard chords (T9) ---
+    // The centered "Add tags" modal. When open it owns the keyboard (its
+    // LineEdit types freely; Esc cancels, Enter commits).
+    in property <bool> tag-modal-open: false;
+    // True while ANY tag text editor (a TagEditor or the modal) is being typed
+    // into. Rust drives this from a UI-thread counter of active editors; while
+    // set, `capture-key-pressed` rejects keys so the editor types instead of the
+    // chord machine swallowing letters like m/f/t/r/g/y/p/b.
+    in property <bool> chords-suppressed: false;
+    // Single key string forwarded to Rust, which holds the pending-prefix chord
+    // state and decides the resulting action.
+    callback key(string);
+    // Modal commit (raw space-separated text) / cancel.
+    callback tag-modal-commit(string);
+    callback tag-modal-cancel();
+    // Bumped by every TagEditor when it enters/leaves edit mode; Rust keeps the
+    // active-editor count and sets `chords-suppressed`.
+    callback editor-editing-changed(bool);
+
+    // The trigger/prefix keys the chord machine cares about: backtick, the three
+    // trigger letters (t/m/f) and the five brush-completion letters (r/g/y/p/b).
+    // Centralized so the lightbox branch and the grid branch forward the same set.
+    pure function is-chord-key(t: string) -> bool {
+        return t == "`" || t == "t" || t == "m" || t == "f"
+            || t == "r" || t == "g" || t == "y" || t == "p" || t == "b";
+    }
 
     // Keyboard-navigation selection: index into `tiles` of the highlighted tile,
     // or -1 for none. Driven by Rust (mouse click + grid-nav handler).
@@ -132,7 +195,29 @@ export component MainWindow inherits Window {
                 }
                 return reject;
             }
-            // The lightbox is modal: it owns the keyboard while open.
+            // The tag modal owns the keyboard while open: Esc cancels, every
+            // other key is rejected so the modal's LineEdit types it.
+            if (root.tag-modal-open) {
+                if (event.text == Key.Escape) {
+                    root.tag-modal-cancel();
+                    return accept;
+                }
+                return reject;
+            }
+            // A tag text editor (brush / Most Recent / detail / filter editor) is
+            // being typed into: let it have every key so chord letters don't get
+            // stolen. Escape blurs back to app-keys so chords/nav resume.
+            if (root.chords-suppressed) {
+                if (event.text == Key.Escape) {
+                    app-keys.focus();
+                    return accept;
+                }
+                return reject;
+            }
+            // The lightbox is modal: it owns the keyboard while open. Its own
+            // nav keys (Esc / h / l / arrows) win first; the tag chord keys
+            // (t/m/f/`/r/g/y/p/b) are then forwarded so tagging works on the
+            // lightbox image too; anything else is swallowed (modal).
             if (root.lightbox-open) {
                 if (event.text == Key.Escape) {
                     root.lightbox-close();
@@ -146,6 +231,19 @@ export component MainWindow inherits Window {
                     root.lightbox-next();
                     return accept;
                 }
+                if (root.is-chord-key(event.text)) {
+                    root.key(event.text);
+                    return accept;
+                }
+                return accept;
+            }
+            // Tag chord keys: backtick, the t/m/f triggers, and the brush
+            // completion letters. Forward to Rust, which holds the pending-prefix
+            // state. None of these collide with grid nav (hjkl/arrows/Enter/Space/
+            // Esc), so forwarding them here is safe; a bare brush letter with no
+            // pending prefix resolves to no action in Rust.
+            if (root.is-chord-key(event.text)) {
+                root.key(event.text);
                 return accept;
             }
             // Grid navigation.
@@ -180,301 +278,436 @@ export component MainWindow inherits Window {
             return reject;
         }
 
-        VerticalLayout {
-            padding: 16px;
-            spacing: 12px;
-
-            HorizontalLayout {
-                spacing: 8px;
-                search-input := LineEdit {
-                    text <=> root.query-text;
-                    placeholder-text: root.can-search ? "Search images..." : "Loading model...";
-                    enabled: root.can-search;
-                    // Return focus to app-keys after submitting so grid keys work.
-                    accepted(text) => { root.search(text); app-keys.focus(); }
-                }
-            }
-
-            // --- Filter bar ---
-            HorizontalLayout {
-                spacing: 12px;
-                alignment: start;
-
-                // Size range slider + label.
-                RangeSlider {
-                    width: 180px;
-                    lo <=> root.size-lo;
-                    hi <=> root.size-hi;
-                    range-changed(lo, hi) => {
-                        root.size-lo = lo;
-                        root.size-hi = hi;
-                        root.filters-changed();
+        HorizontalLayout {
+            // --- Left rail: color brushes + Most Recent buffer ---
+            if root.rail-visible: Rectangle {
+                width: 240px;
+                background: #1a1f29;
+                border-width: 1px;
+                border-color: #3a4255;
+                VerticalLayout {
+                    padding: 10px;
+                    spacing: 8px;
+                    Text {
+                        text: "Brushes";
+                        color: #9aa4b2;
+                        font-size: 13px;
                     }
-                }
-                Text {
-                    text: root.size-label;
-                    color: #9aa4b2;
-                    vertical-alignment: center;
-                }
-
-                // File-type toggle chips (struct model: [{name, on}]).
-                for chip in root.type-chips: Rectangle {
-                    width: chip-label.preferred-width + 16px;
-                    height: 24px;
-                    border-radius: 4px;
-                    background: chip.on ? #3a6 : #2d3446;
-                    border-width: 1px;
-                    border-color: chip.on ? #3a6 : #3a4255;
-
-                    chip-label := Text {
-                        text: chip.name;
-                        color: chip.on ? #fff : #9aa4b2;
-                        font-size: 12px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                        width: 100%;
-                        height: 100%;
-                    }
-
-                    TouchArea {
-                        width: 100%;
-                        height: 100%;
-                        clicked => { root.ext-toggled(chip.name); }
-                    }
-                }
-
-                // GPS 3-way control: Any / Has GPS / No GPS.
-                HorizontalLayout {
-                    spacing: 2px;
-
-                    Rectangle {
-                        width: gps-any-text.preferred-width + 16px;
-                        height: 24px;
-                        border-radius: 4px;
-                        background: root.gps-mode == 0 ? #3a6 : #2d3446;
-                        border-width: 1px;
-                        border-color: root.gps-mode == 0 ? #3a6 : #3a4255;
-                        gps-any-text := Text {
-                            text: "Any";
-                            color: root.gps-mode == 0 ? #fff : #9aa4b2;
-                            font-size: 12px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                            width: 100%;
-                            height: 100%;
-                        }
-                        TouchArea {
-                            width: 100%;
-                            height: 100%;
-                            clicked => { root.gps-mode-changed(0); }
-                        }
-                    }
-
-                    Rectangle {
-                        width: gps-has-text.preferred-width + 16px;
-                        height: 24px;
-                        border-radius: 4px;
-                        background: root.gps-mode == 1 ? #3a6 : #2d3446;
-                        border-width: 1px;
-                        border-color: root.gps-mode == 1 ? #3a6 : #3a4255;
-                        gps-has-text := Text {
-                            text: "Has GPS";
-                            color: root.gps-mode == 1 ? #fff : #9aa4b2;
-                            font-size: 12px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                            width: 100%;
-                            height: 100%;
-                        }
-                        TouchArea {
-                            width: 100%;
-                            height: 100%;
-                            clicked => { root.gps-mode-changed(1); }
-                        }
-                    }
-
-                    Rectangle {
-                        width: gps-no-text.preferred-width + 16px;
-                        height: 24px;
-                        border-radius: 4px;
-                        background: root.gps-mode == 2 ? #3a6 : #2d3446;
-                        border-width: 1px;
-                        border-color: root.gps-mode == 2 ? #3a6 : #3a4255;
-                        gps-no-text := Text {
-                            text: "No GPS";
-                            color: root.gps-mode == 2 ? #fff : #9aa4b2;
-                            font-size: 12px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                            width: 100%;
-                            height: 100%;
-                        }
-                        TouchArea {
-                            width: 100%;
-                            height: 100%;
-                            clicked => { root.gps-mode-changed(2); }
-                        }
-                    }
-                }
-            }
-
-            // --- Sort bar ---
-            HorizontalLayout {
-                spacing: 8px;
-                alignment: start;
-                Text {
-                    text: "Sort:";
-                    color: #9aa4b2;
-                    vertical-alignment: center;
-                }
-                ComboBox {
-                    model: root.sort-options;
-                    current-index <=> root.sort-index;
-                    selected(_) => { root.sort-changed(); }
-                }
-                // ASCII "Asc"/"Desc" — no arrow glyphs (tofu in the default Slint font).
-                sort-dir-btn := TouchArea {
-                    width: sort-dir-text.preferred-width + 16px;
-                    height: 28px;
-                    clicked => { root.sort-dir-toggled(); }
-                    Rectangle {
-                        background: sort-dir-btn.has-hover ? #3a4a65 : #2d3446;
-                        border-radius: 4px;
-                        border-width: 1px;
-                        border-color: #3a4255;
-                        width: 100%;
-                        height: 100%;
-                        sort-dir-text := Text {
-                            text: root.sort-desc ? "Desc" : "Asc";
-                            color: #e0e4ed;
-                            font-size: 13px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
-            }
-
-            Text {
-                text: root.status;
-                color: #9aa4b2;
-                visible: root.status != "";
-            }
-
-            HorizontalLayout {
-                spacing: 0px;
-                vertical-stretch: 1;
-
-                // Grid area — grows to fill all available width when panel is closed.
-                grid-area := Rectangle {
-                    horizontal-stretch: 1;
-                    background: transparent;
-
-                    grid-scroll := ScrollView {
-                        width: 100%;
-                        height: 100%;
-                        viewport-height: root.grid-height;
-                        viewport-width: root.cols * root.tile-stride;
-                        viewport-y <=> root.grid-viewport-y;
-
-                        for tile in root.tiles: Rectangle {
-                            // Position by global index so the tile lands in the
-                            // correct row/col even when the window doesn't start
-                            // at 0 (T14 will deliver a non-zero-offset slice).
-                            x: mod(tile.index, root.cols) * root.tile-stride;
-                            y: floor(tile.index / root.cols) * root.tile-stride;
-                            width: root.tile-size;
-                            height: root.tile-size;
-                            border-radius: 6px;
-                            clip: true;
-                            background: #2d3446;
-                            border-width: tile.index == root.selected-index ? 3px : 0px;
-                            border-color: #5b8cff;
-
-                            Image {
-                                source: tile.image;
-                                image-fit: cover;
+                    for brush[i] in root.brushes: HorizontalLayout {
+                        spacing: 6px;
+                        Rectangle {
+                            width: 20px;
+                            height: 20px;
+                            border-radius: 10px;
+                            background: brush.color;
+                            Text {
+                                text: brush.letter;
+                                color: #fff;
+                                font-size: 12px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
                                 width: 100%;
                                 height: 100%;
                             }
+                        }
+                        TagEditor {
+                            horizontal-stretch: 1;
+                            tags: brush.tags;
+                            joined: brush.joined;
+                            pill-color: brush.color;
+                            committed-text(t) => {
+                                root.brush-committed(i, t);
+                            }
+                            remove(tag) => {
+                                root.brush-remove(i, tag);
+                            }
+                            editing-changed(e) => {
+                                root.editor-editing-changed(e);
+                            }
+                        }
+                    }
+                    Rectangle {
+                        height: 1px;
+                        background: #3a4255;
+                    }
+                    Text {
+                        text: "Most Recent";
+                        color: #9aa4b2;
+                        font-size: 13px;
+                    }
+                    TagEditor {
+                        tags: root.recent-tags;
+                        joined: "";
+                        placeholder: "(applied tags appear here)";
+                        remove(tag) => {
+                            root.recent-remove(tag);
+                        }
+                        editing-changed(e) => {
+                            root.editor-editing-changed(e);
+                        }
+                    }
+                }
+            }
 
+            // --- Main column (search, filters, sort, grid, detail panel) ---
+            VerticalLayout {
+                padding: 16px;
+                spacing: 12px;
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    search-input := LineEdit {
+                        text <=> root.query-text;
+                        placeholder-text: root.can-search ? "Search images..." : "Loading model...";
+                        enabled: root.can-search;
+                        // Return focus to app-keys after submitting so grid keys work.
+                        accepted(text) => { root.search(text); app-keys.focus(); }
+                    }
+                }
+
+                // --- Filter bar ---
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: start;
+
+                    // Size range slider + label.
+                    RangeSlider {
+                        width: 180px;
+                        lo <=> root.size-lo;
+                        hi <=> root.size-hi;
+                        range-changed(lo, hi) => {
+                            root.size-lo = lo;
+                            root.size-hi = hi;
+                            root.filters-changed();
+                        }
+                    }
+                    Text {
+                        text: root.size-label;
+                        color: #9aa4b2;
+                        vertical-alignment: center;
+                    }
+
+                    // File-type toggle chips (struct model: [{name, on}]).
+                    for chip in root.type-chips: Rectangle {
+                        width: chip-label.preferred-width + 16px;
+                        height: 24px;
+                        border-radius: 4px;
+                        background: chip.on ? #3a6 : #2d3446;
+                        border-width: 1px;
+                        border-color: chip.on ? #3a6 : #3a4255;
+
+                        chip-label := Text {
+                            text: chip.name;
+                            color: chip.on ? #fff : #9aa4b2;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            width: 100%;
+                            height: 100%;
+                        }
+
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            clicked => { root.ext-toggled(chip.name); }
+                        }
+                    }
+
+                    // GPS 3-way control: Any / Has GPS / No GPS.
+                    HorizontalLayout {
+                        spacing: 2px;
+
+                        Rectangle {
+                            width: gps-any-text.preferred-width + 16px;
+                            height: 24px;
+                            border-radius: 4px;
+                            background: root.gps-mode == 0 ? #3a6 : #2d3446;
+                            border-width: 1px;
+                            border-color: root.gps-mode == 0 ? #3a6 : #3a4255;
+                            gps-any-text := Text {
+                                text: "Any";
+                                color: root.gps-mode == 0 ? #fff : #9aa4b2;
+                                font-size: 12px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                width: 100%;
+                                height: 100%;
+                            }
                             TouchArea {
                                 width: 100%;
                                 height: 100%;
-                                // Return keyboard focus to app-keys when the user
-                                // clicks into the grid (e.g. after typing a query),
-                                // so vim/arrow navigation works immediately.
-                                clicked => { root.tile-selected(tile.index); app-keys.focus(); }
-                                double-clicked => { root.tile-activated(tile.index); }
-                                pointer-event(e) => {
-                                    if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
-                                        root.tile-open-external(tile.index);
+                                clicked => { root.gps-mode-changed(0); }
+                            }
+                        }
+
+                        Rectangle {
+                            width: gps-has-text.preferred-width + 16px;
+                            height: 24px;
+                            border-radius: 4px;
+                            background: root.gps-mode == 1 ? #3a6 : #2d3446;
+                            border-width: 1px;
+                            border-color: root.gps-mode == 1 ? #3a6 : #3a4255;
+                            gps-has-text := Text {
+                                text: "Has GPS";
+                                color: root.gps-mode == 1 ? #fff : #9aa4b2;
+                                font-size: 12px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                width: 100%;
+                                height: 100%;
+                            }
+                            TouchArea {
+                                width: 100%;
+                                height: 100%;
+                                clicked => { root.gps-mode-changed(1); }
+                            }
+                        }
+
+                        Rectangle {
+                            width: gps-no-text.preferred-width + 16px;
+                            height: 24px;
+                            border-radius: 4px;
+                            background: root.gps-mode == 2 ? #3a6 : #2d3446;
+                            border-width: 1px;
+                            border-color: root.gps-mode == 2 ? #3a6 : #3a4255;
+                            gps-no-text := Text {
+                                text: "No GPS";
+                                color: root.gps-mode == 2 ? #fff : #9aa4b2;
+                                font-size: 12px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                width: 100%;
+                                height: 100%;
+                            }
+                            TouchArea {
+                                width: 100%;
+                                height: 100%;
+                                clicked => { root.gps-mode-changed(2); }
+                            }
+                        }
+                    }
+                }
+
+                // --- Tag filter row ---
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    Text {
+                        text: "Tags:";
+                        color: #9aa4b2;
+                        vertical-alignment: center;
+                    }
+                    TagEditor {
+                        width: 240px;
+                        tags: root.filter-tags;
+                        joined: root.filter-tags-joined;
+                        placeholder: "filter by tags...";
+                        committed-text(t) => { root.filter-tags-committed(t); }
+                        remove(tag) => { root.filter-tag-remove(tag); }
+                        editing-changed(e) => { root.editor-editing-changed(e); }
+                    }
+                    // AND/OR toggle button (ASCII text — no glyphs).
+                    Rectangle {
+                        width: andor-text.preferred-width + 16px;
+                        height: 24px;
+                        border-radius: 4px;
+                        background: #2d3446;
+                        border-width: 1px;
+                        border-color: #3a4255;
+                        andor-text := Text {
+                            text: root.tag-match-and ? "AND" : "OR";
+                            color: #cfd6e2;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            width: 100%;
+                            height: 100%;
+                        }
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            clicked => { root.tag-match-toggled(); }
+                        }
+                    }
+                    Toggle {
+                        on: root.tags-enabled;
+                        toggled(v) => { root.tags-enabled-toggled(); }
+                    }
+                    Text {
+                        text: "filter on";
+                        color: #9aa4b2;
+                        vertical-alignment: center;
+                        font-size: 12px;
+                    }
+                }
+
+                // --- Sort bar ---
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    Text {
+                        text: "Sort:";
+                        color: #9aa4b2;
+                        vertical-alignment: center;
+                    }
+                    ComboBox {
+                        model: root.sort-options;
+                        current-index <=> root.sort-index;
+                        selected(_) => { root.sort-changed(); }
+                    }
+                    // ASCII "Asc"/"Desc" — no arrow glyphs (tofu in the default Slint font).
+                    sort-dir-btn := TouchArea {
+                        width: sort-dir-text.preferred-width + 16px;
+                        height: 28px;
+                        clicked => { root.sort-dir-toggled(); }
+                        Rectangle {
+                            background: sort-dir-btn.has-hover ? #3a4a65 : #2d3446;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: #3a4255;
+                            width: 100%;
+                            height: 100%;
+                            sort-dir-text := Text {
+                                text: root.sort-desc ? "Desc" : "Asc";
+                                color: #e0e4ed;
+                                font-size: 13px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                Text {
+                    text: root.status;
+                    color: #9aa4b2;
+                    visible: root.status != "";
+                }
+
+                HorizontalLayout {
+                    spacing: 0px;
+                    vertical-stretch: 1;
+
+                    // Grid area — grows to fill all available width when panel is closed.
+                    grid-area := Rectangle {
+                        horizontal-stretch: 1;
+                        background: transparent;
+
+                        grid-scroll := ScrollView {
+                            width: 100%;
+                            height: 100%;
+                            viewport-height: root.grid-height;
+                            viewport-width: root.cols * root.tile-stride;
+                            viewport-y <=> root.grid-viewport-y;
+
+                            for tile in root.tiles: Rectangle {
+                                // Position by global index so the tile lands in the
+                                // correct row/col even when the window doesn't start
+                                // at 0 (T14 will deliver a non-zero-offset slice).
+                                x: mod(tile.index, root.cols) * root.tile-stride;
+                                y: floor(tile.index / root.cols) * root.tile-stride;
+                                width: root.tile-size;
+                                height: root.tile-size;
+                                border-radius: 6px;
+                                clip: true;
+                                background: #2d3446;
+                                border-width: tile.index == root.selected-index ? 3px : 0px;
+                                border-color: #5b8cff;
+
+                                Image {
+                                    source: tile.image;
+                                    image-fit: cover;
+                                    width: 100%;
+                                    height: 100%;
+                                }
+
+                                TouchArea {
+                                    width: 100%;
+                                    height: 100%;
+                                    // Return keyboard focus to app-keys when the user
+                                    // clicks into the grid (e.g. after typing a query),
+                                    // so vim/arrow navigation works immediately.
+                                    clicked => { root.tile-selected(tile.index); app-keys.focus(); }
+                                    double-clicked => { root.tile-activated(tile.index); }
+                                    pointer-event(e) => {
+                                        if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                                            root.tile-open-external(tile.index);
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-                }
 
-                // Detail panel — fixed 340 px, only present when detail-open.
-                if root.detail-open: Rectangle {
-                    width: 340px;
-                    background: #252b3a;
+                    // Detail panel — fixed 340 px, only present when detail-open.
+                    if root.detail-open: Rectangle {
+                        width: 340px;
+                        background: #252b3a;
 
-                    // Left border divider rendered as a thin child rectangle.
-                    Rectangle {
-                        x: 0px;
-                        y: 0px;
-                        width: 1px;
-                        height: parent.height;
-                        background: #3a4255;
-                    }
+                        // Left border divider rendered as a thin child rectangle.
+                        Rectangle {
+                            x: 0px;
+                            y: 0px;
+                            width: 1px;
+                            height: parent.height;
+                            background: #3a4255;
+                        }
 
-                    VerticalLayout {
-                        padding: 12px;
-                        spacing: 8px;
+                        VerticalLayout {
+                            padding: 12px;
+                            spacing: 8px;
 
-                        HorizontalLayout {
-                            alignment: end;
-                            Button {
-                                // U+00D7 (×, Latin-1) renders in Slint's default font;
-                                // the previous ✕ (U+2715) had no glyph and showed as tofu.
-                                text: "×";
-                                clicked => { root.detail-close(); app-keys.focus(); }
+                            HorizontalLayout {
+                                alignment: end;
+                                Button {
+                                    // U+00D7 (×, Latin-1) renders in Slint's default font;
+                                    // the previous ✕ (U+2715) had no glyph and showed as tofu.
+                                    text: "×";
+                                    clicked => { root.detail-close(); app-keys.focus(); }
+                                }
                             }
-                        }
 
-                        Image {
-                            source: root.detail-image;
-                            image-fit: contain;
-                            height: 300px;
-                        }
+                            Image {
+                                source: root.detail-image;
+                                image-fit: contain;
+                                height: 300px;
+                            }
 
-                        Text {
-                            text: root.detail-filename;
-                            color: #e0e4ed;
-                            font-size: 13px;
-                            wrap: word-wrap;
-                        }
+                            Text {
+                                text: root.detail-filename;
+                                color: #e0e4ed;
+                                font-size: 13px;
+                                wrap: word-wrap;
+                            }
 
-                        Text {
-                            text: root.detail-meta;
-                            color: #9aa4b2;
-                            font-size: 12px;
-                            wrap: word-wrap;
-                        }
+                            Text {
+                                text: root.detail-meta;
+                                color: #9aa4b2;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
 
-                        Button {
-                            text: "View full";
-                            // Opens the lightbox for the seed image by path, not by
-                            // grid index, so it stays valid after a similar-search
-                            // replaces the tile grid.
-                            clicked => { root.detail-view-full(); app-keys.focus(); }
-                        }
+                            Text { text: "Tags"; color: #9aa4b2; font-size: 12px; }
+                            TagEditor {
+                                tags: root.detail-tags;
+                                joined: root.detail-tags-joined;
+                                committed-text(t) => { root.detail-tag-committed(t); }
+                                remove(tag) => { root.detail-tag-remove(tag); }
+                                editing-changed(e) => { root.editor-editing-changed(e); }
+                            }
 
-                        Button {
-                            text: "Search similar";
-                            clicked => { root.search-similar(); app-keys.focus(); }
+                            Button {
+                                text: "View full";
+                                // Opens the lightbox for the seed image by path, not by
+                                // grid index, so it stays valid after a similar-search
+                                // replaces the tile grid.
+                                clicked => { root.detail-view-full(); app-keys.focus(); }
+                            }
+
+                            Button {
+                                text: "Search similar";
+                                clicked => { root.search-similar(); app-keys.focus(); }
+                            }
                         }
                     }
                 }
@@ -550,6 +783,50 @@ export component MainWindow inherits Window {
                         font-size: 28px;
                         horizontal-alignment: center;
                         vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // --- Tag modal overlay ---
+        // Centered "Add tags" prompt. The backdrop click cancels; the LineEdit
+        // grabs focus on init and types freely (capture-key-pressed's
+        // tag-modal-open branch rejects keys so the field receives them). Commit
+        // (Enter) and cancel (Esc / backdrop) both return focus to app-keys so
+        // chords/nav resume.
+        if root.tag-modal-open: Rectangle {
+            width: root.width;
+            height: root.height;
+            background: #000000cc;
+
+            TouchArea {
+                width: 100%;
+                height: 100%;
+                clicked => { root.tag-modal-cancel(); app-keys.focus(); }
+            }
+
+            Rectangle {
+                width: 420px;
+                height: 90px;
+                background: #252b3a;
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: #3a4255;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+
+                VerticalLayout {
+                    padding: 14px;
+                    spacing: 8px;
+                    Text {
+                        text: "Add tags (space-separated)";
+                        color: #cfd6e2;
+                        font-size: 13px;
+                    }
+                    modal-input := LineEdit {
+                        placeholder-text: "beach sunset ...";
+                        init => { self.focus(); }
+                        accepted(t) => { root.tag-modal-commit(t); app-keys.focus(); }
                     }
                 }
             }

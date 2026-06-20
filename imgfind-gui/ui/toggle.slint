@@ -1,0 +1,26 @@
+// A web-style slide toggle: a rounded pill track with a circular knob that
+// animates left (off) / right (on). Grey track off, dark-green on.
+export component Toggle inherits Rectangle {
+    in property <bool> on: false;
+    callback toggled(bool);
+
+    width: 40px;
+    height: 22px;
+    border-radius: self.height / 2;
+    background: root.on ? #2e7d46 : #3a4255;
+    animate background { duration: 120ms; }
+
+    knob := Rectangle {
+        width: 16px;
+        height: 16px;
+        border-radius: self.width / 2;
+        background: #f0f0f0;
+        y: (parent.height - self.height) / 2;
+        x: root.on ? parent.width - self.width - 3px : 3px;
+        animate x { duration: 120ms; }
+    }
+
+    TouchArea {
+        clicked => { root.toggled(!root.on); }
+    }
+}
