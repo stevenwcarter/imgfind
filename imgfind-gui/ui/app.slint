@@ -45,6 +45,8 @@ export component MainWindow inherits Window {
     in property <image> detail-image;
     in property <string> detail-filename;
     in property <string> detail-meta;
+    in property <[string]> detail-tags;
+    in property <string> detail-tags-joined;
 
     // Filter-bar properties (set from Rust; UI emits changes via callbacks below).
     in-out property <float> size-lo: 0.0;
@@ -63,6 +65,8 @@ export component MainWindow inherits Window {
     callback detail-close();
     callback search-similar();
     callback detail-view-full();
+    callback detail-tag-committed(string);
+    callback detail-tag-remove(string);
     callback lightbox-close();
     callback lightbox-prev();
     callback lightbox-next();
@@ -550,6 +554,14 @@ export component MainWindow inherits Window {
                                 color: #9aa4b2;
                                 font-size: 12px;
                                 wrap: word-wrap;
+                            }
+
+                            Text { text: "Tags"; color: #9aa4b2; font-size: 12px; }
+                            TagEditor {
+                                tags: root.detail-tags;
+                                joined: root.detail-tags-joined;
+                                committed-text(t) => { root.detail-tag-committed(t); }
+                                remove(tag) => { root.detail-tag-remove(tag); }
                             }
 
                             Button {

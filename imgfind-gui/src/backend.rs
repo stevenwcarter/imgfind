@@ -174,7 +174,6 @@ impl Backend {
     }
 
     /// Assign `tag` to the image at `rel_path` (creates the tag if new).
-    #[allow(dead_code)] // consumed by upcoming tag-panel task; not yet wired into main.rs
     pub fn add_tag(&self, rel_path: &str, tag: &str) -> Result<()> {
         self.db
             .tag_image(&Self::rel(rel_path), tag)
@@ -182,7 +181,6 @@ impl Backend {
     }
 
     /// Remove `tag` from the image at `rel_path`.
-    #[allow(dead_code)] // consumed by upcoming tag-panel task; not yet wired into main.rs
     pub fn remove_tag(&self, rel_path: &str, tag: &str) -> Result<()> {
         self.db
             .untag_image(&Self::rel(rel_path), tag)
@@ -190,7 +188,6 @@ impl Backend {
     }
 
     /// Tags currently assigned to the image at `rel_path`.
-    #[allow(dead_code)] // consumed by upcoming tag-panel task; not yet wired into main.rs
     pub fn tags_for(&self, rel_path: &str) -> Result<Vec<String>> {
         self.db
             .tags_for_image(&Self::rel(rel_path))

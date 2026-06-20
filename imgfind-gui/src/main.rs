@@ -454,6 +454,7 @@ fn main() -> Result<()> {
             }
 
             // Load thumbnail + metadata on a background thread.
+            let path_for_tags = path.clone();
             let weak2 = weak.clone();
             let backend2 = backend_detail.clone();
             std::thread::spawn(move || {
@@ -494,6 +495,20 @@ fn main() -> Result<()> {
                     Arc::clone(&preload_gen_detail),
                     my_gen,
                 );
+            }
+
+            // Load tags on a background thread; marshal back to the UI thread.
+            {
+                let backend3 = backend_detail.clone();
+                let w = weak.clone();
+                std::thread::spawn(move || {
+                    let tags = backend3.tags_for(&path_for_tags).unwrap_or_default();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(w) = w.upgrade() {
+                            push_detail_tags(&w, &tags);
+                        }
+                    });
+                });
             }
         });
     }
@@ -569,6 +584,64 @@ fn main() -> Result<()> {
             if let Some(w) = weak.upgrade() {
                 w.set_detail_open(false);
             }
+        });
+    }
+
+    // --- detail-tag-committed callback: diff desired vs current, apply adds/removes ---
+    {
+        let backend = backend.clone();
+        let detail_ref = Arc::clone(&detail);
+        let w = window.as_weak();
+        window.on_detail_tag_committed(move |text| {
+            let Some(path) = detail_ref.lock().unwrap().as_ref().map(|d| d.path.clone()) else {
+                return;
+            };
+            let backend = backend.clone();
+            let w = w.clone();
+            std::thread::spawn(move || {
+                let mut desired = Vec::new();
+                tagset::set_words(&mut desired, text.as_str());
+                let current = backend.tags_for(&path).unwrap_or_default();
+                for t in &desired {
+                    if !current.contains(t) {
+                        let _ = backend.add_tag(&path, t);
+                    }
+                }
+                for t in &current {
+                    if !desired.contains(t) {
+                        let _ = backend.remove_tag(&path, t);
+                    }
+                }
+                let tags = backend.tags_for(&path).unwrap_or_default();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(w) = w.upgrade() {
+                        push_detail_tags(&w, &tags);
+                    }
+                });
+            });
+        });
+    }
+
+    // --- detail-tag-remove callback: remove one tag from the current image ---
+    {
+        let backend = backend.clone();
+        let detail_ref = Arc::clone(&detail);
+        let w = window.as_weak();
+        window.on_detail_tag_remove(move |tag| {
+            let Some(path) = detail_ref.lock().unwrap().as_ref().map(|d| d.path.clone()) else {
+                return;
+            };
+            let backend = backend.clone();
+            let w = w.clone();
+            std::thread::spawn(move || {
+                let _ = backend.remove_tag(&path, tag.as_str());
+                let tags = backend.tags_for(&path).unwrap_or_default();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(w) = w.upgrade() {
+                        push_detail_tags(&w, &tags);
+                    }
+                });
+            });
         });
     }
 
@@ -1276,6 +1349,16 @@ fn push_rail_models(w: &MainWindow, brushes: &[Vec<String>; 5], recent: &[String
     w.set_recent_tags(string_model(recent));
 }
 
+/// Push the tag list for the currently open detail image into the window.
+fn push_detail_tags(w: &MainWindow, tags: &[String]) {
+    w.set_detail_tags(ModelRc::new(VecModel::from(
+        tags.iter()
+            .map(|s| SharedString::from(s.as_str()))
+            .collect::<Vec<SharedString>>(),
+    )));
+    w.set_detail_tags_joined(tags.join(" ").into());
+}
+
 /// Show the rail with empty contents on a fresh DB (no persisted session). The
 /// derived `UiState::default().rail_visible` is `false`, so the rail must be
 /// turned on explicitly here for first-launch visibility.
@@ -1552,6 +1635,7 @@ fn restore_session(st: UiState, ctx: RestoreCtx<'_>) {
             w.set_detail_image(Default::default());
             w.set_detail_meta("Loading\u{2026}".into());
 
+            let path_for_tags = path.clone();
             let weak2 = ctx.weak.clone();
             let backend2 = ctx.backend.clone();
             std::thread::spawn(move || {
@@ -1576,6 +1660,20 @@ fn restore_session(st: UiState, ctx: RestoreCtx<'_>) {
                 })
                 .ok();
             });
+
+            // Load tags for the restored detail panel.
+            {
+                let backend3 = ctx.backend.clone();
+                let weak3 = ctx.weak.clone();
+                std::thread::spawn(move || {
+                    let tags = backend3.tags_for(&path_for_tags).unwrap_or_default();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(w) = weak3.upgrade() {
+                            push_detail_tags(&w, &tags);
+                        }
+                    });
+                });
+            }
         }
     }
 
