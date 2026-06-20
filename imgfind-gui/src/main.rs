@@ -592,8 +592,19 @@ fn main() -> Result<()> {
             // (potentially slower) metadata read: each posts its own
             // `invoke_from_event_loop`.
             let path_for_tags = path.clone();
-            spawn_detail_image(weak.clone(), backend_detail.clone(), path.clone(), cached);
-            spawn_detail_meta(weak.clone(), backend_detail.clone(), path.clone());
+            spawn_detail_image(
+                weak.clone(),
+                backend_detail.clone(),
+                Arc::clone(&detail_ref),
+                path.clone(),
+                cached,
+            );
+            spawn_detail_meta(
+                weak.clone(),
+                backend_detail.clone(),
+                Arc::clone(&detail_ref),
+                path.clone(),
+            );
 
             // Preload neighbors at 512px for fast detail-panel switching, also
             // decoding + caching them on the UI thread so back/forward lands an
@@ -617,10 +628,13 @@ fn main() -> Result<()> {
             {
                 let backend3 = backend_detail.clone();
                 let w = weak.clone();
+                let detail3 = Arc::clone(&detail_ref);
                 std::thread::spawn(move || {
                     let tags = backend3.tags_for(&path_for_tags).unwrap_or_default();
                     let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(w) = w.upgrade() {
+                        if detail_shows(&detail3.lock().unwrap(), &path_for_tags)
+                            && let Some(w) = w.upgrade()
+                        {
                             push_detail_tags(&w, &tags);
                         }
                     });
@@ -2302,17 +2316,31 @@ fn restore_session(st: UiState, ctx: RestoreCtx<'_>) {
             w.set_detail_meta("Loading\u{2026}".into());
 
             let path_for_tags = path.clone();
-            spawn_detail_image(ctx.weak.clone(), ctx.backend.clone(), path.clone(), cached);
-            spawn_detail_meta(ctx.weak.clone(), ctx.backend.clone(), path.clone());
+            spawn_detail_image(
+                ctx.weak.clone(),
+                ctx.backend.clone(),
+                Arc::clone(&ctx.detail),
+                path.clone(),
+                cached,
+            );
+            spawn_detail_meta(
+                ctx.weak.clone(),
+                ctx.backend.clone(),
+                Arc::clone(&ctx.detail),
+                path.clone(),
+            );
 
             // Load tags for the restored detail panel.
             {
                 let backend3 = ctx.backend.clone();
                 let weak3 = ctx.weak.clone();
+                let detail3 = Arc::clone(&ctx.detail);
                 std::thread::spawn(move || {
                     let tags = backend3.tags_for(&path_for_tags).unwrap_or_default();
                     let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(w) = weak3.upgrade() {
+                        if detail_shows(&detail3.lock().unwrap(), &path_for_tags)
+                            && let Some(w) = weak3.upgrade()
+                        {
                             push_detail_tags(&w, &tags);
                         }
                     });
@@ -3034,6 +3062,13 @@ fn paint_brush_by_index(idx: usize, ctx: &PaintCtx) {
 /// writes run on a background thread (never on the UI thread); if the detail
 /// panel is currently showing the same image, its tag list is re-fetched and
 /// pushed back on the UI thread so the pills update live.
+/// Whether the open detail panel is currently showing `path`. Used to gate
+/// background loads/refreshes so a stale dispatch from a previous focus never
+/// paints image A's data onto image B after a fast A→B nav.
+fn detail_shows(detail: &Option<DetailState>, path: &str) -> bool {
+    detail.as_ref().is_some_and(|d| d.path == path)
+}
+
 fn apply_tags_to_focused(
     weak: &Weak<MainWindow>,
     backend: &Backend,
@@ -3048,12 +3083,7 @@ fn apply_tags_to_focused(
     };
     // Whether the open detail panel is showing this image — decides if we need to
     // re-push its tag pills after the writes land.
-    let detail_shows_path = ctx
-        .detail
-        .lock()
-        .unwrap()
-        .as_ref()
-        .is_some_and(|d| d.path == path);
+    let detail_shows_path = detail_shows(&ctx.detail.lock().unwrap(), &path);
     let backend = backend.clone();
     let weak = weak.clone();
     std::thread::spawn(move || {
@@ -3192,6 +3222,7 @@ const DETAIL_SIZE: u32 = 512;
 fn spawn_detail_image(
     weak: Weak<MainWindow>,
     backend: Backend,
+    detail: Arc<Mutex<Option<DetailState>>>,
     path: String,
     cached: Option<Image>,
 ) {
@@ -3205,8 +3236,13 @@ fn spawn_detail_image(
             match thumb_result {
                 Ok(bytes) => match image_util::jpeg_to_slint_image(&bytes) {
                     Ok(img) => {
-                        detail_cache::insert(path, img.clone());
-                        w.set_detail_image(img);
+                        // Cache unconditionally (a now-stale neighbor is still
+                        // worth keeping), but only paint it if the panel still
+                        // shows this image.
+                        detail_cache::insert(path.clone(), img.clone());
+                        if detail_shows(&detail.lock().unwrap(), &path) {
+                            w.set_detail_image(img);
+                        }
                     }
                     Err(e) => tracing::warn!("detail thumb decode failed: {e}"),
                 },
@@ -3220,11 +3256,20 @@ fn spawn_detail_image(
 /// Load the detail-panel metadata for `path` on a background thread and post it
 /// to the UI thread, setting ONLY `detail_meta`. Decoupled from the image so a
 /// slow metadata read can never delay the cheap cached preview.
-fn spawn_detail_meta(weak: Weak<MainWindow>, backend: Backend, path: String) {
+fn spawn_detail_meta(
+    weak: Weak<MainWindow>,
+    backend: Backend,
+    detail: Arc<Mutex<Option<DetailState>>>,
+    path: String,
+) {
     std::thread::spawn(move || {
         let meta_result = backend.metadata(&path);
         slint::invoke_from_event_loop(move || {
             let Some(w) = weak.upgrade() else { return };
+            // Skip the paint if a faster nav has already moved the panel on.
+            if !detail_shows(&detail.lock().unwrap(), &path) {
+                return;
+            }
             match meta_result {
                 Ok(meta) => w.set_detail_meta(format_metadata(&meta).into()),
                 Err(e) => {
@@ -3417,10 +3462,21 @@ mod arg_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_size_label, clamp_next, clamp_prev, format_bytes, format_statusline,
-        fraction_to_bytes, is_current_generation,
+        DetailState, build_size_label, clamp_next, clamp_prev, detail_shows, format_bytes,
+        format_statusline, fraction_to_bytes, is_current_generation,
     };
     use imgfind::sort::RowMeta;
+
+    #[test]
+    fn detail_shows_matches_only_same_path() {
+        let detail = Some(DetailState {
+            path: "a/b.jpg".to_string(),
+            filename: "b.jpg".to_string(),
+        });
+        assert!(detail_shows(&detail, "a/b.jpg"));
+        assert!(!detail_shows(&detail, "a/c.jpg"));
+        assert!(!detail_shows(&None, "a/b.jpg"));
+    }
 
     #[test]
     fn latest_generation_applies_stale_is_dropped() {
