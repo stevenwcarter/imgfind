@@ -629,6 +629,45 @@ fn main() -> Result<()> {
         });
     }
 
+    // --- tile-clicked callback: modifier-aware mouse selection ---
+    // Plain click collapses any multi-select and opens the detail panel (via
+    // tile-selected); shift/ctrl update the multi-select + cursor only and never
+    // open detail. Each `selection.lock()` is its own statement so no guard is
+    // held across a `set_*`/`invoke_*` call into Slint.
+    {
+        let weak = window.as_weak();
+        let selection_ref = Arc::clone(&selection);
+        let selected_ref = Arc::clone(&selected);
+        let selection_dirty_ref = Arc::clone(&selection_dirty);
+        let state_ref = Arc::clone(&state);
+        window.on_tile_clicked(move |index, shift, ctrl| {
+            let idx = index as usize;
+            let Some(w) = weak.upgrade() else {
+                return;
+            };
+            if ctrl {
+                selection_ref.lock().unwrap().ctrl_toggle(idx);
+                *selected_ref.lock().unwrap() = Some(idx);
+                selection_dirty_ref.store(true, Ordering::Relaxed);
+                w.set_selected_index(index);
+                push_statusline(&w, &selection_ref, &state_ref);
+            } else if shift {
+                let anchor = selected_ref.lock().unwrap().unwrap_or(idx);
+                selection_ref.lock().unwrap().range_to(anchor, idx);
+                *selected_ref.lock().unwrap() = Some(idx);
+                selection_dirty_ref.store(true, Ordering::Relaxed);
+                w.set_selected_index(index);
+                push_statusline(&w, &selection_ref, &state_ref);
+            } else {
+                // Plain click: collapse any selection to this tile, then open
+                // the detail panel (which sets the cursor, loads, restatuses).
+                selection_ref.lock().unwrap().clear();
+                selection_dirty_ref.store(true, Ordering::Relaxed);
+                w.invoke_tile_selected(index);
+            }
+        });
+    }
+
     // --- tile-activated callback: open lightbox at the activated index ---
     {
         let weak = window.as_weak();

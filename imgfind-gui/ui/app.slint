@@ -72,6 +72,11 @@ export component MainWindow inherits Window {
     callback tile-selected(int);
     callback tile-activated(int);
     callback tile-open-external(int);
+    // Transient modifier state: set on left-button pointer-down, read in `clicked`.
+    in-out property <bool> click-shift;
+    in-out property <bool> click-ctrl;
+    // Mouse click on a tile, carrying the captured modifiers (index, shift, ctrl).
+    callback tile-clicked(int, bool, bool);
     callback detail-close();
     callback search-similar();
     callback detail-view-full();
@@ -656,16 +661,26 @@ export component MainWindow inherits Window {
                                 TouchArea {
                                     width: 100%;
                                     height: 100%;
-                                    // Return keyboard focus to app-keys when the user
-                                    // clicks into the grid (e.g. after typing a query),
-                                    // so vim/arrow navigation works immediately.
-                                    clicked => { root.tile-selected(tile.index); app-keys.focus(); }
-                                    double-clicked => { root.tile-activated(tile.index); }
                                     pointer-event(e) => {
+                                        // Capture modifiers at press (down fires before
+                                        // clicked, which fires on release) so the click
+                                        // handler can read shift/ctrl.
+                                        if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                                            root.click-shift = e.modifiers.shift;
+                                            root.click-ctrl = e.modifiers.control;
+                                        }
                                         if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
                                             root.tile-open-external(tile.index);
                                         }
                                     }
+                                    // Return keyboard focus to app-keys when the user
+                                    // clicks into the grid (e.g. after typing a query),
+                                    // so vim/arrow navigation works immediately.
+                                    clicked => {
+                                        root.tile-clicked(tile.index, root.click-shift, root.click-ctrl);
+                                        app-keys.focus();
+                                    }
+                                    double-clicked => { root.tile-activated(tile.index); }
                                 }
                             }
                         }
