@@ -858,12 +858,12 @@ impl Database {
         max_k: usize,
         filters: &Filters,
     ) -> Result<Vec<RankedMetaRow>> {
-        // k must cover offset+limit AFTER filtering; raise to max_k so a full
-        // page can survive post-MATCH filtering. `k` and the distance threshold
-        // are interpolated as the vec0 MATCH/k syntax requires literal values
-        // (not bound params). Both are trusted numeric config values, never
-        // user free-text.
-        let k = max_k.max(offset + limit).clamp(1, max_k);
+        // k must cover offset+limit AFTER filtering. We also apply max_k as a
+        // floor so a full page survives post-MATCH filtering even on page 1.
+        // `k` and the distance threshold are interpolated as the vec0 MATCH/k
+        // syntax requires literal values (not bound params). Both are trusted
+        // numeric config values, never user free-text.
+        let k = (offset + limit).max(1).max(max_k);
         let vt = self.vectors_table()?;
         let (clause, fvalues) = build_filter_clause(filters);
 
@@ -2033,6 +2033,59 @@ mod tests {
         let p2_paths: Vec<&str> = page2.iter().map(|(_, p, ..)| p.as_str()).collect();
         assert_eq!(p1_paths, ["img1.jpg", "img2.jpg", "img3.jpg", "img4.jpg"]);
         assert_eq!(p2_paths, ["img5.jpg", "img6.jpg", "img7.jpg", "img8.jpg"]);
+
+        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+    }
+
+    /// Regression test: when `offset + limit > max_k`, the clamped `k` was
+    /// re-capped to `max_k`, leaving sqlite-vec too few candidates to fill the
+    /// requested page. With the fix, `k` is set to `(offset + limit).max(max_k)`
+    /// so the KNN scan always covers the full window.
+    #[test]
+    fn search_meta_paginates_past_max_k() {
+        let db_path = temp_db_path();
+        let db = Database::new(&db_path).expect("create db");
+        let conn = db.pool.get().expect("get conn");
+
+        // Insert 60 images. First axis-0 component decreases with id so the
+        // query vector (unit along axis 0) sees monotonically increasing distance.
+        for id in 1..=60i64 {
+            conn.execute(
+                "INSERT INTO images (id, path, hash) VALUES (?1, ?2, ?3)",
+                params![id, format!("img{id}.jpg"), format!("h{id}")],
+            )
+            .expect("insert image");
+
+            let mut emb = vec![0.0f32; 512];
+            emb[0] = 1.0 - (id as f32) * 0.01;
+            emb[1] = (id as f32) * 0.01;
+            conn.execute(
+                "INSERT INTO image_vectors (rowid, embedding) VALUES (?1, ?2)",
+                params![id, emb.as_slice().as_bytes()],
+            )
+            .expect("insert vector");
+        }
+        drop(conn);
+
+        let mut query = vec![0.0f32; 512];
+        query[0] = 1.0;
+
+        // offset=35, limit=20 => offset+limit=55 > max_k=40.
+        // Pre-fix: k was clamped back to 40, so sqlite-vec had no candidates
+        // beyond rank 40; with OFFSET 35 only 5 rows were returned.
+        // Post-fix: k = max(55, 40) = 55, so the scan covers all needed rows.
+        let result = db
+            .search_similar_images_meta(
+                &query,
+                20,
+                35,
+                2.0,
+                40,
+                &crate::filters::Filters::default(),
+            )
+            .expect("paginated search");
+
+        assert_eq!(result.len(), 20, "page must be full (offset+limit > max_k)");
 
         let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
     }

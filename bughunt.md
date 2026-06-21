@@ -22,16 +22,6 @@ _(none)_
 
 ## Medium
 
-### B8. Pagination clamp re-caps `k` below `offset+limit` in `search_similar_images_meta`: `search_similar_images_meta` (src/database.rs:845)
-- Category: correctness
-- Impact: 8 (severity 4 × blast-radius 2)
-- Effort: S
-- Risk: low
-- Evidence: `k = max_k.max(offset+limit).clamp(1,max_k)` re-caps `k` to `max_k` even when `offset+limit` exceeds `max_k`, so a page past `max_k` can't return a full window (sqlite-vec `MATCH+k+OFFSET` needs `k >= offset+limit`).
-- Blast radius: src/database.rs:845-856
-- Proposed fix: Compute `k = (offset+limit).max(1)` without re-capping to `max_k` (or treat `max_k` purely as a floor/ceiling guard). Add a pagination-beyond-`max_k` test.
-- [x] execute   [ ] skip
-
 ### B9. ANSI escape codes written into file logs (`with_ansi(true)`): `logging init` (src/logging.rs:29)
 - Category: observability
 - Impact: 6 (severity 3 × blast-radius 2)
