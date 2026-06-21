@@ -265,7 +265,10 @@ mod tests {
         );
         assert_eq!(
             params,
-            vec![turso::Value::Text("a".into()), turso::Value::Text("b".into())]
+            vec![
+                turso::Value::Text("a".into()),
+                turso::Value::Text("b".into())
+            ]
         );
     }
 
@@ -284,7 +287,10 @@ mod tests {
         );
         assert_eq!(
             params,
-            vec![turso::Value::Text("a".into()), turso::Value::Text("b".into())]
+            vec![
+                turso::Value::Text("a".into()),
+                turso::Value::Text("b".into())
+            ]
         );
     }
 

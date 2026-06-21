@@ -177,8 +177,7 @@ pub fn get_or_generate_thumbnail(
         .context("Failed to store thumbnail in database")?;
 
     // Return the newly generated thumbnail
-    block_on(db.get_thumbnail(hash, size))
-        .context("Failed to retrieve newly generated thumbnail")
+    block_on(db.get_thumbnail(hash, size)).context("Failed to retrieve newly generated thumbnail")
 }
 
 #[cfg(test)]

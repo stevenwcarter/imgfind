@@ -113,7 +113,11 @@ impl Database {
     /// types). In the latter case a `tracing::warn!` is emitted so the problem
     /// is visible in logs without crashing the GUI.
     pub async fn get_ui_state(&self) -> Result<Option<UiState>> {
-        let conn = self.pool.get().await.context("DB connection for get_ui_state")?;
+        let conn = self
+            .pool
+            .get()
+            .await
+            .context("DB connection for get_ui_state")?;
         let mut rows = conn
             .query("SELECT state_json FROM ui_state WHERE id = 1", ())
             .await?;
@@ -133,7 +137,11 @@ impl Database {
     /// Persist the GUI session state as a single JSON blob (UPSERT on `id = 1`).
     pub async fn set_ui_state(&self, state: &UiState) -> Result<()> {
         let json = serde_json::to_string(state).context("serialize ui_state")?;
-        let conn = self.pool.get().await.context("DB connection for set_ui_state")?;
+        let conn = self
+            .pool
+            .get()
+            .await
+            .context("DB connection for set_ui_state")?;
         conn.execute(
             "INSERT INTO ui_state (id, state_json, updated_at)
              VALUES (1, ?1, CURRENT_TIMESTAMP)
@@ -286,7 +294,10 @@ impl Database {
         .await?;
         tx.execute(
             &format!("INSERT INTO {vt} (image_id, embedding) VALUES (?1, ?2)"),
-            (Value::Integer(image_id), Value::Blob(to_le_bytes(embedding))),
+            (
+                Value::Integer(image_id),
+                Value::Blob(to_le_bytes(embedding)),
+            ),
         )
         .await?;
 
@@ -478,9 +489,7 @@ impl Database {
             .map(|p| Value::Text((*p).to_string()))
             .collect();
         let conn = self.pool.get().await.context("get connection")?;
-        let mut rows = conn
-            .query(&sql, turso::params_from_iter(params))
-            .await?;
+        let mut rows = conn.query(&sql, turso::params_from_iter(params)).await?;
         let mut ids = Vec::new();
         while let Some(row) = rows.next().await? {
             ids.push(col_i64(&row, 0, "id")?);
@@ -674,7 +683,10 @@ impl Database {
             .await?;
             tx.execute(
                 &format!("INSERT INTO {vt} (image_id, embedding) VALUES (?1, ?2)"),
-                (Value::Integer(image_id), Value::Blob(to_le_bytes(embedding))),
+                (
+                    Value::Integer(image_id),
+                    Value::Blob(to_le_bytes(embedding)),
+                ),
             )
             .await?;
         }
@@ -733,9 +745,7 @@ impl Database {
              WHERE i.path = ?1 AND i.hash = ?2 \
                AND EXISTS (SELECT 1 FROM {vt} WHERE image_id = i.id)"
         );
-        let mut rows = conn
-            .query(&sql, (rel_path_str, hash.to_string()))
-            .await?;
+        let mut rows = conn.query(&sql, (rel_path_str, hash.to_string())).await?;
         let row = rows.next().await?.context("COUNT returned no row")?;
         Ok(col_i64(&row, 0, "count")? > 0)
     }
@@ -750,7 +760,8 @@ impl Database {
     ) -> Result<Vec<(String, f32)>> {
         let k = limit.clamp(1, max_k);
         let vt = self.vectors_table().await?;
-        let sql = crate::vector_sql::knn_query(&vt, "path, distance", "", "", k, 0, distance_threshold);
+        let sql =
+            crate::vector_sql::knn_query(&vt, "path, distance", "", "", k, 0, distance_threshold);
         let conn = self
             .pool
             .get()
@@ -964,8 +975,7 @@ impl Database {
             while let Some(row) = rows.next().await? {
                 let id = col_i64(&row, 0, "id")?;
                 let rel_path = col_text(&row, 1, "path")?;
-                let abs_path =
-                    RelativePath(PathBuf::from(rel_path)).to_absolute(&self.parent_dir);
+                let abs_path = RelativePath(PathBuf::from(rel_path)).to_absolute(&self.parent_dir);
                 if !abs_path.as_path().exists() {
                     to_delete.push(id);
                 }
@@ -983,7 +993,8 @@ impl Database {
         for id in to_delete {
             tx.execute(&format!("DELETE FROM {vt} WHERE image_id = ?1"), (id,))
                 .await?;
-            tx.execute("DELETE FROM images WHERE id = ?1", (id,)).await?;
+            tx.execute("DELETE FROM images WHERE id = ?1", (id,))
+                .await?;
         }
         tx.commit().await?;
         Ok(removed_count)
@@ -1035,11 +1046,7 @@ impl Database {
         conn.execute(
             "INSERT OR REPLACE INTO thumbnails (image_hash, size, thumbnail_data) \
              VALUES (?1, ?2, ?3)",
-            (
-                image_hash.to_string(),
-                size as i64,
-                thumbnail_data.to_vec(),
-            ),
+            (image_hash.to_string(), size as i64, thumbnail_data.to_vec()),
         )
         .await
         .context("failed to insert or replace")?;
@@ -1235,8 +1242,7 @@ impl Database {
         let mut images = Vec::new();
         while let Some(row) = rows.next().await? {
             let rel_path = col_text(&row, 0, "path")?;
-            let abs_path =
-                RelativePath(PathBuf::from(&rel_path)).to_absolute(&self.parent_dir);
+            let abs_path = RelativePath(PathBuf::from(&rel_path)).to_absolute(&self.parent_dir);
             images.push(ImageWithMetadata {
                 path: rel_path,
                 absolute_path: abs_path.as_str().into_owned(),
@@ -1953,14 +1959,15 @@ mod tests {
             "favorites",
         ] {
             let mut trows = conn
-                .query(
-                    "SELECT count(*) FROM sqlite_master WHERE name = ?1",
-                    (t,),
-                )
+                .query("SELECT count(*) FROM sqlite_master WHERE name = ?1", (t,))
                 .await
                 .unwrap();
             let trow = trows.next().await.unwrap().unwrap();
-            assert_eq!(col_i64(&trow, 0, "count").unwrap(), 1, "table {t} should exist");
+            assert_eq!(
+                col_i64(&trow, 0, "count").unwrap(),
+                1,
+                "table {t} should exist"
+            );
         }
         drop(conn);
 
@@ -2053,7 +2060,14 @@ mod tests {
         query[0] = 1.0;
 
         let result = db
-            .search_similar_images_meta(&query, 20, 35, 2.0, 40, &crate::filters::Filters::default())
+            .search_similar_images_meta(
+                &query,
+                20,
+                35,
+                2.0,
+                40,
+                &crate::filters::Filters::default(),
+            )
             .await
             .expect("paginated search");
 
@@ -2098,11 +2112,7 @@ mod tests {
             .get_images_without_thumbnails(300, missing)
             .await
             .expect("real-count LIMIT bind must succeed");
-        assert_eq!(
-            rows.len(),
-            3,
-            "the count value covers all missing images"
-        );
+        assert_eq!(rows.len(), 3, "the count value covers all missing images");
 
         cleanup(&db_path);
     }

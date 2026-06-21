@@ -690,7 +690,7 @@ fn index_directory(
 
     // Generate thumbnails for any images still missing a 300px thumbnail. `count`
     // is bound as a SQL `LIMIT ?` parameter (see get_images_without_thumbnails),
-    // and rusqlite binds usize via i64::try_from — so usize::MAX overflows i64 and
+    // and the limit is bound via i64::try_from — so usize::MAX overflows i64 and
     // the bind fails. Instead, count the images actually missing a thumbnail and
     // pass that exact number, which covers every one of them.
     if !no_thumbnails {

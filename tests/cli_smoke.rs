@@ -10,8 +10,7 @@ use imgfind::database::Database;
 /// Build a unique temp dir for this test run so parallel test runs do not
 /// collide. Returns both the root dir and the canonical DB path inside it.
 fn temp_db() -> (std::path::PathBuf, std::path::PathBuf) {
-    let dir =
-        std::env::temp_dir().join(format!("imgfind_smoke_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("imgfind_smoke_{}", std::process::id()));
     let db_path = dir.join(".imgfind").join("imgfind.db");
     (dir, db_path)
 }
@@ -53,15 +52,16 @@ fn index_and_search_roundtrip_through_block_on() {
     // ── 4. Search with query == vec_a ─────────────────────────────────────────
     // distance_threshold = 2.0 (generous upper-bound) so both rows are
     // candidates; max_k = 100 so no artificial cap truncates results.
-    let results = block_on(db.search_similar_images(&vec_a, 10, 2.0, 100))
-        .expect("search_similar_images");
+    let results =
+        block_on(db.search_similar_images(&vec_a, 10, 2.0, 100)).expect("search_similar_images");
 
     assert!(
         !results.is_empty(),
         "search returned no results — check KNN threshold or vector insert"
     );
     assert_eq!(
-        results[0].0, "alpha.jpg",
+        results[0].0,
+        "alpha.jpg",
         "closest image should be alpha.jpg, got: {:?}",
         results.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>()
     );
