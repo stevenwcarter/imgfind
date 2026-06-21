@@ -770,7 +770,7 @@ impl Database {
         let mut rows = conn
             .query(&sql, (Value::Blob(to_le_bytes(query_embedding)),))
             .await?;
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(k);
         while let Some(row) = rows.next().await? {
             out.push((
                 col_text(&row, 0, "path")?,
@@ -807,7 +807,7 @@ impl Database {
         let mut rows = conn
             .query(&sql, (Value::Blob(to_le_bytes(query_embedding)),))
             .await?;
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(k);
         while let Some(row) = rows.next().await? {
             let thumb = match row.get_value(2)? {
                 Value::Blob(b) => Some(b),
@@ -856,7 +856,7 @@ impl Database {
         let mut params: Vec<Value> = vec![Value::Blob(to_le_bytes(query_embedding))];
         params.extend(fparams);
         let mut rows = conn.query(&sql, turso::params_from_iter(params)).await?;
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(limit.min(k));
         while let Some(row) = rows.next().await? {
             out.push((
                 col_i64(&row, 0, "id")?,
