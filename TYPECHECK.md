@@ -12,22 +12,6 @@ Last triage: 2026-06-21 against `main` @ 20d80f38. Toolchain: cargo build/check 
 
 ## Critical
 
-### T1. Raw i64 IDs (image / tag / collection) are interchangeable across the DB ⇄ GUI ⇄ ui_state boundary: `image id` / `tag id` / `collection id` (src/database.rs:351, :392, :561)
-- **Lens:** newtype
-- **Impact:** 9 (bug-prevention high × blast 3)
-- **Effort:** M
-- **Risk:** high
-- **Current type:** three distinct concepts all spelled `i64` (image id, tag id, collection id), plus `Vec<i64>` / `Similar(i64)` in persisted ui_state.
-- **Proposed type:** `struct ImageId(i64)`, `struct TagId(i64)`, `struct CollectionId(i64)` (newtypes; derive `Copy, Clone, Eq, Hash, Serialize, Deserialize`). Best done in ONE compiler-driven pass since they migrate together, but keep the three symbols distinct so a partial pick is possible.
-- **Evidence:** `image_tags` is inserted as `VALUES(?1, ?2)` with `image_id` and `tag_id` adjacent, both `i64`; the same shape repeats for `collection_images` (`collection_id` + `image_id`). A transposition — passing a tag id where an image id is expected, or swapping the two bind params — **compiles and silently writes corrupt join rows** (a tag attached to the wrong/nonexistent image, membership pointing at the wrong collection). There is no type or DB-level guard today; the only feedback is later-observed wrong results.
-- **Blast radius:**
-  - image id: src/database.rs:351, :378, :408-413, :665-676; imgfind-gui/src/state.rs:95-102; imgfind-gui/src/backend.rs:99-104; src/ui_state.rs:49 (`result_ids: Vec<i64>`), src/ui_state.rs:16 (`PersistedMode::Similar(i64)`)
-  - tag id: src/database.rs:392-403, :409-414, :439-449, :516, :546
-  - collection id: src/database.rs:561-576, :581-587, :598-606, :615
-- **Invariants/caveats:** **Crosses the `ui_state` persisted-JSON boundary** (`result_ids`, `PersistedMode::Similar`). A newtype `ImageId(i64)` serializing transparently keeps the JSON byte-identical (serde emits the inner i64), but this MUST be pinned — derive `#[serde(transparent)]` on `ImageId` and add a round-trip test that loads a pre-migration `ui_state` row and asserts the decoded `result_ids` / `Similar(id)` are unchanged. Invariant this depends on: *the on-disk ui_state JSON shape for ids stays a bare integer*. Also crosses the DB extraction seam (turso `col_*` helpers) and the GUI crate.
-- **Proposed migration:** introduce the three newtypes with `#[serde(transparent)]`; change the constructors/getters at the DB extraction source and ui_state fields; let the compiler surface every transposition site and fix to green (the broken call sites ARE the audit).
-- [x] execute   [ ] skip
-
 ## High
 
 ### T2. UI sort-selector strings sit un-typed above the existing `SortKey` enum: `make_sort_options_model` / `option_str_to_sort_key` (imgfind-gui/src/main.rs:2542, :3467, :3482)

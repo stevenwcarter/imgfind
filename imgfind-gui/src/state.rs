@@ -88,6 +88,7 @@ impl SearchState {
 
 #[cfg(test)]
 mod tests {
+    use imgfind::ids::ImageId;
     use imgfind::sort::{SortDir, SortKey};
 
     use super::*;
@@ -98,7 +99,7 @@ mod tests {
             .map(|(_, e)| e.to_lowercase())
             .unwrap_or_default();
         RowMeta {
-            id,
+            id: ImageId(id),
             path: path.into(),
             size,
             ext,
@@ -185,7 +186,7 @@ mod tests {
         });
         assert_eq!(
             s.results.iter().map(|r| r.id).collect::<Vec<_>>(),
-            vec![2, 1]
+            vec![ImageId(2), ImageId(1)]
         );
     }
 
@@ -202,13 +203,13 @@ mod tests {
         // After sort by name ascending: a.jpg (id=2) before z.jpg (id=1)
         assert_eq!(
             s.results.iter().map(|r| r.id).collect::<Vec<_>>(),
-            vec![2, 1]
+            vec![ImageId(2), ImageId(1)]
         );
         // Restore to relevance order (original: z.jpg=1, a.jpg=2)
         s.resort_to_relevance();
         assert_eq!(
             s.results.iter().map(|r| r.id).collect::<Vec<_>>(),
-            vec![1, 2]
+            vec![ImageId(1), ImageId(2)]
         );
     }
 }

@@ -1,4 +1,5 @@
 use crate::filters::{Filters, build_filter_clause_turso};
+use crate::ids::{CollectionId, ImageId, TagId};
 use crate::ui_state::UiState;
 use crate::{AbsolutePath, RelativePath, db_pool, get_db_parent_dir};
 use anyhow::{Context, Result};
@@ -24,7 +25,7 @@ pub type ImageSearchResult = Result<Vec<(String, f32, Option<Vec<u8>>)>>;
 /// One ranked metadata-search row: `(image id, relative path, distance,
 /// file_size)`. The `id` lets callers build stable [`crate::sort::RowMeta`]
 /// rows from ranked (relevance-ordered) results.
-pub type RankedMetaRow = (i64, String, f32, Option<i64>);
+pub type RankedMetaRow = (ImageId, String, f32, Option<i64>);
 
 /// Serialize an f32 slice to little-endian bytes (the `F32_BLOB` wire format).
 fn to_le_bytes(v: &[f32]) -> Vec<u8> {
@@ -375,7 +376,7 @@ impl Database {
 
     /// Resolve the `images.id` for a stored relative path, erroring if the image
     /// is not indexed. Used by the tag/collection write methods.
-    async fn image_id_for(&self, relative_path: &RelativePath) -> Result<i64> {
+    async fn image_id_for(&self, relative_path: &RelativePath) -> Result<ImageId> {
         let rel = relative_path.as_str().into_owned();
         let conn = self.pool.get().await.context("get connection")?;
         let mut rows = conn
@@ -385,11 +386,11 @@ impl Database {
             .next()
             .await?
             .with_context(|| format!("no indexed image at {rel}"))?;
-        col_i64(&row, 0, "id")
+        Ok(ImageId(col_i64(&row, 0, "id")?))
     }
 
     /// Ensure a tag exists, returning its id.
-    pub async fn create_tag(&self, name: &str) -> Result<i64> {
+    pub async fn create_tag(&self, name: &str) -> Result<TagId> {
         let conn = self.pool.get().await.context("get connection")?;
         conn.execute(
             "INSERT OR IGNORE INTO tags (name) VALUES (?1)",
@@ -400,7 +401,7 @@ impl Database {
             .query("SELECT id FROM tags WHERE name = ?1", (name.to_string(),))
             .await?;
         let row = rows.next().await?.context("tag row missing after insert")?;
-        col_i64(&row, 0, "id")
+        Ok(TagId(col_i64(&row, 0, "id")?))
     }
 
     /// Attach `tag` to the image at `relative_path` (creating the tag if needed).
@@ -410,7 +411,7 @@ impl Database {
         let conn = self.pool.get().await.context("get connection")?;
         conn.execute(
             "INSERT OR IGNORE INTO image_tags (image_id, tag_id) VALUES (?1, ?2)",
-            (image_id, tag_id),
+            (Value::Integer(image_id.get()), Value::Integer(tag_id.get())),
         )
         .await?;
         Ok(())
@@ -423,7 +424,7 @@ impl Database {
         conn.execute(
             "DELETE FROM image_tags WHERE image_id = ?1 \
              AND tag_id = (SELECT id FROM tags WHERE name = ?2)",
-            (image_id, tag.to_string()),
+            (Value::Integer(image_id.get()), Value::Text(tag.to_string())),
         )
         .await?;
         Ok(())
@@ -446,7 +447,7 @@ impl Database {
         for image_id in ids {
             tx.execute(
                 "INSERT OR IGNORE INTO image_tags (image_id, tag_id) VALUES (?1, ?2)",
-                (image_id, tag_id),
+                (Value::Integer(image_id.get()), Value::Integer(tag_id.get())),
             )
             .await?;
         }
@@ -471,7 +472,7 @@ impl Database {
             tx.execute(
                 "DELETE FROM image_tags WHERE image_id = ?1 \
                  AND tag_id = (SELECT id FROM tags WHERE name = ?2)",
-                (image_id, tag.to_string()),
+                (Value::Integer(image_id.get()), Value::Text(tag.to_string())),
             )
             .await?;
         }
@@ -481,7 +482,7 @@ impl Database {
 
     /// Resolve a slice of relative paths to their `images.id` values in one
     /// `IN (...)` query. Paths absent from the DB are simply omitted.
-    async fn resolve_image_ids(&self, rel_paths: &[&str]) -> Result<Vec<i64>> {
+    async fn resolve_image_ids(&self, rel_paths: &[&str]) -> Result<Vec<ImageId>> {
         let placeholders = rel_paths.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!("SELECT id FROM images WHERE path IN ({placeholders})");
         let params: Vec<Value> = rel_paths
@@ -492,7 +493,7 @@ impl Database {
         let mut rows = conn.query(&sql, turso::params_from_iter(params)).await?;
         let mut ids = Vec::new();
         while let Some(row) = rows.next().await? {
-            ids.push(col_i64(&row, 0, "id")?);
+            ids.push(ImageId(col_i64(&row, 0, "id")?));
         }
         Ok(ids)
     }
@@ -509,13 +510,13 @@ impl Database {
             let Some(row) = rows.next().await? else {
                 return Ok(Vec::new());
             };
-            col_i64(&row, 0, "id")?
+            ImageId(col_i64(&row, 0, "id")?)
         };
         let mut rows = conn
             .query(
                 "SELECT t.name FROM image_tags it JOIN tags t ON t.id = it.tag_id \
                  WHERE it.image_id = ?1 ORDER BY t.name",
-                (image_id,),
+                (Value::Integer(image_id.get()),),
             )
             .await?;
         let mut out = Vec::new();
@@ -556,7 +557,7 @@ impl Database {
     }
 
     /// Ensure a collection exists, returning its id.
-    pub async fn create_collection(&self, name: &str) -> Result<i64> {
+    pub async fn create_collection(&self, name: &str) -> Result<CollectionId> {
         let conn = self.pool.get().await.context("get connection")?;
         conn.execute(
             "INSERT OR IGNORE INTO collections (name) VALUES (?1)",
@@ -573,7 +574,7 @@ impl Database {
             .next()
             .await?
             .context("collection row missing after insert")?;
-        col_i64(&row, 0, "id")
+        Ok(CollectionId(col_i64(&row, 0, "id")?))
     }
 
     /// Add the image at `relative_path` to `name` (creating the collection if needed).
@@ -583,7 +584,10 @@ impl Database {
         let conn = self.pool.get().await.context("get connection")?;
         conn.execute(
             "INSERT OR IGNORE INTO collection_images (collection_id, image_id) VALUES (?1, ?2)",
-            (collection_id, image_id),
+            (
+                Value::Integer(collection_id.get()),
+                Value::Integer(image_id.get()),
+            ),
         )
         .await?;
         Ok(())
@@ -600,7 +604,10 @@ impl Database {
         conn.execute(
             "DELETE FROM collection_images WHERE image_id = ?1 \
              AND collection_id = (SELECT id FROM collections WHERE name = ?2)",
-            (image_id, name.to_string()),
+            (
+                Value::Integer(image_id.get()),
+                Value::Text(name.to_string()),
+            ),
         )
         .await?;
         Ok(())
@@ -859,7 +866,7 @@ impl Database {
         let mut out = Vec::with_capacity(limit.min(k));
         while let Some(row) = rows.next().await? {
             out.push((
-                col_i64(&row, 0, "id")?,
+                ImageId(col_i64(&row, 0, "id")?),
                 col_text(&row, 1, "path")?,
                 col_opt_f64(&row, 2)?.unwrap_or(0.0) as f32,
                 col_opt_i64(&row, 3)?,
@@ -1146,7 +1153,7 @@ impl Database {
     /// Insert or update metadata for an image.
     pub async fn insert_or_update_metadata(
         &self,
-        image_id: i64,
+        image_id: ImageId,
         metadata: &ImageMetadata,
     ) -> Result<()> {
         let conn = self
@@ -1160,7 +1167,7 @@ impl Database {
               camera_make, camera_model, datetime_taken) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             (
-                Value::Integer(image_id),
+                Value::Integer(image_id.get()),
                 opt_i64(metadata.file_size.map(|s| s as i64)),
                 opt_i64(metadata.width.map(|w| w as i64)),
                 opt_i64(metadata.height.map(|h| h as i64)),
@@ -1179,7 +1186,7 @@ impl Database {
     pub async fn get_images_without_metadata(
         &self,
         limit: usize,
-    ) -> Result<Vec<(i64, AbsolutePath, String)>> {
+    ) -> Result<Vec<(ImageId, AbsolutePath, String)>> {
         let limit = i64::try_from(limit).context("metadata LIMIT exceeds i64 range")?;
         let conn = self
             .pool
@@ -1198,7 +1205,7 @@ impl Database {
             .await?;
         let mut out = Vec::new();
         while let Some(row) = rows.next().await? {
-            let id = col_i64(&row, 0, "id")?;
+            let id = ImageId(col_i64(&row, 0, "id")?);
             let rel_path = col_text(&row, 1, "path")?;
             let hash = col_text(&row, 2, "hash")?;
             let abs_path = RelativePath(PathBuf::from(rel_path)).to_absolute(&self.parent_dir);
@@ -1339,7 +1346,7 @@ impl Database {
     /// Returns one `RowMeta` per id that exists in `images`, in the **same order
     /// as `ids`**. Ids not found in the database are silently dropped. An empty
     /// `ids` slice returns an empty `Vec` without touching the database.
-    pub async fn rehydrate_rows(&self, ids: &[i64]) -> Result<Vec<crate::sort::RowMeta>> {
+    pub async fn rehydrate_rows(&self, ids: &[ImageId]) -> Result<Vec<crate::sort::RowMeta>> {
         use crate::sort::RowMeta;
 
         if ids.is_empty() {
@@ -1357,9 +1364,9 @@ impl Database {
             .get()
             .await
             .context("DB connection for rehydrate_rows")?;
-        let params: Vec<Value> = ids.iter().map(|i| Value::Integer(*i)).collect();
+        let params: Vec<Value> = ids.iter().map(|i| Value::Integer(i.get())).collect();
         let mut rows = conn.query(&sql, turso::params_from_iter(params)).await?;
-        let mut found: HashMap<i64, RowMeta> = HashMap::new();
+        let mut found: HashMap<ImageId, RowMeta> = HashMap::new();
         while let Some(row) = rows.next().await? {
             let meta = row_meta(&row)?;
             found.insert(meta.id, meta);
@@ -1418,7 +1425,7 @@ impl Database {
     }
 
     /// Get the image ID by path.
-    pub async fn get_image_id(&self, path: &AbsolutePath) -> Result<i64> {
+    pub async fn get_image_id(&self, path: &AbsolutePath) -> Result<ImageId> {
         let rel_path = path.to_relative(&self.parent_dir).with_context(|| {
             format!("Failed to convert path {} to relative path", path.as_str())
         })?;
@@ -1434,7 +1441,7 @@ impl Database {
             )
             .await?;
         let row = rows.next().await?.context("no image row for id lookup")?;
-        col_i64(&row, 0, "id")
+        Ok(ImageId(col_i64(&row, 0, "id")?))
     }
 
     /// Read an image's stored EXIF/metadata from the `image_metadata` table by
@@ -1478,7 +1485,7 @@ impl Database {
 /// Build a [`crate::sort::RowMeta`] from a `(id, path, file_size)` row, deriving
 /// the lowercased extension Rust-side.
 fn row_meta(row: &turso::Row) -> Result<crate::sort::RowMeta> {
-    let id = col_i64(row, 0, "id")?;
+    let id = ImageId(col_i64(row, 0, "id")?);
     let path = col_text(row, 1, "path")?;
     let size = col_opt_i64(row, 2)?;
     let ext = path
@@ -2640,7 +2647,7 @@ mod tests {
     async fn rehydrate_preserves_order_and_drops_missing() {
         let (db, tmp) =
             test_db_with_rows(&[("a.jpg", Some(1)), ("b.jpg", Some(2)), ("c.jpg", Some(3))]).await;
-        let want = vec![3i64, 999, 1];
+        let want = vec![ImageId(3), ImageId(999), ImageId(1)];
         let rows = db.rehydrate_rows(&want).await.unwrap();
         assert_eq!(
             rows.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
@@ -2666,13 +2673,13 @@ mod tests {
             ("img3.jpg", Some(300)),
         ])
         .await;
-        let ids = vec![3i64, 999, 1, 2];
+        let ids = vec![ImageId(3), ImageId(999), ImageId(1), ImageId(2)];
         let rows = db.rehydrate_rows(&ids).await.unwrap();
 
         assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0].id, 3);
-        assert_eq!(rows[1].id, 1);
-        assert_eq!(rows[2].id, 2);
+        assert_eq!(rows[0].id, ImageId(3));
+        assert_eq!(rows[1].id, ImageId(1));
+        assert_eq!(rows[2].id, ImageId(2));
 
         assert_eq!(rows[0].path, "img3.jpg");
         assert_eq!(rows[1].path, "img1.jpg");
@@ -2691,7 +2698,7 @@ mod tests {
         assert!(db.get_ui_state().await.unwrap().is_none());
         let st = UiState {
             search_text: "dog".into(),
-            result_ids: vec![1],
+            result_ids: vec![ImageId(1)],
             selected_index: Some(0),
             ..Default::default()
         };
@@ -2699,7 +2706,7 @@ mod tests {
         assert_eq!(db.get_ui_state().await.unwrap().unwrap(), st);
         let st2 = UiState {
             search_text: "cat".into(),
-            result_ids: vec![1],
+            result_ids: vec![ImageId(1)],
             selected_index: Some(0),
             ..Default::default()
         };

@@ -10,6 +10,7 @@ use clipper::ClipEmbedder;
 use imgfind::config::SearchConfig;
 use imgfind::database::{Database, ImageMetadata, extract_image_metadata};
 use imgfind::filters::Filters;
+use imgfind::ids::ImageId;
 use imgfind::search::SearchEngine;
 use imgfind::sort::{RowMeta, Sort};
 use imgfind::thumbnail::get_or_generate_thumbnail;
@@ -111,7 +112,7 @@ impl Backend {
     }
 
     /// Fetch [`RowMeta`] for an explicit ordered id list (session restore).
-    pub fn rehydrate(&self, ids: &[i64]) -> Result<Vec<RowMeta>> {
+    pub fn rehydrate(&self, ids: &[ImageId]) -> Result<Vec<RowMeta>> {
         imgfind::block_on(self.db.rehydrate_rows(ids)).context("Rehydrate failed")
     }
 
@@ -129,7 +130,7 @@ impl Backend {
 
     /// Resolve a stored relative image path back to its DB row id (used to
     /// persist/restore a similarity-search seed by id rather than by path).
-    pub fn id_for_rel_path(&self, rel_path: &str) -> Result<i64> {
+    pub fn id_for_rel_path(&self, rel_path: &str) -> Result<ImageId> {
         let abs = AbsolutePath(self.abs_path(rel_path));
         imgfind::block_on(self.db.get_image_id(&abs))
             .with_context(|| format!("No image id for {rel_path}"))

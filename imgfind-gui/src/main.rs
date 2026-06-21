@@ -31,6 +31,7 @@ use slint::{Image, Model, ModelRc, SharedString, Timer, TimerMode, VecModel, Wea
 use backend::Backend;
 use detail::{DetailState, filename_of, format_metadata, select};
 use imgfind::filters::{Filters, GpsFilter, TagMatch};
+use imgfind::ids::ImageId;
 use imgfind::sort::{RowMeta, Sort, SortDir, SortKey};
 use imgfind::ui_state::{PersistedMode, UiState};
 use state::{SearchState, ViewState};
@@ -56,7 +57,7 @@ enum SelectAfter {
     First,
     /// Select the row whose `id` equals the given id; `None` id or not found
     /// yields `None` (sort-direction toggle — follow the item to its new position).
-    ById(Option<i64>),
+    ById(Option<ImageId>),
 }
 
 /// Resolve the post-results selection index.
@@ -1527,7 +1528,7 @@ fn main() -> Result<()> {
             w.set_sort_desc(new_desc);
             // Capture the currently selected item's id BEFORE the resort,
             // so we can follow it to its new position after the direction flip.
-            let prev_id: Option<i64> = {
+            let prev_id: Option<ImageId> = {
                 let sel = *sel_handles.selected.lock();
                 let s = state_ref.lock();
                 sel.and_then(|i| s.results.get(i)).map(|r| r.id)
@@ -2404,7 +2405,10 @@ fn persist_session(
 ) {
     let (result_ids, sort) = {
         let s = state.lock();
-        (s.results.iter().map(|r| r.id).collect::<Vec<i64>>(), s.sort)
+        (
+            s.results.iter().map(|r| r.id).collect::<Vec<ImageId>>(),
+            s.sort,
+        )
     };
     let search_text;
     let mode = {
@@ -3515,6 +3519,7 @@ mod tests {
         DetailState, build_filters, build_size_label, clamp_next, clamp_prev, detail_shows,
         format_bytes, format_statusline, fraction_to_bytes, is_current_generation,
     };
+    use imgfind::ids::ImageId;
     use imgfind::sort::RowMeta;
     use std::collections::HashSet;
 
@@ -3634,13 +3639,13 @@ mod tests {
         use crate::selection::Selection;
         let rows = vec![
             RowMeta {
-                id: 1,
+                id: ImageId(1),
                 path: "a".into(),
                 size: Some(1_000_000),
                 ext: "jpg".into(),
             },
             RowMeta {
-                id: 2,
+                id: ImageId(2),
                 path: "b".into(),
                 size: Some(1_000_000),
                 ext: "jpg".into(),
@@ -3658,7 +3663,7 @@ mod tests {
     fn statusline_none_size_counts_as_zero() {
         use crate::selection::Selection;
         let rows = vec![RowMeta {
-            id: 1,
+            id: ImageId(1),
             path: "a".into(),
             size: None,
             ext: "jpg".into(),
@@ -3674,19 +3679,19 @@ mod tests {
         use crate::selection::Selection;
         let rows = vec![
             RowMeta {
-                id: 1,
+                id: ImageId(1),
                 path: "a".into(),
                 size: Some(2_000_000),
                 ext: "jpg".into(),
             },
             RowMeta {
-                id: 2,
+                id: ImageId(2),
                 path: "b".into(),
                 size: Some(3_000_000),
                 ext: "jpg".into(),
             },
             RowMeta {
-                id: 3,
+                id: ImageId(3),
                 path: "c".into(),
                 size: Some(4_000_000),
                 ext: "jpg".into(),
@@ -3708,13 +3713,13 @@ mod tests {
         use crate::selection::Selection;
         let rows = vec![
             RowMeta {
-                id: 1,
+                id: ImageId(1),
                 path: "a".into(),
                 size: Some(1),
                 ext: "jpg".into(),
             },
             RowMeta {
-                id: 2,
+                id: ImageId(2),
                 path: "b".into(),
                 size: Some(1),
                 ext: "jpg".into(),
@@ -3762,13 +3767,14 @@ mod restore_tests {
         sort_to_selector_index,
     };
     use imgfind::filters::GpsFilter;
+    use imgfind::ids::ImageId;
     use imgfind::sort::{Sort, SortDir, SortKey};
 
     #[test]
     fn mode_is_search_only_for_text_and_similar() {
         assert!(!mode_is_search(&PersistedMode::Browse));
         assert!(mode_is_search(&PersistedMode::Text("cat".into())));
-        assert!(mode_is_search(&PersistedMode::Similar(7)));
+        assert!(mode_is_search(&PersistedMode::Similar(ImageId(7))));
     }
 
     #[test]
@@ -3783,7 +3789,10 @@ mod restore_tests {
             sort_to_selector_index(sort, &PersistedMode::Text("x".into())),
             0
         );
-        assert_eq!(sort_to_selector_index(sort, &PersistedMode::Similar(1)), 0);
+        assert_eq!(
+            sort_to_selector_index(sort, &PersistedMode::Similar(ImageId(1))),
+            0
+        );
     }
 
     #[test]
@@ -3834,11 +3843,11 @@ mod restore_tests {
 
 #[cfg(test)]
 mod sort_sel_tests {
-    use super::{RowMeta, SelectAfter, resolve_selection};
+    use super::{ImageId, RowMeta, SelectAfter, resolve_selection};
 
     fn make_row(id: i64) -> RowMeta {
         RowMeta {
-            id,
+            id: ImageId(id),
             path: format!("img{id}.jpg"),
             size: Some(100),
             ext: "jpg".to_string(),
@@ -3892,7 +3901,7 @@ mod sort_sel_tests {
     fn resolve_by_id_found() {
         let rows = vec![make_row(10), make_row(20), make_row(30)];
         assert_eq!(
-            resolve_selection(&SelectAfter::ById(Some(20)), &rows, None),
+            resolve_selection(&SelectAfter::ById(Some(ImageId(20))), &rows, None),
             Some(1)
         );
     }
@@ -3901,7 +3910,7 @@ mod sort_sel_tests {
     fn resolve_by_id_not_found() {
         let rows = vec![make_row(10), make_row(20)];
         assert_eq!(
-            resolve_selection(&SelectAfter::ById(Some(99)), &rows, None),
+            resolve_selection(&SelectAfter::ById(Some(ImageId(99))), &rows, None),
             None
         );
     }
