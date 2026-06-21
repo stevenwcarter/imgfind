@@ -20,16 +20,6 @@ _(none)_
 
 ## High
 
-### B6. `thumbnails --size 0` panics in `image.resize()`: `generate_thumbnail_bytes` (src/thumbnail.rs:176)
-- Category: api-surface
-- Impact: 12 (severity 4 × blast-radius 3)
-- Effort: S
-- Risk: low
-- Evidence: CLI accepts `--size 0` unvalidated; `resolve_thumbnail_sizes` passes it to `generate_thumbnail_bytes` -> `image.resize(0,0,..)` which panics. Reachable from `imgfind thumbnails --size 0`.
-- Blast radius: src/main.rs:283, src/main.rs:1026, src/thumbnail.rs:176
-- Proposed fix: Reject `size == 0` in the CLI size parser / `resolve_thumbnail_sizes` with a descriptive `anyhow::Error`.
-- [x] execute   [ ] skip
-
 ## Medium
 
 ### B7. No `busy_timeout` on main r2d2 pool; possible stall under concurrent load: `Database::new pool` (src/database.rs:60)

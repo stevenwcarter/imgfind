@@ -280,7 +280,7 @@ async fn main() -> Result<()> {
         } => {
             let db_path = get_db_path(None)?;
             let mut db = Database::new(&db_path)?;
-            for s in resolve_thumbnail_sizes(&size, gui_sizes) {
+            for s in resolve_thumbnail_sizes(&size, gui_sizes)? {
                 generate_thumbnails_batch(&mut db, s, count)?;
             }
         }
@@ -1029,7 +1029,12 @@ fn handle_config_command(config_command: ConfigCommands) -> Result<()> {
 /// - Both empty/false → defaults to `[300]`.
 ///
 /// Duplicates are removed while preserving the first-occurrence order.
-fn resolve_thumbnail_sizes(sizes: &[u32], gui_sizes: bool) -> Vec<u32> {
+///
+/// Returns `Err` if any size is 0, since `image::resize(0, 0, …)` panics.
+fn resolve_thumbnail_sizes(sizes: &[u32], gui_sizes: bool) -> anyhow::Result<Vec<u32>> {
+    if let Some(&bad) = sizes.iter().find(|&&s| s == 0) {
+        anyhow::bail!("thumbnail size must be ≥ 1, got {bad}");
+    }
     let raw: Vec<u32> = if gui_sizes {
         imgfind::thumbnail::GUI_THUMBNAIL_SIZES.to_vec()
     } else if sizes.is_empty() {
@@ -1038,7 +1043,7 @@ fn resolve_thumbnail_sizes(sizes: &[u32], gui_sizes: bool) -> Vec<u32> {
         sizes.to_vec()
     };
     let mut seen = std::collections::HashSet::new();
-    raw.into_iter().filter(|s| seen.insert(*s)).collect()
+    Ok(raw.into_iter().filter(|s| seen.insert(*s)).collect())
 }
 
 /// Generate thumbnails in batches for images that don't have cached thumbnails
@@ -1106,20 +1111,40 @@ mod gui_cli_tests {
 
     #[test]
     fn resolve_sizes_default_is_300() {
-        assert_eq!(resolve_thumbnail_sizes(&[], false), vec![300]);
+        assert_eq!(resolve_thumbnail_sizes(&[], false).unwrap(), vec![300]);
     }
 
     #[test]
     fn resolve_sizes_gui_flag_expands() {
-        assert_eq!(resolve_thumbnail_sizes(&[], true), vec![300, 512, 2048]);
+        assert_eq!(
+            resolve_thumbnail_sizes(&[], true).unwrap(),
+            vec![300, 512, 2048]
+        );
     }
 
     #[test]
     fn resolve_sizes_explicit_dedup_preserves_order() {
         assert_eq!(
-            resolve_thumbnail_sizes(&[512, 300, 512], false),
+            resolve_thumbnail_sizes(&[512, 300, 512], false).unwrap(),
             vec![512, 300]
         );
+    }
+
+    /// Regression: `--size 0` must be rejected before reaching `image::resize`,
+    /// which panics when either dimension is 0.
+    #[test]
+    fn resolve_sizes_rejects_zero() {
+        assert!(resolve_thumbnail_sizes(&[0], false).is_err());
+    }
+
+    #[test]
+    fn resolve_sizes_rejects_zero_mixed_with_valid() {
+        assert!(resolve_thumbnail_sizes(&[300, 0, 512], false).is_err());
+    }
+
+    #[test]
+    fn resolve_sizes_accepts_positive() {
+        assert!(resolve_thumbnail_sizes(&[300], false).is_ok());
     }
 }
 
