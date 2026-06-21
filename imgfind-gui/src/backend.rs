@@ -39,6 +39,12 @@ pub struct Backend {
 impl Backend {
     pub fn open(dir: Option<&str>) -> Result<Backend> {
         let db_path = get_db_path(dir).context("Failed to resolve image database")?;
+        if imgfind::block_on(imgfind::migrate::is_legacy_db(&db_path)) {
+            anyhow::bail!(
+                "legacy database detected at {}; run `imgfind migrate` to upgrade it to the new engine",
+                db_path.display()
+            );
+        }
         let db = imgfind::block_on(Database::new(&db_path)).context("Failed to open database")?;
         let parent_dir = db.parent_dir.clone();
         Ok(Backend {

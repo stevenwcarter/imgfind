@@ -42,7 +42,7 @@ pub fn sanitize_model_table(name: &str) -> String {
 /// prevent SQL injection from caller-supplied names.
 pub async fn create_vector_table(conn: &turso::Connection, table: &str, dim: usize) -> Result<()> {
     anyhow::ensure!(
-        table.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+        !table.is_empty() && table.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
         "invalid table name: {table}"
     );
     conn.execute(

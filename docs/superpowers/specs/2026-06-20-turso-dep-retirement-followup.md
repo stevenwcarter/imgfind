@@ -107,3 +107,37 @@ sqlite-vec/zerocopy deps. The workspace is now pure-Rust with no C SQLite deps.
 
 > **Do not execute this checklist on the current branch.** The migration shim must stay
 > in place until personal libraries are confirmed migrated.
+
+---
+
+## Deferred minor cleanups (from final review)
+
+These items were surfaced in the final whole-branch review of the Turso migration
+(HEAD 8ab9257d) and are optional follow-up work — **do NOT fix on this branch**.
+
+**(a) Migrator resets `created_at` on tags/collections/thumbnails**
+The migrator re-inserts tags, collections, and thumbnails via `INSERT INTO … VALUES …`
+without preserving the original `created_at` timestamps, so those columns are set to
+migration time. This is low-impact: no query in the codebase orders by `created_at` on
+these tables; `favorites` IS preserved correctly. Fix if timestamp fidelity matters.
+
+**(b) `checkpoint_truncate` ignores WAL `busy` return**
+`src/migrate.rs` calls `PRAGMA wal_checkpoint(TRUNCATE)` and does not inspect the
+`busy` column in the result. In a single-process migration this is safe (no concurrent
+readers/writers can hold the WAL open), but the intent is unverified. Consider
+asserting `busy == 0` after the checkpoint if you want belt-and-suspenders assurance.
+
+**(c) Consider explicit ROLLBACK in `db_pool` `recycle()`**
+`db_pool::TursoPool::recycle()` does not issue an explicit `ROLLBACK` before returning
+a connection to the pool. The turso engine already auto-rolls-back any open transaction
+when a connection is dropped/recycled, so this is safe. Adding an explicit `ROLLBACK`
+(ignoring errors, since there may be no active transaction) would be belt-and-suspenders
+and match common pool hygiene. Optional — only worth doing if you observe unexpected
+transaction state across pool checkouts.
+
+**(d) `persist_rail` does a `block_on` round-trip on the Slint UI thread**
+`imgfind-gui/src/main.rs` `persist_rail` calls `backend.set_ui_state(...)` via
+`block_on` on the Slint event-loop thread (pre-existing pattern, not introduced by
+this branch). Under normal usage this is fast enough to be imperceptible, but if users
+report lag during brush edits, move the persist to a background worker thread (similar
+to thumbnail loading) to keep the UI thread free.
