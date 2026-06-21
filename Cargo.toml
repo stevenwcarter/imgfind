@@ -63,6 +63,8 @@ futures = { version = "0.3.31", optional = true }
 ratatui = { version = "0.30.1", optional = true }
 ratatui-image = { version = "11.0.4", features = ["tokio"], optional = true }
 tui-input = { version = "0.15.3", optional = true }
+turso = { version = "0.7.0-pre.10", default-features = false }
+deadpool = { version = "0.12", features = ["managed"] }
 dotenvy = "0.15.7"
 tracing-appender = "0.2.3"
 kamadak-exif = "0.6.1"
