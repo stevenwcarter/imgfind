@@ -1172,6 +1172,50 @@ mod tests {
         );
     }
 
+    /// Discriminates `parent_dir` vs `current_dir` as the join base.
+    ///
+    /// `parent_dir` is `CARGO_MANIFEST_DIR/src`, `current_dir` is `CARGO_MANIFEST_DIR`
+    /// (the workspace root, which is the real cwd when `cargo test` runs).  The
+    /// relative path `"main.rs"` exists only under `src/`, not under the workspace
+    /// root.
+    ///
+    /// With the **correct** base (`parent_dir`):
+    ///   abs = `CARGO_MANIFEST_DIR/src/main.rs`; parent = `.../src` ≠ `current_dir`
+    ///   → non-recursive filter **excludes** it (len == 0). ✓
+    ///
+    /// With the **wrong** base (`current_dir` used instead):
+    ///   abs = `CARGO_MANIFEST_DIR/main.rs`; canonicalize fails (file absent) → raw
+    ///   path kept; parent = `CARGO_MANIFEST_DIR` == `current_dir`
+    ///   → non-recursive filter **includes** it (len == 1). ✗
+    ///
+    /// A future regression substituting `current_dir` for `parent_dir` would flip
+    /// this assertion from 0 → 1 and be caught immediately.
+    #[test]
+    fn filter_results_join_base_is_parent_dir_not_current_dir() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        // parent_dir is src/ (a real subdir); current_dir is the workspace root.
+        let parent_dir = manifest.join("src");
+        let current_dir = manifest;
+        // "main.rs" lives at parent_dir/main.rs, not at current_dir/main.rs.
+        let results = vec![("main.rs".to_string(), 0.9_f32)];
+        let out = filter_results(
+            results,
+            &parent_dir,
+            current_dir,
+            false, // not --all
+            false, // non-recursive: checks abs_path.parent() == current_dir
+            10,
+        );
+        // Correct base (src/): abs parent is src/ ≠ workspace root → excluded.
+        // Wrong base (workspace root): abs parent is workspace root == current_dir → included.
+        assert_eq!(
+            out.len(),
+            0,
+            "main.rs under src/ must be EXCLUDED when cwd=workspace-root (non-recursive): \
+             parent of resolved path is src/, not the workspace root"
+        );
+    }
+
     /// With a different `current_dir`, the same result must be excluded in
     /// non-recursive mode (boundary test).
     #[test]
