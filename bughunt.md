@@ -55,15 +55,5 @@ _(none)_
 - Proposed fix: On `Err`, surface a transient UI error (toast/status field).
 - [ ] execute   [ ] skip
 
-### B19. Detail-panel metadata re-fetched from DB on every open: `backend.metadata` (imgfind-gui/src/backend.rs:174)
-- Category: caching
-- Impact: 2 (severity 1 × blast-radius 2)
-- Effort: S
-- Risk: low
-- Evidence: `backend.metadata()` queries the DB every time the detail panel opens an image; no client-side cache across opens (unlike `detail_cache` for decoded images).
-- Blast radius: imgfind-gui/src/backend.rs:174, imgfind-gui/src/detail.rs
-- Proposed fix: Add a small metadata cache keyed by relative path, invalidated on generation bump.
-- [x] execute   [ ] skip
-
 ## Skip (do not re-flag in future runs)
 - `SearchState.results` unbounded `Vec<RowMeta>` at imgfind-gui/src/state.rs:19 — search results are 100 by default and only "relevance" is in-memory sorted; O(100) is fine.

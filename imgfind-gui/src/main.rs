@@ -6,6 +6,7 @@ mod detail;
 mod detail_cache;
 mod image_util;
 mod loader;
+mod meta_cache;
 mod nav;
 mod preload;
 mod selection;
@@ -3303,7 +3304,16 @@ fn spawn_detail_meta(
     path: String,
 ) {
     std::thread::spawn(move || {
-        let meta_result = backend.metadata(&path);
+        let meta_result = match meta_cache::get(&path) {
+            Some(meta) => Ok(meta),
+            None => {
+                let r = backend.metadata(&path);
+                if let Ok(ref meta) = r {
+                    meta_cache::insert(path.clone(), meta.clone());
+                }
+                r
+            }
+        };
         slint::invoke_from_event_loop(move || {
             let Some(w) = weak.upgrade() else { return };
             // Skip the paint if a faster nav has already moved the panel on.
