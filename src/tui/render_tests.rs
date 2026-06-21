@@ -16,7 +16,7 @@ use tui_input::Input;
 
 use super::app::{App, InputMode};
 use super::event::EventHandler;
-use crate::database::Database;
+use crate::{block_on, database::Database};
 use crate::tui::app::{ImageEntry, SearchResult};
 
 /// Fixed terminal size for all render tests.
@@ -29,7 +29,7 @@ fn temp_db() -> (Database, std::path::PathBuf) {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let root = std::env::temp_dir().join(format!("imgfind_tui_test_{}_{n}", std::process::id()));
     let db_path = root.join(".imgfind").join("imgfind.db");
-    let db = Database::new(&db_path).expect("create temp db");
+    let db = block_on(Database::new(&db_path)).expect("create temp db");
     (db, root)
 }
 

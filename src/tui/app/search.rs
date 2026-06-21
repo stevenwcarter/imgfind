@@ -135,7 +135,7 @@ impl App {
                 let mut images: Vec<(String, f32, DynamicImage)> = Vec::new();
 
                 // Check if database has any images
-                let total_images = db.get_image_count()?;
+                let total_images = db.get_image_count().await?;
                 if total_images == 0 {
                     return Ok(SearchResult {
                         images,
@@ -145,7 +145,7 @@ impl App {
                 }
 
                 // Load CLIP model
-                let model_name = db.active_model()?.name;
+                let model_name = db.active_model().await?.name;
                 let model = ClipEmbedder::from_model(&model_name, false)
                     .context("Failed to create ClipEmbedder")?;
 
@@ -158,13 +158,15 @@ impl App {
                 // Defaults preserve the prior hardcoded behavior (distance <= 1.3, k ceiling 100).
                 let sc = crate::config::SearchConfig::default();
                 let search_engine = SearchEngine::new(&db);
-                let all_results = search_engine.search_with_thumbnails_raw(
-                    &query_embedding,
-                    99,
-                    0,
-                    sc.distance_threshold,
-                    sc.max_k,
-                )?;
+                let all_results = search_engine
+                    .search_with_thumbnails_raw(
+                        &query_embedding,
+                        99,
+                        0,
+                        sc.distance_threshold,
+                        sc.max_k,
+                    )
+                    .await?;
 
                 let result_count = all_results.len();
 
