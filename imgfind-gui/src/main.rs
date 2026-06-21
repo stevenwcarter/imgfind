@@ -34,6 +34,7 @@ use imgfind::filters::{Filters, GpsFilter, TagMatch};
 use imgfind::ids::ImageId;
 use imgfind::sort::{RowMeta, Sort, SortDir, SortKey};
 use imgfind::ui_state::{PersistedMode, UiState};
+use imgfind::units::FileSize;
 use state::{SearchState, ViewState};
 
 /// Whether the current tile grid was populated by a text search or a
@@ -168,7 +169,11 @@ fn format_bytes(bytes: i64) -> String {
 /// Build the always-visible bottom statusline from the current selection and
 /// the full result set. ASCII separators only (Slint default-font glyph safety).
 fn format_statusline(sel: &selection::Selection, results: &[RowMeta]) -> String {
-    let total_bytes: i64 = results.iter().filter_map(|r| r.size).sum();
+    let total_bytes: i64 = results
+        .iter()
+        .filter_map(|r| r.size)
+        .map(FileSize::bytes)
+        .sum();
     let label = match sel.mode() {
         selection::SelectionMode::Normal => "NORMAL",
         selection::SelectionMode::Free => "VISUAL (FREE)",
@@ -184,6 +189,7 @@ fn format_statusline(sel: &selection::Selection, results: &[RowMeta]) -> String 
             .set()
             .iter()
             .filter_map(|&i| results.get(i).and_then(|r| r.size))
+            .map(FileSize::bytes)
             .sum();
         format!(
             "{base} | selected {} - {}",
@@ -224,8 +230,8 @@ fn build_filters(
         _ => GpsFilter::Any,
     };
     Filters {
-        size_min,
-        size_max,
+        size_min: size_min.map(FileSize),
+        size_max: size_max.map(FileSize),
         extensions,
         gps,
         ..Default::default()
@@ -2295,13 +2301,13 @@ fn restore_session(st: UiState, ctx: RestoreCtx<'_>) {
         *ctx.filters.lock() = st.filters.clone();
         *ctx.selected_exts.lock() = exts.clone();
         let lo = bytes_to_fraction(
-            st.filters.size_min,
+            st.filters.size_min.map(FileSize::bytes),
             ctx.size_bounds.0,
             ctx.size_bounds.1,
             true,
         );
         let hi = bytes_to_fraction(
-            st.filters.size_max,
+            st.filters.size_max.map(FileSize::bytes),
             ctx.size_bounds.0,
             ctx.size_bounds.1,
             false,
@@ -2670,7 +2676,7 @@ fn build_tiles_model(
         .zip(images)
         .enumerate()
         .map(|(i, (r, maybe_img))| {
-            let size_kb = r.size.unwrap_or(0) / 1024;
+            let size_kb = r.size.map_or(0, FileSize::bytes) / 1024;
             // Global index: window offset + position within this slice.
             let index = offset + i;
             Tile {
@@ -3516,8 +3522,8 @@ mod arg_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        DetailState, build_filters, build_size_label, clamp_next, clamp_prev, detail_shows,
-        format_bytes, format_statusline, fraction_to_bytes, is_current_generation,
+        DetailState, FileSize, build_filters, build_size_label, clamp_next, clamp_prev,
+        detail_shows, format_bytes, format_statusline, fraction_to_bytes, is_current_generation,
     };
     use imgfind::ids::ImageId;
     use imgfind::sort::RowMeta;
@@ -3641,13 +3647,13 @@ mod tests {
             RowMeta {
                 id: ImageId(1),
                 path: "a".into(),
-                size: Some(1_000_000),
+                size: Some(FileSize(1_000_000)),
                 ext: "jpg".into(),
             },
             RowMeta {
                 id: ImageId(2),
                 path: "b".into(),
-                size: Some(1_000_000),
+                size: Some(FileSize(1_000_000)),
                 ext: "jpg".into(),
             },
         ];
@@ -3681,19 +3687,19 @@ mod tests {
             RowMeta {
                 id: ImageId(1),
                 path: "a".into(),
-                size: Some(2_000_000),
+                size: Some(FileSize(2_000_000)),
                 ext: "jpg".into(),
             },
             RowMeta {
                 id: ImageId(2),
                 path: "b".into(),
-                size: Some(3_000_000),
+                size: Some(FileSize(3_000_000)),
                 ext: "jpg".into(),
             },
             RowMeta {
                 id: ImageId(3),
                 path: "c".into(),
-                size: Some(4_000_000),
+                size: Some(FileSize(4_000_000)),
                 ext: "jpg".into(),
             },
         ];
@@ -3715,13 +3721,13 @@ mod tests {
             RowMeta {
                 id: ImageId(1),
                 path: "a".into(),
-                size: Some(1),
+                size: Some(FileSize(1)),
                 ext: "jpg".into(),
             },
             RowMeta {
                 id: ImageId(2),
                 path: "b".into(),
-                size: Some(1),
+                size: Some(FileSize(1)),
                 ext: "jpg".into(),
             },
         ];
@@ -3748,7 +3754,7 @@ mod tests {
         // Inverted slider: lo fraction maps to a LARGER byte value than hi.
         // lo=0.8 -> Some(high bytes); hi=0.2 -> Some(low bytes); both Some, min>max.
         let f = build_filters(0.8, 0.2, (0, 1000), &HashSet::new(), 0);
-        let (mn, mx) = (f.size_min.unwrap(), f.size_max.unwrap());
+        let (mn, mx) = (f.size_min.unwrap().bytes(), f.size_max.unwrap().bytes());
         assert!(
             mn <= mx,
             "size_min ({mn}) must be <= size_max ({mx}) after swap"
@@ -3758,8 +3764,8 @@ mod tests {
     #[test]
     fn build_filters_leaves_normal_size_range() {
         let f = build_filters(0.2, 0.8, (0, 1000), &HashSet::new(), 0);
-        assert_eq!(f.size_min, Some(200));
-        assert_eq!(f.size_max, Some(800));
+        assert_eq!(f.size_min, Some(FileSize(200)));
+        assert_eq!(f.size_max, Some(FileSize(800)));
     }
 }
 
@@ -3846,13 +3852,13 @@ mod restore_tests {
 
 #[cfg(test)]
 mod sort_sel_tests {
-    use super::{ImageId, RowMeta, SelectAfter, resolve_selection};
+    use super::{FileSize, ImageId, RowMeta, SelectAfter, resolve_selection};
 
     fn make_row(id: i64) -> RowMeta {
         RowMeta {
             id: ImageId(id),
             path: format!("img{id}.jpg"),
-            size: Some(100),
+            size: Some(FileSize(100)),
             ext: "jpg".to_string(),
         }
     }

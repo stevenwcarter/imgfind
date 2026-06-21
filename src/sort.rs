@@ -2,6 +2,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ids::ImageId;
+use crate::units::FileSize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -37,7 +38,7 @@ impl Default for Sort {
 pub struct RowMeta {
     pub id: ImageId,
     pub path: String,
-    pub size: Option<i64>,
+    pub size: Option<FileSize>,
     pub ext: String,
 }
 
@@ -150,7 +151,7 @@ mod tests {
             RowMeta {
                 id: ImageId(1),
                 path: "b.jpg".into(),
-                size: Some(10),
+                size: Some(FileSize(10)),
                 ext: "jpg".into(),
             },
             RowMeta {
@@ -162,13 +163,13 @@ mod tests {
             RowMeta {
                 id: ImageId(3),
                 path: "c.jpg".into(),
-                size: Some(10),
+                size: Some(FileSize(10)),
                 ext: "jpg".into(),
             },
             RowMeta {
                 id: ImageId(4),
                 path: "d.jpg".into(),
-                size: Some(5),
+                size: Some(FileSize(5)),
                 ext: "jpg".into(),
             },
         ];

@@ -4,11 +4,13 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::units::FileSize;
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Filters {
     /// Inclusive file-size bounds in bytes; `None` = unbounded on that side.
-    pub size_min: Option<i64>,
-    pub size_max: Option<i64>,
+    pub size_min: Option<FileSize>,
+    pub size_max: Option<FileSize>,
     /// Lowercased extensions without the dot (e.g. "jpg"); empty = all types.
     pub extensions: Vec<String>,
     pub gps: GpsFilter,
@@ -66,11 +68,11 @@ pub fn build_filter_clause_turso(f: &Filters) -> (String, Vec<turso::Value>) {
 
     if let Some(min) = f.size_min {
         clauses.push("m.file_size >= ?".into());
-        params.push(turso::Value::Integer(min));
+        params.push(turso::Value::Integer(min.bytes()));
     }
     if let Some(max) = f.size_max {
         clauses.push("m.file_size <= ?".into());
-        params.push(turso::Value::Integer(max));
+        params.push(turso::Value::Integer(max.bytes()));
     }
     if !f.extensions.is_empty() {
         let mut ors = Vec::new();
@@ -129,8 +131,8 @@ mod tests {
     #[test]
     fn carry_tag_filter_preserves_tags_and_size() {
         let mut rebuilt = Filters {
-            size_min: Some(1024),
-            size_max: Some(10 * 1024 * 1024),
+            size_min: Some(FileSize(1024)),
+            size_max: Some(FileSize(10 * 1024 * 1024)),
             ..Default::default()
         };
         let existing = Filters {
@@ -144,8 +146,8 @@ mod tests {
         assert_eq!(rebuilt.tag_match, TagMatch::AnyOf);
         assert!(rebuilt.tags_enabled);
         // size fields must be untouched
-        assert_eq!(rebuilt.size_min, Some(1024));
-        assert_eq!(rebuilt.size_max, Some(10 * 1024 * 1024));
+        assert_eq!(rebuilt.size_min, Some(FileSize(1024)));
+        assert_eq!(rebuilt.size_max, Some(FileSize(10 * 1024 * 1024)));
     }
 
     #[test]
@@ -158,8 +160,8 @@ mod tests {
     #[test]
     fn size_both_bounds() {
         let f = Filters {
-            size_min: Some(100),
-            size_max: Some(5000),
+            size_min: Some(FileSize(100)),
+            size_max: Some(FileSize(5000)),
             ..Default::default()
         };
         let (sql, params) = build_filter_clause_turso(&f);
@@ -173,7 +175,7 @@ mod tests {
     #[test]
     fn size_one_sided() {
         let f = Filters {
-            size_min: Some(100),
+            size_min: Some(FileSize(100)),
             ..Default::default()
         };
         let (sql, params) = build_filter_clause_turso(&f);
@@ -220,7 +222,7 @@ mod tests {
     #[test]
     fn combined_filters_join_with_and() {
         let f = Filters {
-            size_min: Some(10),
+            size_min: Some(FileSize(10)),
             size_max: None,
             extensions: vec!["nef".into()],
             gps: GpsFilter::HasGps,
@@ -297,7 +299,7 @@ mod tests {
     #[test]
     fn tags_combine_after_size() {
         let f = Filters {
-            size_min: Some(5),
+            size_min: Some(FileSize(5)),
             tags: vec!["x".into()],
             tags_enabled: true,
             ..Default::default()

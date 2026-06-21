@@ -81,19 +81,6 @@ Last triage: 2026-06-21 against `main` @ 20d80f38. Toolchain: cargo build/check 
 - **Proposed migration:** introduce `EmbeddingDim(usize)`; carry it from `ensure_and_activate_model` through schema/vector-table creation; fix to green.
 - [x] execute   [ ] skip
 
-### T7. File size is a bare `Option<i64>` with implicit byte units: `file size (bytes)` (src/sort.rs:38)
-- **Lens:** newtype
-- **Impact:** 4 (bug-prevention med × blast 2)
-- **Effort:** M
-- **Risk:** low
-- **Current type:** `Option<i64>` (bytes).
-- **Proposed type:** `struct FileSize(i64)` (or `u64` to encode the non-negative invariant).
-- **Evidence:** raw `i64` bytes with units only in field names; could be confused with a count or have min/max filter bounds swapped without a type error. No live bug; clarity + a non-negativity invariant.
-- **Blast radius:** src/sort.rs:38; src/database.rs:1164, :1252; src/filters.rs:67-73; imgfind-gui/src/main.rs:2530, :2558-2567.
-- **Invariants/caveats:** Touches the filter size-range slider in the GUI and sort tie-breaks; if `FileSize` ever lands in ui_state, make it `#[serde(transparent)]`.
-- **Proposed migration:** introduce `FileSize`; change the column extraction + sort/filter signatures at source; fix to green.
-- [x] execute   [ ] skip
-
 ### T8. Four adjacent `f64` bounds invite N/S/E/W swaps: `geographic bounds` (src/database.rs:1211)
 - **Lens:** newtype
 - **Impact:** 3 (bug-prevention med × blast 1, but a real silent-wrong-result class)

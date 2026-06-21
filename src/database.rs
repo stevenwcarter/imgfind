@@ -1487,7 +1487,7 @@ impl Database {
 fn row_meta(row: &turso::Row) -> Result<crate::sort::RowMeta> {
     let id = ImageId(col_i64(row, 0, "id")?);
     let path = col_text(row, 1, "path")?;
-    let size = col_opt_i64(row, 2)?;
+    let size = col_opt_i64(row, 2)?.map(crate::units::FileSize);
     let ext = path
         .rsplit_once('.')
         .map(|(_, e)| e.to_lowercase())
@@ -1715,6 +1715,7 @@ fn generate_jitter(img: &ImageWithMetadata) -> (f64, f64) {
 mod tests {
     use super::*;
     use crate::schema::LATEST_MIGRATION_VERSION;
+    use crate::units::FileSize;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     /// Unique temp directory for an isolated test database.
@@ -2381,8 +2382,8 @@ mod tests {
         let sized = db
             .browse(
                 &Filters {
-                    size_min: Some(500),
-                    size_max: Some(6000),
+                    size_min: Some(FileSize(500)),
+                    size_max: Some(FileSize(6000)),
                     ..Default::default()
                 },
                 100,
@@ -2685,9 +2686,9 @@ mod tests {
         assert_eq!(rows[1].path, "img1.jpg");
         assert_eq!(rows[2].path, "img2.jpg");
 
-        assert_eq!(rows[0].size, Some(300));
-        assert_eq!(rows[1].size, Some(100));
-        assert_eq!(rows[2].size, Some(200));
+        assert_eq!(rows[0].size, Some(FileSize(300)));
+        assert_eq!(rows[1].size, Some(FileSize(100)));
+        assert_eq!(rows[2].size, Some(FileSize(200)));
 
         cleanup(&tmp);
     }

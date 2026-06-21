@@ -15,7 +15,7 @@ use imgfind::search::SearchEngine;
 use imgfind::sort::{RowMeta, Sort};
 use imgfind::thumbnail::get_or_generate_thumbnail;
 use imgfind::ui_state::UiState;
-use imgfind::{AbsolutePath, RelativePath, get_db_path, relative_to_abs_path};
+use imgfind::{AbsolutePath, FileSize, RelativePath, get_db_path, relative_to_abs_path};
 
 /// Maximum number of ranked results fetched per search/similar query. The
 /// full ordered set lives in `SearchState`, but ranked vector search is
@@ -101,7 +101,7 @@ impl Backend {
                 ext: ext_from(&path),
                 id,
                 path,
-                size,
+                size: size.map(FileSize),
             })
             .collect())
     }
@@ -236,7 +236,7 @@ impl Backend {
                 ext: ext_from(&path),
                 id,
                 path,
-                size,
+                size: size.map(FileSize),
             })
             .collect())
     }

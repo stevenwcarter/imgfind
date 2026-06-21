@@ -90,6 +90,7 @@ impl SearchState {
 mod tests {
     use imgfind::ids::ImageId;
     use imgfind::sort::{SortDir, SortKey};
+    use imgfind::units::FileSize;
 
     use super::*;
 
@@ -101,7 +102,7 @@ mod tests {
         RowMeta {
             id: ImageId(id),
             path: path.into(),
-            size,
+            size: size.map(FileSize),
             ext,
         }
     }
