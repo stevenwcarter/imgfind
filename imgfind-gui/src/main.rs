@@ -3749,7 +3749,10 @@ mod tests {
         // lo=0.8 -> Some(high bytes); hi=0.2 -> Some(low bytes); both Some, min>max.
         let f = build_filters(0.8, 0.2, (0, 1000), &HashSet::new(), 0);
         let (mn, mx) = (f.size_min.unwrap(), f.size_max.unwrap());
-        assert!(mn <= mx, "size_min ({mn}) must be <= size_max ({mx}) after swap");
+        assert!(
+            mn <= mx,
+            "size_min ({mn}) must be <= size_max ({mx}) after swap"
+        );
     }
 
     #[test]
