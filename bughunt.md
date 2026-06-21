@@ -20,16 +20,6 @@ _(none)_
 
 ## High
 
-### B5. GUI startup `size_bounds()`/`extensions()` failures silently default the filter UI with no log: `size_bounds/extensions startup` (imgfind-gui/src/main.rs:1740)
-- Category: observability
-- Impact: 12 (severity 4 × blast-radius 3)
-- Effort: S
-- Risk: low
-- Evidence: `backend.size_bounds().unwrap_or((0,0))` and `extensions().unwrap_or_default()` at startup: a DB error silently yields a zero size range / empty type chips (filter bar wrong) with no log entry, so the degraded filter UI is undiagnosable. (Merged: the api-surface and observability lenses flagged the same root cause at approximate lines 276/279 and 1740/1743.)
-- Blast radius: imgfind-gui/src/main.rs:276, imgfind-gui/src/main.rs:279, imgfind-gui/src/main.rs:1740, imgfind-gui/src/main.rs:1743
-- Proposed fix: `map_err` + `tracing::warn!` the specific error before the `unwrap_or` fallback; consider a user-facing error if these core queries fail.
-- [x] execute   [ ] skip
-
 ### B6. `thumbnails --size 0` panics in `image.resize()`: `generate_thumbnail_bytes` (src/thumbnail.rs:176)
 - Category: api-surface
 - Impact: 12 (severity 4 × blast-radius 3)
