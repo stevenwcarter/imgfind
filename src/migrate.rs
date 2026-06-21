@@ -149,9 +149,20 @@ pub async fn migrate_db(canonical_path: &Path, force: bool) -> Result<MigrateOut
     write_turso(&tmp, &legacy)
         .await
         .context("write Turso database")?;
+    // `write_turso` checkpoints and drops its pool before returning, but the
+    // temp turso may still leave empty `-wal`/`-shm` sidecars; clear them so
+    // they cannot survive the rename next to the canonical DB.
+    remove_sqlite_sidecars(&tmp).context("clean temp turso sidecars")?;
 
+    // Back up the (now self-contained) legacy DB first, then move its redundant
+    // legacy sidecars aside too so the canonical name keeps no stale rusqlite
+    // WAL/SHM. The backup must land before the new DB is installed so a failure
+    // never leaves the canonical name empty.
     std::fs::rename(canonical_path, &bak)
         .with_context(|| format!("back up legacy DB to {bak:?}"))?;
+    // The legacy WAL was folded into the `.db` on read, so these are redundant;
+    // drop them so only `imgfind.db` + `imgfind.db.rusqlite.bak` remain.
+    remove_sqlite_sidecars(canonical_path).context("clean legacy sidecars")?;
     if let Err(e) = std::fs::rename(&tmp, canonical_path) {
         // Roll the backup back into place so the canonical file is never lost.
         let _ = std::fs::rename(&bak, canonical_path);
@@ -178,7 +189,7 @@ struct LegacyData {
     embeddings: Vec<EmbeddingTable>,
     thumbnails: Vec<(String, i64, Vec<u8>)>,
     metadata: Vec<MetadataRow>,
-    favorites: Vec<i64>,
+    favorites: Vec<(i64, Option<String>)>,
     tags: Vec<(i64, String)>,
     image_tags: Vec<(i64, i64)>,
     collections: Vec<(i64, String)>,
@@ -207,10 +218,16 @@ impl LegacyData {
     }
 
     /// Read every table from the legacy database into memory.
+    ///
+    /// Before reading, the legacy DB is opened writable and its WAL is folded
+    /// into the main `.db` file via `wal_checkpoint(TRUNCATE)`, so the backup we
+    /// later make by renaming the `.db` is self-contained (the legacy `-wal`/
+    /// `-shm` sidecars become empty/redundant and are cleaned up post-rename).
     fn read(path: &Path) -> Result<Self> {
         init_sqlite_vec();
         let conn = rusqlite::Connection::open(path)
             .with_context(|| format!("open legacy database at {path:?}"))?;
+        checkpoint_truncate(&conn).context("checkpoint legacy WAL into main DB")?;
 
         let models = read_models(&conn)?;
 
@@ -249,6 +266,30 @@ impl LegacyData {
             ui_state,
         })
     }
+}
+
+/// Fold a rusqlite connection's WAL fully into its main `.db` file. After this
+/// the `.db` is self-contained; the `-wal`/`-shm` sidecars are empty/redundant.
+fn checkpoint_truncate(conn: &rusqlite::Connection) -> Result<()> {
+    // `wal_checkpoint(TRUNCATE)` returns a `(busy, log, checkpointed)` row;
+    // `query_row` consumes it so rusqlite does not complain about the result.
+    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+        .context("PRAGMA wal_checkpoint(TRUNCATE)")
+}
+
+/// Remove the `-wal` and `-shm` sidecars beside `db_path`, if present. SQLite
+/// sidecars are the main path with `-wal`/`-shm` appended to the file name.
+fn remove_sqlite_sidecars(db_path: &Path) -> Result<()> {
+    for suffix in ["-wal", "-shm"] {
+        let mut name = db_path.as_os_str().to_os_string();
+        name.push(suffix);
+        let sidecar = PathBuf::from(name);
+        if sidecar.exists() {
+            std::fs::remove_file(&sidecar)
+                .with_context(|| format!("remove sidecar {sidecar:?}"))?;
+        }
+    }
+    Ok(())
 }
 
 fn read_models(conn: &rusqlite::Connection) -> Result<Vec<LegacyModel>> {
@@ -335,12 +376,12 @@ fn read_metadata(conn: &rusqlite::Connection) -> Result<Vec<MetadataRow>> {
         .context("collect metadata")
 }
 
-fn read_favorites(conn: &rusqlite::Connection) -> Result<Vec<i64>> {
+fn read_favorites(conn: &rusqlite::Connection) -> Result<Vec<(i64, Option<String>)>> {
     let mut stmt = conn
-        .prepare("SELECT image_id FROM favorites")
+        .prepare("SELECT image_id, created_at FROM favorites")
         .context("prepare favorites query")?;
     let rows = stmt
-        .query_map([], |r| r.get(0))
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
         .context("query favorites")?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .context("collect favorites")
@@ -430,6 +471,13 @@ async fn write_turso(tmp: &Path, data: &LegacyData) -> Result<()> {
         .await
         .context("checkpoint WAL into temp DB")?;
     while wal.next().await?.is_some() {}
+
+    // Drop the connection and the pool so the temp DB's file handles are
+    // released and any remaining WAL/SHM is flushed/closed before the caller
+    // renames the temp file into the canonical location.
+    drop(wal);
+    drop(conn);
+    drop(pool);
     Ok(())
 }
 
@@ -569,15 +617,24 @@ async fn write_metadata(conn: &turso::Connection, metadata: &[MetadataRow]) -> R
     Ok(())
 }
 
-async fn write_favorites(conn: &turso::Connection, favorites: &[i64]) -> Result<()> {
+/// Write favorites preserving each row's original `created_at`, so the
+/// post-migration ordering (`list_favorites` orders by `created_at DESC`)
+/// matches the source. Mirrors the explicit-id/timestamp `images` writer.
+async fn write_favorites(
+    conn: &turso::Connection,
+    favorites: &[(i64, Option<String>)],
+) -> Result<()> {
     let tx = conn
         .unchecked_transaction()
         .await
         .context("begin favorites tx")?;
-    for id in favorites {
-        tx.execute("INSERT INTO favorites (image_id) VALUES (?1)", [*id])
-            .await
-            .with_context(|| format!("insert favorite image_id {id}"))?;
+    for (id, created_at) in favorites {
+        tx.execute(
+            "INSERT INTO favorites (image_id, created_at) VALUES (?1, ?2)",
+            (*id, opt_text(created_at.clone())),
+        )
+        .await
+        .with_context(|| format!("insert favorite image_id {id}"))?;
     }
     tx.commit().await.context("commit favorites tx")?;
     Ok(())
@@ -645,6 +702,14 @@ mod tests {
         dir
     }
 
+    /// The SQLite sidecar path for `db_path` with `suffix` (`-wal` / `-shm`)
+    /// appended to the full file name.
+    fn sidecar(db_path: &Path, suffix: &str) -> PathBuf {
+        let mut name = db_path.as_os_str().to_os_string();
+        name.push(suffix);
+        PathBuf::from(name)
+    }
+
     /// 512-dim L2-normalised f32 vector seeded with a constant.
     fn unit_vec(seed: f32) -> Vec<f32> {
         let mut v: Vec<f32> = (0..512).map(|i| (i as f32 * seed + 0.1).sin()).collect();
@@ -658,10 +723,21 @@ mod tests {
     }
 
     /// Build a legacy rusqlite + sqlite-vec database at `path` and return the
-    /// three known embedding blobs (by image id) for later byte comparison.
-    fn build_legacy_db(path: &Path) -> Vec<(i64, Vec<u8>)> {
+    /// three known embedding blobs (by image id) plus the still-open
+    /// connection. The connection is returned (not dropped) so the data stays
+    /// in the WAL: closing the last WAL connection auto-checkpoints, which
+    /// would hide the very sidecars the migrator must handle. The caller drops
+    /// it (after asserting the sidecars exist) before running `migrate_db`.
+    fn build_legacy_db(path: &Path) -> (rusqlite::Connection, Vec<(i64, Vec<u8>)>) {
         init_sqlite_vec();
         let conn = rusqlite::Connection::open(path).unwrap();
+        // Real legacy DBs ran in WAL mode, so they carry `-wal`/`-shm`
+        // sidecars. Build the fixture the same way so the migrator's sidecar
+        // handling is actually exercised. `journal_mode` returns a row.
+        conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get::<_, String>(0))
+            .unwrap();
+        // Never auto-fold the WAL, so the data really lives in the `-wal` file.
+        conn.execute_batch("PRAGMA wal_autocheckpoint = 0").unwrap();
         conn.execute_batch(
             "CREATE TABLE images (id INTEGER PRIMARY KEY AUTOINCREMENT, \
                 path TEXT UNIQUE NOT NULL, hash TEXT NOT NULL, \
@@ -769,9 +845,20 @@ mod tests {
         )
         .unwrap();
 
-        // A favorite, a tag + link, a collection + link, and ui_state.
-        conn.execute("INSERT INTO favorites (image_id) VALUES (1)", [])
+        // Three favorites with DISTINCT created_at in a known order. By
+        // `created_at DESC` (how `list_favorites` orders) this is [2, 3, 1]:
+        // image 2 is newest, image 1 oldest.
+        for (image_id, created_at) in [
+            (1i64, "2024-01-01 00:00:00"),
+            (3i64, "2024-02-01 00:00:00"),
+            (2i64, "2024-03-01 00:00:00"),
+        ] {
+            conn.execute(
+                "INSERT INTO favorites (image_id, created_at) VALUES (?1, ?2)",
+                rusqlite::params![image_id, created_at],
+            )
             .unwrap();
+        }
         conn.execute("INSERT INTO tags (id, name) VALUES (1, 'sunset')", [])
             .unwrap();
         conn.execute(
@@ -792,7 +879,7 @@ mod tests {
         )
         .unwrap();
 
-        blobs
+        (conn, blobs)
     }
 
     async fn turso_blob(conn: &turso::Connection, sql: &str) -> Option<Vec<u8>> {
@@ -805,7 +892,17 @@ mod tests {
     async fn migrates_images_embeddings_thumbnails_with_stable_ids() {
         let dir = temp_dir();
         let canonical = dir.join("imgfind.db");
-        let source_blobs = build_legacy_db(&canonical);
+        let (legacy_conn, source_blobs) = build_legacy_db(&canonical);
+
+        // The fixture is genuinely WAL-mode with un-checkpointed data: the
+        // `-wal` sidecar must exist before migration (otherwise this test
+        // would not exercise the sidecar handling at all). Then close the
+        // connection so the migrator can open the DB writable.
+        assert!(
+            sidecar(&canonical, "-wal").exists(),
+            "fixture must be WAL-mode with a live -wal sidecar"
+        );
+        drop(legacy_conn);
 
         let outcome = migrate_db(&canonical, false).await.unwrap();
         assert_eq!(
@@ -819,7 +916,22 @@ mod tests {
 
         // Legacy file was moved aside as a backup.
         assert!(backup_path(&canonical).exists(), "backup must exist");
-        assert!(!canonical.with_extension("db.turso.tmp").exists());
+        let tmp = canonical.with_extension("db.turso.tmp");
+        assert!(!tmp.exists(), "temp turso DB must be gone");
+
+        // The canonical directory must contain ONLY the new turso `imgfind.db`
+        // and its `.rusqlite.bak` backup — no orphaned rusqlite sidecars under
+        // the canonical name, and no leaked temp turso DB/sidecars.
+        assert!(
+            !sidecar(&canonical, "-wal").exists(),
+            "no orphaned imgfind.db-wal beside the canonical DB"
+        );
+        assert!(
+            !sidecar(&canonical, "-shm").exists(),
+            "no orphaned imgfind.db-shm beside the canonical DB"
+        );
+        assert!(!sidecar(&tmp, "-wal").exists(), "no leaked tmp turso -wal");
+        assert!(!sidecar(&tmp, "-shm").exists(), "no leaked tmp turso -shm");
 
         let pool = TursoPool::open(&canonical, 1).await.unwrap();
         let conn = pool.get().await.unwrap();
@@ -904,21 +1016,25 @@ mod tests {
         let row = rows.next().await.unwrap().unwrap();
         assert_eq!(row.get_value(0).unwrap().as_text().unwrap(), "sunset");
 
-        // Favorite + collection link + ui_state present.
+        // Favorites order preserved: `created_at DESC` (how `list_favorites`
+        // orders) must yield [2, 3, 1] from the source timestamps, not the
+        // insert order. A migration that drops `created_at` would default all
+        // rows to migration time and lose this ordering.
         let mut rows = conn
-            .query("SELECT image_id FROM favorites", ())
+            .query(
+                "SELECT image_id FROM favorites ORDER BY created_at DESC",
+                (),
+            )
             .await
             .unwrap();
+        let mut fav_order = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            fav_order.push(row.get_value(0).unwrap().as_integer().copied().unwrap());
+        }
         assert_eq!(
-            rows.next()
-                .await
-                .unwrap()
-                .unwrap()
-                .get_value(0)
-                .unwrap()
-                .as_integer()
-                .copied(),
-            Some(1)
+            fav_order,
+            vec![2, 3, 1],
+            "favorites must keep their source created_at ordering"
         );
         let mut rows = conn
             .query("SELECT state_json FROM ui_state WHERE id=1", ())
