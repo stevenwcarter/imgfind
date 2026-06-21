@@ -11,31 +11,31 @@ impl<'a> SearchEngine<'a> {
         SearchEngine { db }
     }
 
-    pub fn search(
+    pub async fn search(
         &self,
         query_embedding: &[f32],
         limit: usize,
         distance_threshold: f32,
         max_k: usize,
     ) -> Result<Vec<(String, f32)>> {
-        // Use sqlite-vec for efficient similarity search
         let query_embedding = normalize_vector(query_embedding);
         self.db
             .search_similar_images(&query_embedding, limit, distance_threshold, max_k)
+            .await
     }
-    pub fn search_with_thumbnails(
+    pub async fn search_with_thumbnails(
         &self,
         query_embedding: &[f32],
         limit: usize,
         distance_threshold: f32,
         max_k: usize,
     ) -> Result<Vec<(String, f32, Option<String>)>> {
-        // Use sqlite-vec for efficient similarity search
         let query_embedding = normalize_vector(query_embedding);
         self.db
             .search_similar_images_with_blob(&query_embedding, limit, distance_threshold, max_k)
+            .await
     }
-    pub fn search_meta(
+    pub async fn search_meta(
         &self,
         query_embedding: Vec<f32>,
         limit: usize,
@@ -45,16 +45,18 @@ impl<'a> SearchEngine<'a> {
         filters: &Filters,
     ) -> Result<Vec<RankedMetaRow>> {
         let query_embedding = normalize_vector(&query_embedding);
-        self.db.search_similar_images_meta(
-            &query_embedding,
-            limit,
-            offset,
-            distance_threshold,
-            max_k,
-            filters,
-        )
+        self.db
+            .search_similar_images_meta(
+                &query_embedding,
+                limit,
+                offset,
+                distance_threshold,
+                max_k,
+                filters,
+            )
+            .await
     }
-    pub fn search_with_thumbnails_raw(
+    pub async fn search_with_thumbnails_raw(
         &self,
         query_embedding: &[f32],
         limit: usize,
@@ -62,15 +64,16 @@ impl<'a> SearchEngine<'a> {
         distance_threshold: f32,
         max_k: usize,
     ) -> ImageSearchResult {
-        // Use sqlite-vec for efficient similarity search
         let query_embedding = normalize_vector(query_embedding);
-        self.db.search_similar_images_with_raw_blob(
-            &query_embedding,
-            limit,
-            offset,
-            distance_threshold,
-            max_k,
-        )
+        self.db
+            .search_similar_images_with_raw_blob(
+                &query_embedding,
+                limit,
+                offset,
+                distance_threshold,
+                max_k,
+            )
+            .await
     }
 }
 

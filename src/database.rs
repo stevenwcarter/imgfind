@@ -1,50 +1,23 @@
-use crate::filters::{Filters, build_filter_clause};
+use crate::filters::{Filters, build_filter_clause_turso};
 use crate::ui_state::UiState;
-use crate::{AbsolutePath, RelativePath, get_db_parent_dir};
+use crate::{AbsolutePath, RelativePath, db_pool, get_db_parent_dir};
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose};
 use hashbrown::HashMap;
 use image::GenericImageView;
-use r2d2::{CustomizeConnection, Pool};
-use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::types::Value;
-use rusqlite::{
-    Connection, OptionalExtension, ffi::sqlite3_auto_extension, params, params_from_iter,
-};
-use sqlite_vec::sqlite3_vec_init;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 use tracing::info;
-use zerocopy::IntoBytes;
+use turso::Value;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Database {
-    pub pool: Pool<SqliteConnectionManager>,
+    pool: db_pool::TursoPool,
     pub parent_dir: PathBuf,
 }
 
 const MAX_JITTER: f64 = 0.000001;
-
-/// Duration used for `busy_timeout` on every pooled connection. Mirrors the
-/// value the thumbnail batch writer sets manually so all DB callers share the
-/// same contention budget.
-const POOL_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// r2d2 connection customizer that sets `busy_timeout` on every new pooled
-/// connection. Without this, a query that hits a locked page waits forever
-/// under concurrent load (grid queries, thumbnail worker, detail-panel lookups
-/// all contend on the same WAL file).
-#[derive(Debug)]
-struct BusyTimeoutCustomizer;
-
-impl CustomizeConnection<Connection, rusqlite::Error> for BusyTimeoutCustomizer {
-    fn on_acquire(&self, conn: &mut Connection) -> Result<(), rusqlite::Error> {
-        conn.busy_timeout(POOL_BUSY_TIMEOUT)?;
-        Ok(())
-    }
-}
 
 pub type ImageSearchResult = Result<Vec<(String, f32, Option<Vec<u8>>)>>;
 
@@ -53,55 +26,83 @@ pub type ImageSearchResult = Result<Vec<(String, f32, Option<Vec<u8>>)>>;
 /// rows from ranked (relevance-ordered) results.
 pub type RankedMetaRow = (i64, String, f32, Option<i64>);
 
-impl Database {
-    pub fn new(db_path: &Path) -> Result<Self> {
-        // Initialize sqlite-vec extension
-        unsafe {
-            sqlite3_auto_extension(Some(std::mem::transmute::<
-                *const (),
-                unsafe extern "C" fn(
-                    *mut rusqlite::ffi::sqlite3,
-                    *mut *mut i8,
-                    *const rusqlite::ffi::sqlite3_api_routines,
-                ) -> i32,
-            >(sqlite3_vec_init as *const ())));
-        }
+/// Serialize an f32 slice to little-endian bytes (the `F32_BLOB` wire format).
+fn to_le_bytes(v: &[f32]) -> Vec<u8> {
+    v.iter().flat_map(|f| f.to_le_bytes()).collect()
+}
 
+/// Read an `i64` from row column `idx`, with `ctx` as the error context.
+fn col_i64(row: &turso::Row, idx: usize, ctx: &str) -> Result<i64> {
+    row.get_value(idx)?
+        .as_integer()
+        .copied()
+        .with_context(|| format!("expected integer for {ctx}"))
+}
+
+/// Read a `String` from row column `idx`, with `ctx` as the error context.
+fn col_text(row: &turso::Row, idx: usize, ctx: &str) -> Result<String> {
+    Ok(row
+        .get_value(idx)?
+        .as_text()
+        .with_context(|| format!("expected text for {ctx}"))?
+        .to_string())
+}
+
+/// Read a nullable `i64` from row column `idx` (`NULL` → `None`).
+fn col_opt_i64(row: &turso::Row, idx: usize) -> Result<Option<i64>> {
+    Ok(match row.get_value(idx)? {
+        Value::Integer(i) => Some(i),
+        _ => None,
+    })
+}
+
+/// Read a nullable `f64` from row column `idx` (`NULL` → `None`).
+fn col_opt_f64(row: &turso::Row, idx: usize) -> Result<Option<f64>> {
+    Ok(match row.get_value(idx)? {
+        Value::Real(r) => Some(r),
+        Value::Integer(i) => Some(i as f64),
+        _ => None,
+    })
+}
+
+/// Read a nullable `String` from row column `idx` (`NULL` → `None`).
+fn col_opt_text(row: &turso::Row, idx: usize) -> Result<Option<String>> {
+    Ok(match row.get_value(idx)? {
+        Value::Text(s) => Some(s),
+        _ => None,
+    })
+}
+
+impl Database {
+    pub async fn new(db_path: &Path) -> Result<Self> {
         let parent_path = db_path.parent().context("DB path has no parent")?;
         std::fs::create_dir_all(parent_path).context("Failed to create DB parent directory")?;
 
-        // Enable foreign keys on every connection the pool hands out. PRAGMAs are
-        // per-connection, so setting this once on a single connection would leave
-        // FK enforcement (and the ON DELETE CASCADE on image_metadata) off for the
-        // rest of the pool.
-        let manager = SqliteConnectionManager::file(db_path).with_init(|conn| {
-            conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")
-        });
         let max_size = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(8)
-            .min(32) as u32;
-        let pool = r2d2::Pool::builder()
-            .max_size(max_size)
-            .connection_customizer(Box::new(BusyTimeoutCustomizer))
-            .build(manager)
-            .with_context(|| format!("Failed to open database at {:?}", db_path))?;
+            .min(32);
+        let pool = db_pool::TursoPool::open(db_path, max_size)
+            .await
+            .with_context(|| format!("Failed to open database at {db_path:?}"))?;
 
         let parent_dir = get_db_parent_dir(db_path)?;
-        let db = Database { pool, parent_dir };
-        let conn = db.pool.get().context("Failed to get DB connection")?;
-        run_migrations(&conn)?;
-        Ok(db)
+        let conn = pool.get().await?;
+        crate::schema::run_migrations(&conn).await?;
+        drop(conn);
+        Ok(Self { pool, parent_dir })
     }
 
     /// Truncate the WAL back into the main DB file. Call after a large write batch (e.g. indexing).
-    pub fn checkpoint_wal(&self) -> Result<()> {
-        let conn = self
-            .pool
-            .get()
-            .context("get connection for WAL checkpoint")?;
-        conn.pragma_update(None, "wal_checkpoint", "RESTART")
+    pub async fn checkpoint_wal(&self) -> Result<()> {
+        let conn = self.pool.get().await?;
+        // `wal_checkpoint` returns a result row; drain via `query` so turso does
+        // not treat the row as an unexpected result.
+        let mut rows = conn
+            .query("PRAGMA wal_checkpoint(RESTART)", ())
+            .await
             .context("wal_checkpoint(RESTART)")?;
+        while rows.next().await?.is_some() {}
         Ok(())
     }
 
@@ -111,209 +112,41 @@ impl Database {
     /// cannot be deserialised (e.g. after a schema evolution that changed field
     /// types). In the latter case a `tracing::warn!` is emitted so the problem
     /// is visible in logs without crashing the GUI.
-    pub fn get_ui_state(&self) -> Result<Option<UiState>> {
-        let conn = self.pool.get().context("DB connection for get_ui_state")?;
-        let json: Option<String> = conn
-            .query_row("SELECT state_json FROM ui_state WHERE id = 1", [], |r| {
-                r.get(0)
-            })
-            .optional()?;
-        match json {
-            None => Ok(None),
-            Some(s) => match serde_json::from_str::<UiState>(&s) {
-                Ok(st) => Ok(Some(st)),
-                Err(e) => {
-                    tracing::warn!("discarding unreadable ui_state: {e}");
-                    Ok(None)
-                }
-            },
+    pub async fn get_ui_state(&self) -> Result<Option<UiState>> {
+        let conn = self.pool.get().await.context("DB connection for get_ui_state")?;
+        let mut rows = conn
+            .query("SELECT state_json FROM ui_state WHERE id = 1", ())
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        let json = col_text(&row, 0, "state_json")?;
+        match serde_json::from_str::<UiState>(&json) {
+            Ok(st) => Ok(Some(st)),
+            Err(e) => {
+                tracing::warn!("discarding unreadable ui_state: {e}");
+                Ok(None)
+            }
         }
     }
 
     /// Persist the GUI session state as a single JSON blob (UPSERT on `id = 1`).
-    pub fn set_ui_state(&self, state: &UiState) -> Result<()> {
+    pub async fn set_ui_state(&self, state: &UiState) -> Result<()> {
         let json = serde_json::to_string(state).context("serialize ui_state")?;
-        let conn = self.pool.get().context("DB connection for set_ui_state")?;
+        let conn = self.pool.get().await.context("DB connection for set_ui_state")?;
         conn.execute(
             "INSERT INTO ui_state (id, state_json, updated_at)
              VALUES (1, ?1, CURRENT_TIMESTAMP)
              ON CONFLICT(id) DO UPDATE SET state_json = ?1, updated_at = CURRENT_TIMESTAMP",
-            params![json],
-        )?;
+            (json,),
+        )
+        .await?;
         Ok(())
     }
 }
 
-const LATEST_MIGRATION_VERSION: i32 = 3;
-
-/// Apply any pending schema migrations, gated by SQLite's `PRAGMA user_version`.
-///
-/// Each migration bumps `user_version` after it succeeds, so re-running is a no-op
-/// once a DB is at `LATEST_MIGRATION_VERSION`. Existing DBs created before this
-/// runner existed start at version 0; migration 1 is the full baseline schema with
-/// `IF NOT EXISTS` everywhere, so they adopt it as a no-op and get stamped to 1.
-fn run_migrations(conn: &Connection) -> Result<()> {
-    let current: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if current < 1 {
-        migration_001_baseline(conn).context("migration 1 (baseline schema)")?;
-    }
-    if current < 2 {
-        migration_002_models_and_userdata(conn).context("migration 2")?;
-    }
-    if current < 3 {
-        migration_003_ui_state(conn).context("migration 3 (ui_state)")?;
-    }
-    if current < LATEST_MIGRATION_VERSION {
-        conn.execute_batch(&format!(
-            "PRAGMA user_version = {LATEST_MIGRATION_VERSION};"
-        ))?;
-    }
-    Ok(())
-}
-
-/// Migration 2: a `models` registry (which vec0 table is active for embeddings)
-/// plus user-data tables for tags and collections.
-fn migration_002_models_and_userdata(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS models (name TEXT PRIMARY KEY, dim INTEGER NOT NULL, table_name TEXT NOT NULL, is_active INTEGER NOT NULL DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
-         INSERT OR IGNORE INTO models (name, dim, table_name, is_active) VALUES ('openai/clip-vit-base-patch32', 512, 'image_vectors', 1);
-         CREATE TABLE IF NOT EXISTS tags (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
-         CREATE TABLE IF NOT EXISTS image_tags (image_id INTEGER NOT NULL, tag_id INTEGER NOT NULL, PRIMARY KEY(image_id, tag_id), FOREIGN KEY(image_id) REFERENCES images(id) ON DELETE CASCADE, FOREIGN KEY(tag_id) REFERENCES tags(id) ON DELETE CASCADE);
-         CREATE TABLE IF NOT EXISTS collections (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
-         CREATE TABLE IF NOT EXISTS collection_images (collection_id INTEGER NOT NULL, image_id INTEGER NOT NULL, PRIMARY KEY(collection_id, image_id), FOREIGN KEY(collection_id) REFERENCES collections(id) ON DELETE CASCADE, FOREIGN KEY(image_id) REFERENCES images(id) ON DELETE CASCADE);",
-    )?;
-    Ok(())
-}
-
-/// Migration 3: single-row persisted GUI session state (JSON blob).
-fn migration_003_ui_state(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS ui_state (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            state_json TEXT NOT NULL,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        );",
-    )?;
-    Ok(())
-}
-
-/// Migration 1: the full baseline schema (verbatim from the original `initialize_schema`).
-fn migration_001_baseline(conn: &Connection) -> Result<()> {
-    // Create images table
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS images (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                path TEXT UNIQUE NOT NULL,
-                hash TEXT NOT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )",
-        [],
-    )?;
-
-    // Create vector table for embeddings using sqlite-vec
-    conn.execute(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS image_vectors USING vec0(
-                embedding float[512]
-            )",
-        [],
-    )?;
-
-    // Create index on path for faster lookups
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_images_path ON images(path)",
-        [],
-    )?;
-
-    // Create index on hash for faster duplicate detection
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_images_hash ON images(hash)",
-        [],
-    )?;
-
-    // Create thumbnails table for caching resized images
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS thumbnails (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                image_hash TEXT NOT NULL,
-                size INTEGER NOT NULL,
-                thumbnail_data BLOB NOT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(image_hash, size)
-            )",
-        [],
-    )?;
-
-    // Create index on hash and size for faster thumbnail lookups
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_thumbnails_hash_size ON thumbnails(image_hash, size)",
-        [],
-    )?;
-
-    // Create image_metadata table for storing EXIF data
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS image_metadata (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                image_id INTEGER NOT NULL,
-                file_size INTEGER,
-                width INTEGER,
-                height INTEGER,
-                latitude REAL,
-                longitude REAL,
-                camera_make TEXT,
-                camera_model TEXT,
-                datetime_taken DATETIME,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY(image_id) REFERENCES images(id) ON DELETE CASCADE,
-                UNIQUE(image_id)
-            )",
-        [],
-    )?;
-
-    // Create index on image_id for faster metadata lookups
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_metadata_image_id ON image_metadata(image_id)",
-        [],
-    )?;
-
-    // Create index on GPS coordinates for location-based queries
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_metadata_gps ON image_metadata(latitude, longitude)",
-        [],
-    )?;
-
-    // Composite index covering geo + time for map queries ordered by capture time
-    conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_metadata_geo_time ON image_metadata(latitude, longitude, datetime_taken)",
-            [],
-        )?;
-
-    // Composite index for camera-model filters ordered by capture time
-    conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_metadata_camera_time ON image_metadata(camera_model, datetime_taken)",
-            [],
-        )?;
-
-    // Partial index over capture time, skipping rows without a datetime
-    conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_metadata_datetime ON image_metadata(datetime_taken) WHERE datetime_taken IS NOT NULL",
-            [],
-        )?;
-
-    // Create favorites table for marking favorite images
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS favorites (
-                image_id INTEGER PRIMARY KEY,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY(image_id) REFERENCES images(id) ON DELETE CASCADE
-            )",
-        [],
-    )?;
-
-    Ok(())
-}
-
 /// Metadata for an embedding model registered in the `models` table: its name,
-/// embedding dimensionality, and the vec0 virtual table holding its vectors.
+/// embedding dimensionality, and the vector table holding its vectors.
 #[derive(Debug, Clone)]
 pub struct ModelInfo {
     pub name: String,
@@ -321,45 +154,29 @@ pub struct ModelInfo {
     pub table: String,
 }
 
-/// Derive a safe vec0 table name from a model name, lowercasing ASCII
-/// alphanumerics and replacing everything else with `_`.
-fn sanitize_model_table(name: &str) -> String {
-    let s: String = name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    format!("image_vectors_{s}")
-}
-
 impl Database {
     /// The currently active embedding model (the single `models` row with
     /// `is_active = 1`).
-    pub fn active_model(&self) -> Result<ModelInfo> {
-        let conn = self.pool.get().context("get connection")?;
-        let (name, dim, table): (String, i64, String) = conn
-            .query_row(
+    pub async fn active_model(&self) -> Result<ModelInfo> {
+        let conn = self.pool.get().await.context("get connection")?;
+        let mut rows = conn
+            .query(
                 "SELECT name, dim, table_name FROM models WHERE is_active = 1 LIMIT 1",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                (),
             )
-            .context("no active model")?;
+            .await?;
+        let row = rows.next().await?.context("no active model")?;
         Ok(ModelInfo {
-            name,
-            dim: dim as usize,
-            table,
+            name: col_text(&row, 0, "name")?,
+            dim: col_i64(&row, 1, "dim")? as usize,
+            table: col_text(&row, 2, "table_name")?,
         })
     }
 
-    /// The active model's vec0 table name, validated as a safe SQL identifier
+    /// The active model's vector table name, validated as a safe SQL identifier
     /// before it is interpolated into queries.
-    fn vectors_table(&self) -> Result<String> {
-        let t = self.active_model()?.table;
+    async fn vectors_table(&self) -> Result<String> {
+        let t = self.active_model().await?.table;
         anyhow::ensure!(
             t.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
             "invalid table name"
@@ -367,48 +184,59 @@ impl Database {
         Ok(t)
     }
 
-    /// Register a new embedding model and create its (inactive) vec0 table.
-    pub fn register_model(&self, name: &str, dim: usize) -> Result<()> {
-        let table = sanitize_model_table(name);
-        let conn = self.pool.get().context("get connection")?;
+    /// Register a new embedding model and create its (inactive) vector table.
+    pub async fn register_model(&self, name: &str, dim: usize) -> Result<()> {
+        let table = crate::schema::sanitize_model_table(name);
+        let conn = self.pool.get().await.context("get connection")?;
         conn.execute(
             "INSERT OR IGNORE INTO models (name, dim, table_name, is_active) VALUES (?1, ?2, ?3, 0)",
-            params![name, dim as i64, table],
-        )?;
-        conn.execute_batch(&format!(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS {table} USING vec0(embedding float[{dim}]);"
-        ))?;
+            (name.to_string(), dim as i64, table.clone()),
+        )
+        .await?;
+        crate::schema::create_vector_table(&conn, &table, dim).await?;
         Ok(())
     }
 
     /// Flip the active model to `name`, deactivating all others.
-    pub fn set_active_model(&self, name: &str) -> Result<()> {
-        let conn = self.pool.get().context("get connection")?;
-        let exists: bool = conn
-            .query_row("SELECT 1 FROM models WHERE name=?1", [name], |_| Ok(()))
-            .optional()?
-            .is_some();
+    pub async fn set_active_model(&self, name: &str) -> Result<()> {
+        let conn = self.pool.get().await.context("get connection")?;
+        // Drain/drop the existence-check rows BEFORE the UPDATE: a live `Rows`
+        // on the same connection leaves a statement in progress and the
+        // following write silently does not persist.
+        let exists = {
+            let mut rows = conn
+                .query("SELECT 1 FROM models WHERE name = ?1", (name.to_string(),))
+                .await?;
+            rows.next().await?.is_some()
+        };
         anyhow::ensure!(exists, "unknown model: {name}");
-        conn.execute("UPDATE models SET is_active = (name = ?1)", [name])?;
+        conn.execute(
+            "UPDATE models SET is_active = (name = ?1)",
+            (name.to_string(),),
+        )
+        .await?;
         Ok(())
     }
 
     /// List all registered models as `(name, dim, is_active)`, ordered by name.
-    pub fn list_models(&self) -> Result<Vec<(String, usize, bool)>> {
-        let conn = self.pool.get().context("get connection")?;
-        let mut stmt = conn.prepare("SELECT name, dim, is_active FROM models ORDER BY name")?;
-        let rows = stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, i64>(1)? as usize,
-                r.get::<_, i64>(2)? != 0,
-            ))
-        })?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    pub async fn list_models(&self) -> Result<Vec<(String, usize, bool)>> {
+        let conn = self.pool.get().await.context("get connection")?;
+        let mut rows = conn
+            .query("SELECT name, dim, is_active FROM models ORDER BY name", ())
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push((
+                col_text(&row, 0, "name")?,
+                col_i64(&row, 1, "dim")? as usize,
+                col_i64(&row, 2, "is_active")? != 0,
+            ));
+        }
+        Ok(out)
     }
 
-    pub fn insert_image(
-        &mut self,
+    pub async fn insert_image(
+        &self,
         path: &AbsolutePath,
         hash: &str,
         embedding: &[f32],
@@ -417,367 +245,466 @@ impl Database {
         let rel_path = path.to_relative(&self.parent_dir).with_context(|| {
             format!("Failed to convert path {} to relative path", path.as_str())
         })?;
-        let rel_path_str = rel_path.as_str();
-        let vt = self.vectors_table()?;
+        let rel_path_str = rel_path.as_str().into_owned();
+        let vt = self.vectors_table().await?;
 
-        // Start a transaction for consistency
-        {
-            let mut conn = self
-                .pool
-                .get()
-                .context("Failed to get DB connection to insert image")?;
-            let tx = conn.transaction()?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .context("Failed to get DB connection to insert image")?;
+        let tx = conn.transaction().await?;
 
-            // Insert into images table with relative path
-            tx.execute(
-                // Upsert that PRESERVES the row id on a path conflict. `INSERT OR
-                // REPLACE` would delete+reinsert, allocating a new id and thereby
-                // orphaning this image's embeddings in *other* models' vector
-                // tables (which key on the id). `ON CONFLICT … DO UPDATE` keeps the
-                // id stable so per-model embeddings stay linked across re-indexing.
-                "INSERT INTO images (path, hash) VALUES (?1, ?2)
-                 ON CONFLICT(path) DO UPDATE SET hash = excluded.hash",
-                params![rel_path_str.as_ref(), hash],
-            )?;
+        // Upsert that PRESERVES the row id on a path conflict. `INSERT OR
+        // REPLACE` would delete+reinsert, allocating a new id and thereby
+        // orphaning this image's embeddings in *other* models' vector tables
+        // (which key on the id). `ON CONFLICT … DO UPDATE` keeps the id stable so
+        // per-model embeddings stay linked across re-indexing.
+        tx.execute(
+            "INSERT INTO images (path, hash) VALUES (?1, ?2)
+             ON CONFLICT(path) DO UPDATE SET hash = excluded.hash",
+            (rel_path_str.clone(), hash.to_string()),
+        )
+        .await?;
 
-            // Get the image ID
-            let image_id: i64 = tx.query_row(
-                "SELECT id FROM images WHERE path = ?1",
-                params![rel_path_str.as_ref()],
-                |row| row.get(0),
-            )?;
+        let image_id = {
+            let mut rows = tx
+                .query(
+                    "SELECT id FROM images WHERE path = ?1",
+                    (rel_path_str.clone(),),
+                )
+                .await?;
+            let row = rows.next().await?.context("inserted image row missing")?;
+            col_i64(&row, 0, "id")?
+        };
 
-            // Insert into vector table using sqlite-vec
-            // First delete any existing vector for this image
-            tx.execute(
-                &format!("DELETE FROM {vt} WHERE rowid = ?1"),
-                params![image_id],
-            )?;
+        // Replace any existing embedding for this image, then insert the new one.
+        tx.execute(
+            &format!("DELETE FROM {vt} WHERE image_id = ?1"),
+            (image_id,),
+        )
+        .await?;
+        tx.execute(
+            &format!("INSERT INTO {vt} (image_id, embedding) VALUES (?1, ?2)"),
+            (Value::Integer(image_id), Value::Blob(to_le_bytes(embedding))),
+        )
+        .await?;
 
-            // Insert the new vector using zerocopy for efficiency
-            tx.execute(
-                &format!("INSERT INTO {vt} (rowid, embedding) VALUES (?1, ?2)"),
-                params![image_id, embedding.as_bytes()],
-            )?;
-
-            tx.commit()?;
-        }
+        tx.commit().await?;
         Ok(())
     }
 
     /// Toggle the favorite flag for the image at `relative_path`, returning the
     /// new state (`true` = now favorited, `false` = now un-favorited).
-    pub fn toggle_favorite(&self, relative_path: &RelativePath) -> Result<bool> {
-        let relative_path = relative_path.as_str();
-        let conn = self.pool.get().context("get connection")?;
-        let image_id: i64 = conn
-            .query_row(
-                "SELECT id FROM images WHERE path = ?1",
-                [relative_path.as_ref()],
-                |r| r.get(0),
-            )
-            .with_context(|| format!("no indexed image at {relative_path}"))?;
-        let exists: bool = conn
-            .query_row(
-                "SELECT 1 FROM favorites WHERE image_id = ?1",
-                [image_id],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
+    pub async fn toggle_favorite(&self, relative_path: &RelativePath) -> Result<bool> {
+        let rel = relative_path.as_str().into_owned();
+        let conn = self.pool.get().await.context("get connection")?;
+        let image_id = {
+            let mut rows = conn
+                .query("SELECT id FROM images WHERE path = ?1", (rel.clone(),))
+                .await?;
+            let row = rows
+                .next()
+                .await?
+                .with_context(|| format!("no indexed image at {rel}"))?;
+            col_i64(&row, 0, "id")?
+        };
+        let exists = {
+            let mut rows = conn
+                .query("SELECT 1 FROM favorites WHERE image_id = ?1", (image_id,))
+                .await?;
+            rows.next().await?.is_some()
+        };
         if exists {
-            conn.execute("DELETE FROM favorites WHERE image_id = ?1", [image_id])?;
+            conn.execute("DELETE FROM favorites WHERE image_id = ?1", (image_id,))
+                .await?;
             Ok(false)
         } else {
-            conn.execute("INSERT INTO favorites (image_id) VALUES (?1)", [image_id])?;
+            conn.execute("INSERT INTO favorites (image_id) VALUES (?1)", (image_id,))
+                .await?;
             Ok(true)
         }
     }
 
     /// Return whether the image at `relative_path` is favorited. Unknown paths
     /// are not favorites.
-    pub fn is_favorite(&self, relative_path: &RelativePath) -> Result<bool> {
-        let relative_path = relative_path.as_str();
-        let conn = self.pool.get().context("get connection")?;
-        let id: Option<i64> = conn
-            .query_row(
-                "SELECT id FROM images WHERE path = ?1",
-                [relative_path.as_ref()],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let Some(image_id) = id else {
+    pub async fn is_favorite(&self, relative_path: &RelativePath) -> Result<bool> {
+        let rel = relative_path.as_str().into_owned();
+        let conn = self.pool.get().await.context("get connection")?;
+        let mut rows = conn
+            .query("SELECT id FROM images WHERE path = ?1", (rel,))
+            .await?;
+        let Some(row) = rows.next().await? else {
             return Ok(false);
         };
-        Ok(conn
-            .query_row(
-                "SELECT 1 FROM favorites WHERE image_id = ?1",
-                [image_id],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some())
+        let image_id = col_i64(&row, 0, "id")?;
+        let mut fav = conn
+            .query("SELECT 1 FROM favorites WHERE image_id = ?1", (image_id,))
+            .await?;
+        Ok(fav.next().await?.is_some())
     }
 
     /// List the relative paths of all favorited images, most recently favorited
     /// first.
-    pub fn list_favorites(&self) -> Result<Vec<RelativePath>> {
-        let conn = self.pool.get().context("get connection")?;
-        let mut stmt = conn.prepare(
-            "SELECT i.path FROM favorites f JOIN images i ON i.id = f.image_id ORDER BY f.created_at DESC",
-        )?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-        rows.map(|r| Ok(RelativePath(PathBuf::from(r?))))
-            .collect::<Result<Vec<_>>>()
+    pub async fn list_favorites(&self) -> Result<Vec<RelativePath>> {
+        let conn = self.pool.get().await.context("get connection")?;
+        let mut rows = conn
+            .query(
+                "SELECT i.path FROM favorites f JOIN images i ON i.id = f.image_id \
+                 ORDER BY f.created_at DESC",
+                (),
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push(RelativePath(PathBuf::from(col_text(&row, 0, "path")?)));
+        }
+        Ok(out)
     }
 
     /// Resolve the `images.id` for a stored relative path, erroring if the image
     /// is not indexed. Used by the tag/collection write methods.
-    fn image_id_for(&self, relative_path: &RelativePath) -> Result<i64> {
-        let relative_path = relative_path.as_str();
-        let conn = self.pool.get().context("get connection")?;
-        conn.query_row(
-            "SELECT id FROM images WHERE path = ?1",
-            [relative_path.as_ref()],
-            |r| r.get(0),
-        )
-        .with_context(|| format!("no indexed image at {relative_path}"))
+    async fn image_id_for(&self, relative_path: &RelativePath) -> Result<i64> {
+        let rel = relative_path.as_str().into_owned();
+        let conn = self.pool.get().await.context("get connection")?;
+        let mut rows = conn
+            .query("SELECT id FROM images WHERE path = ?1", (rel.clone(),))
+            .await?;
+        let row = rows
+            .next()
+            .await?
+            .with_context(|| format!("no indexed image at {rel}"))?;
+        col_i64(&row, 0, "id")
     }
 
     /// Ensure a tag exists, returning its id.
-    pub fn create_tag(&self, name: &str) -> Result<i64> {
-        let conn = self.pool.get().context("get connection")?;
-        conn.execute("INSERT OR IGNORE INTO tags (name) VALUES (?1)", [name])?;
-        Ok(conn.query_row("SELECT id FROM tags WHERE name = ?1", [name], |r| r.get(0))?)
+    pub async fn create_tag(&self, name: &str) -> Result<i64> {
+        let conn = self.pool.get().await.context("get connection")?;
+        conn.execute(
+            "INSERT OR IGNORE INTO tags (name) VALUES (?1)",
+            (name.to_string(),),
+        )
+        .await?;
+        let mut rows = conn
+            .query("SELECT id FROM tags WHERE name = ?1", (name.to_string(),))
+            .await?;
+        let row = rows.next().await?.context("tag row missing after insert")?;
+        col_i64(&row, 0, "id")
     }
 
     /// Attach `tag` to the image at `relative_path` (creating the tag if needed).
-    pub fn tag_image(&self, relative_path: &RelativePath, tag: &str) -> Result<()> {
-        let image_id = self.image_id_for(relative_path)?;
-        let tag_id = self.create_tag(tag)?;
-        let conn = self.pool.get().context("get connection")?;
+    pub async fn tag_image(&self, relative_path: &RelativePath, tag: &str) -> Result<()> {
+        let image_id = self.image_id_for(relative_path).await?;
+        let tag_id = self.create_tag(tag).await?;
+        let conn = self.pool.get().await.context("get connection")?;
         conn.execute(
             "INSERT OR IGNORE INTO image_tags (image_id, tag_id) VALUES (?1, ?2)",
-            params![image_id, tag_id],
-        )?;
+            (image_id, tag_id),
+        )
+        .await?;
         Ok(())
     }
 
     /// Remove `tag` from the image at `relative_path`.
-    pub fn untag_image(&self, relative_path: &RelativePath, tag: &str) -> Result<()> {
-        let image_id = self.image_id_for(relative_path)?;
-        let conn = self.pool.get().context("get connection")?;
+    pub async fn untag_image(&self, relative_path: &RelativePath, tag: &str) -> Result<()> {
+        let image_id = self.image_id_for(relative_path).await?;
+        let conn = self.pool.get().await.context("get connection")?;
         conn.execute(
-            "DELETE FROM image_tags WHERE image_id = ?1 AND tag_id = (SELECT id FROM tags WHERE name = ?2)",
-            params![image_id, tag],
-        )?;
+            "DELETE FROM image_tags WHERE image_id = ?1 \
+             AND tag_id = (SELECT id FROM tags WHERE name = ?2)",
+            (image_id, tag.to_string()),
+        )
+        .await?;
         Ok(())
     }
 
     /// Attach `tag` to every image whose relative path is in `rel_paths`,
     /// resolving all ids in a single query and writing in one transaction.
     /// Paths absent from the DB are silently skipped (not an error).
-    pub fn batch_tag_images(&self, rel_paths: &[&str], tag: &str) -> Result<()> {
+    pub async fn batch_tag_images(&self, rel_paths: &[&str], tag: &str) -> Result<()> {
         if rel_paths.is_empty() {
             return Ok(());
         }
-        let tag_id = self.create_tag(tag)?;
-        let mut conn = self.pool.get().context("get connection")?;
-        let placeholders = rel_paths.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql = format!("SELECT id FROM images WHERE path IN ({placeholders})");
-        // Collect ids before starting the transaction so the shared `conn`
-        // borrow from `stmt` is released before the mutable borrow for `tx`.
-        let ids: Vec<i64> = {
-            let mut stmt = conn.prepare(&sql)?;
-            stmt.query_map(rusqlite::params_from_iter(rel_paths.iter()), |r| r.get(0))?
-                .collect::<std::result::Result<_, _>>()?
-        };
-        let tx = conn.transaction()?;
+        let tag_id = self.create_tag(tag).await?;
+        let ids = self.resolve_image_ids(rel_paths).await?;
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.pool.get().await.context("get connection")?;
+        let tx = conn.transaction().await?;
         for image_id in ids {
             tx.execute(
                 "INSERT OR IGNORE INTO image_tags (image_id, tag_id) VALUES (?1, ?2)",
-                params![image_id, tag_id],
-            )?;
+                (image_id, tag_id),
+            )
+            .await?;
         }
-        tx.commit()?;
+        tx.commit().await?;
         Ok(())
     }
 
     /// Remove `tag` from every image whose relative path is in `rel_paths`,
     /// resolving all ids in a single query and deleting in one transaction.
     /// Paths absent from the DB are silently skipped (not an error).
-    pub fn batch_untag_images(&self, rel_paths: &[&str], tag: &str) -> Result<()> {
+    pub async fn batch_untag_images(&self, rel_paths: &[&str], tag: &str) -> Result<()> {
         if rel_paths.is_empty() {
             return Ok(());
         }
-        let mut conn = self.pool.get().context("get connection")?;
-        let placeholders = rel_paths.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql = format!("SELECT id FROM images WHERE path IN ({placeholders})");
-        // Collect ids before starting the transaction so the shared `conn`
-        // borrow from `stmt` is released before the mutable borrow for `tx`.
-        let ids: Vec<i64> = {
-            let mut stmt = conn.prepare(&sql)?;
-            stmt.query_map(rusqlite::params_from_iter(rel_paths.iter()), |r| r.get(0))?
-                .collect::<std::result::Result<_, _>>()?
-        };
+        let ids = self.resolve_image_ids(rel_paths).await?;
         if ids.is_empty() {
             return Ok(());
         }
-        let tx = conn.transaction()?;
+        let mut conn = self.pool.get().await.context("get connection")?;
+        let tx = conn.transaction().await?;
         for image_id in ids {
             tx.execute(
-                "DELETE FROM image_tags WHERE image_id = ?1 AND tag_id = (SELECT id FROM tags WHERE name = ?2)",
-                params![image_id, tag],
-            )?;
+                "DELETE FROM image_tags WHERE image_id = ?1 \
+                 AND tag_id = (SELECT id FROM tags WHERE name = ?2)",
+                (image_id, tag.to_string()),
+            )
+            .await?;
         }
-        tx.commit()?;
+        tx.commit().await?;
         Ok(())
+    }
+
+    /// Resolve a slice of relative paths to their `images.id` values in one
+    /// `IN (...)` query. Paths absent from the DB are simply omitted.
+    async fn resolve_image_ids(&self, rel_paths: &[&str]) -> Result<Vec<i64>> {
+        let placeholders = rel_paths.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!("SELECT id FROM images WHERE path IN ({placeholders})");
+        let params: Vec<Value> = rel_paths
+            .iter()
+            .map(|p| Value::Text((*p).to_string()))
+            .collect();
+        let conn = self.pool.get().await.context("get connection")?;
+        let mut rows = conn
+            .query(&sql, turso::params_from_iter(params))
+            .await?;
+        let mut ids = Vec::new();
+        while let Some(row) = rows.next().await? {
+            ids.push(col_i64(&row, 0, "id")?);
+        }
+        Ok(ids)
     }
 
     /// List the tags attached to the image at `relative_path`, alphabetically.
     /// Unknown paths simply have no tags.
-    pub fn tags_for_image(&self, relative_path: &RelativePath) -> Result<Vec<String>> {
-        let relative_path = relative_path.as_str();
-        let conn = self.pool.get().context("get connection")?;
-        let id: Option<i64> = conn
-            .query_row(
-                "SELECT id FROM images WHERE path = ?1",
-                [relative_path.as_ref()],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let Some(image_id) = id else {
-            return Ok(Vec::new());
+    pub async fn tags_for_image(&self, relative_path: &RelativePath) -> Result<Vec<String>> {
+        let rel = relative_path.as_str().into_owned();
+        let conn = self.pool.get().await.context("get connection")?;
+        let image_id = {
+            let mut rows = conn
+                .query("SELECT id FROM images WHERE path = ?1", (rel,))
+                .await?;
+            let Some(row) = rows.next().await? else {
+                return Ok(Vec::new());
+            };
+            col_i64(&row, 0, "id")?
         };
-        let mut stmt = conn.prepare(
-            "SELECT t.name FROM image_tags it JOIN tags t ON t.id = it.tag_id WHERE it.image_id = ?1 ORDER BY t.name",
-        )?;
-        let rows = stmt.query_map([image_id], |r| r.get::<_, String>(0))?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        let mut rows = conn
+            .query(
+                "SELECT t.name FROM image_tags it JOIN tags t ON t.id = it.tag_id \
+                 WHERE it.image_id = ?1 ORDER BY t.name",
+                (image_id,),
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push(col_text(&row, 0, "name")?);
+        }
+        Ok(out)
     }
 
     /// List all tag names, alphabetically.
-    pub fn list_tags(&self) -> Result<Vec<String>> {
-        let conn = self.pool.get().context("get connection")?;
-        let mut stmt = conn.prepare("SELECT name FROM tags ORDER BY name")?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    pub async fn list_tags(&self) -> Result<Vec<String>> {
+        let conn = self.pool.get().await.context("get connection")?;
+        let mut rows = conn
+            .query("SELECT name FROM tags ORDER BY name", ())
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push(col_text(&row, 0, "name")?);
+        }
+        Ok(out)
     }
 
     /// List the relative paths of images carrying `name`, ordered by path.
-    pub fn images_by_tag(&self, name: &str) -> Result<Vec<RelativePath>> {
-        let conn = self.pool.get().context("get connection")?;
-        let mut stmt = conn.prepare(
-            "SELECT i.path FROM image_tags it JOIN tags t ON t.id = it.tag_id JOIN images i ON i.id = it.image_id WHERE t.name = ?1 ORDER BY i.path",
-        )?;
-        let rows = stmt.query_map([name], |r| r.get::<_, String>(0))?;
-        rows.map(|r| Ok(RelativePath(PathBuf::from(r?))))
-            .collect::<Result<Vec<_>>>()
+    pub async fn images_by_tag(&self, name: &str) -> Result<Vec<RelativePath>> {
+        let conn = self.pool.get().await.context("get connection")?;
+        let mut rows = conn
+            .query(
+                "SELECT i.path FROM image_tags it JOIN tags t ON t.id = it.tag_id \
+                 JOIN images i ON i.id = it.image_id WHERE t.name = ?1 ORDER BY i.path",
+                (name.to_string(),),
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push(RelativePath(PathBuf::from(col_text(&row, 0, "path")?)));
+        }
+        Ok(out)
     }
 
     /// Ensure a collection exists, returning its id.
-    pub fn create_collection(&self, name: &str) -> Result<i64> {
-        let conn = self.pool.get().context("get connection")?;
+    pub async fn create_collection(&self, name: &str) -> Result<i64> {
+        let conn = self.pool.get().await.context("get connection")?;
         conn.execute(
             "INSERT OR IGNORE INTO collections (name) VALUES (?1)",
-            [name],
-        )?;
-        Ok(
-            conn.query_row("SELECT id FROM collections WHERE name = ?1", [name], |r| {
-                r.get(0)
-            })?,
+            (name.to_string(),),
         )
+        .await?;
+        let mut rows = conn
+            .query(
+                "SELECT id FROM collections WHERE name = ?1",
+                (name.to_string(),),
+            )
+            .await?;
+        let row = rows
+            .next()
+            .await?
+            .context("collection row missing after insert")?;
+        col_i64(&row, 0, "id")
     }
 
     /// Add the image at `relative_path` to `name` (creating the collection if needed).
-    pub fn add_to_collection(&self, name: &str, relative_path: &RelativePath) -> Result<()> {
-        let collection_id = self.create_collection(name)?;
-        let image_id = self.image_id_for(relative_path)?;
-        let conn = self.pool.get().context("get connection")?;
+    pub async fn add_to_collection(&self, name: &str, relative_path: &RelativePath) -> Result<()> {
+        let collection_id = self.create_collection(name).await?;
+        let image_id = self.image_id_for(relative_path).await?;
+        let conn = self.pool.get().await.context("get connection")?;
         conn.execute(
             "INSERT OR IGNORE INTO collection_images (collection_id, image_id) VALUES (?1, ?2)",
-            params![collection_id, image_id],
-        )?;
+            (collection_id, image_id),
+        )
+        .await?;
         Ok(())
     }
 
     /// Remove the image at `relative_path` from `name`.
-    pub fn remove_from_collection(&self, name: &str, relative_path: &RelativePath) -> Result<()> {
-        let image_id = self.image_id_for(relative_path)?;
-        let conn = self.pool.get().context("get connection")?;
+    pub async fn remove_from_collection(
+        &self,
+        name: &str,
+        relative_path: &RelativePath,
+    ) -> Result<()> {
+        let image_id = self.image_id_for(relative_path).await?;
+        let conn = self.pool.get().await.context("get connection")?;
         conn.execute(
-            "DELETE FROM collection_images WHERE image_id = ?1 AND collection_id = (SELECT id FROM collections WHERE name = ?2)",
-            params![image_id, name],
-        )?;
+            "DELETE FROM collection_images WHERE image_id = ?1 \
+             AND collection_id = (SELECT id FROM collections WHERE name = ?2)",
+            (image_id, name.to_string()),
+        )
+        .await?;
         Ok(())
     }
 
     /// List the relative paths of images in `name`, ordered by path.
-    pub fn collection_images(&self, name: &str) -> Result<Vec<RelativePath>> {
-        let conn = self.pool.get().context("get connection")?;
-        let mut stmt = conn.prepare(
-            "SELECT i.path FROM collection_images ci JOIN collections c ON c.id = ci.collection_id JOIN images i ON i.id = ci.image_id WHERE c.name = ?1 ORDER BY i.path",
-        )?;
-        let rows = stmt.query_map([name], |r| r.get::<_, String>(0))?;
-        rows.map(|r| Ok(RelativePath(PathBuf::from(r?))))
-            .collect::<Result<Vec<_>>>()
+    pub async fn collection_images(&self, name: &str) -> Result<Vec<RelativePath>> {
+        let conn = self.pool.get().await.context("get connection")?;
+        let mut rows = conn
+            .query(
+                "SELECT i.path FROM collection_images ci \
+                 JOIN collections c ON c.id = ci.collection_id \
+                 JOIN images i ON i.id = ci.image_id WHERE c.name = ?1 ORDER BY i.path",
+                (name.to_string(),),
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push(RelativePath(PathBuf::from(col_text(&row, 0, "path")?)));
+        }
+        Ok(out)
     }
 
     /// List all collection names, alphabetically.
-    pub fn list_collections(&self) -> Result<Vec<String>> {
-        let conn = self.pool.get().context("get connection")?;
-        let mut stmt = conn.prepare("SELECT name FROM collections ORDER BY name")?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    pub async fn list_collections(&self) -> Result<Vec<String>> {
+        let conn = self.pool.get().await.context("get connection")?;
+        let mut rows = conn
+            .query("SELECT name FROM collections ORDER BY name", ())
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push(col_text(&row, 0, "name")?);
+        }
+        Ok(out)
     }
 
     /// Insert many (relative_path, hash, normalized_embedding) rows in one transaction.
     ///
     /// Paths are expected to already be relative to `parent_dir` (matching the
     /// storage invariant). Replicates `insert_image`'s per-row writes (an
-    /// `images` row plus the corresponding `image_vectors` vec0 row) against a
-    /// single transaction.
-    pub fn insert_images_batch(&mut self, rows: &[(String, String, Vec<f32>)]) -> Result<()> {
+    /// `images` row plus the corresponding vector row) against a single
+    /// transaction.
+    pub async fn insert_images_batch(&self, rows: &[(String, String, Vec<f32>)]) -> Result<()> {
         if rows.is_empty() {
             return Ok(());
         }
-        let vt = self.vectors_table()?;
-        let mut conn = self.pool.get().context("get connection for batch insert")?;
-        let tx = conn.transaction()?;
+        let vt = self.vectors_table().await?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .context("get connection for batch insert")?;
+        let tx = conn.transaction().await?;
         for (rel_path_str, hash, embedding) in rows {
-            // Insert into images table with relative path
             tx.execute(
-                // Upsert that PRESERVES the row id on a path conflict. `INSERT OR
-                // REPLACE` would delete+reinsert, allocating a new id and thereby
-                // orphaning this image's embeddings in *other* models' vector
-                // tables (which key on the id). `ON CONFLICT … DO UPDATE` keeps the
-                // id stable so per-model embeddings stay linked across re-indexing.
                 "INSERT INTO images (path, hash) VALUES (?1, ?2)
                  ON CONFLICT(path) DO UPDATE SET hash = excluded.hash",
-                params![rel_path_str.as_str(), hash],
-            )?;
+                (rel_path_str.clone(), hash.clone()),
+            )
+            .await?;
 
-            // Get the image ID
-            let image_id: i64 = tx.query_row(
-                "SELECT id FROM images WHERE path = ?1",
-                params![rel_path_str.as_str()],
-                |row| row.get(0),
-            )?;
+            let image_id = {
+                let mut id_rows = tx
+                    .query(
+                        "SELECT id FROM images WHERE path = ?1",
+                        (rel_path_str.clone(),),
+                    )
+                    .await?;
+                let row = id_rows
+                    .next()
+                    .await?
+                    .context("inserted image row missing")?;
+                col_i64(&row, 0, "id")?
+            };
 
-            // Insert into vector table using sqlite-vec.
-            // First delete any existing vector for this image.
             tx.execute(
-                &format!("DELETE FROM {vt} WHERE rowid = ?1"),
-                params![image_id],
-            )?;
-
-            // Insert the new vector using zerocopy for efficiency.
+                &format!("DELETE FROM {vt} WHERE image_id = ?1"),
+                (image_id,),
+            )
+            .await?;
             tx.execute(
-                &format!("INSERT INTO {vt} (rowid, embedding) VALUES (?1, ?2)"),
-                params![image_id, embedding.as_slice().as_bytes()],
-            )?;
+                &format!("INSERT INTO {vt} (image_id, embedding) VALUES (?1, ?2)"),
+                (Value::Integer(image_id), Value::Blob(to_le_bytes(embedding))),
+            )
+            .await?;
         }
-        tx.commit()?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Insert many `(image_hash, size, jpeg_bytes)` thumbnails in one transaction.
+    ///
+    /// Used by the thumbnail writer thread (which bridges through
+    /// [`crate::block_on`]). Existing `(image_hash, size)` rows are replaced.
+    pub async fn insert_thumbnails_batch(&self, items: &[(String, u32, Vec<u8>)]) -> Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .context("get connection for thumbnail batch insert")?;
+        let tx = conn.transaction().await?;
+        for (hash, size, data) in items {
+            tx.execute(
+                "INSERT OR REPLACE INTO thumbnails (image_hash, size, thumbnail_data) \
+                 VALUES (?1, ?2, ?3)",
+                (hash.clone(), *size as i64, data.clone()),
+            )
+            .await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -785,79 +712,64 @@ impl Database {
     ///
     /// Model-aware: an image counts as indexed only if it is present in the
     /// shared `images` table *and* has an embedding row in the active model's
-    /// vector table. Because each model stores embeddings in its own `vec0`
+    /// vector table. Because each model stores embeddings in its own vector
     /// table, switching the active model leaves existing `images` rows without a
     /// vector in the new table — so they are reported as not-indexed and get
     /// re-embedded on the next `index` run (backfilling the new model).
-    pub fn is_image_indexed(&self, path: &AbsolutePath, hash: &str) -> Result<bool> {
-        // Convert absolute path to relative path for database lookup
+    pub async fn is_image_indexed(&self, path: &AbsolutePath, hash: &str) -> Result<bool> {
         let rel_path = path.to_relative(&self.parent_dir).with_context(|| {
             format!("Failed to convert path {} to relative path", path.as_str())
         })?;
-        let rel_path_str = rel_path.as_str();
-        let vt = self.vectors_table()?;
+        let rel_path_str = rel_path.as_str().into_owned();
+        let vt = self.vectors_table().await?;
 
         let conn = self
             .pool
             .get()
+            .await
             .context("Failed to get DB connection to check if image is indexed")?;
         let sql = format!(
             "SELECT COUNT(*) FROM images i \
              WHERE i.path = ?1 AND i.hash = ?2 \
-               AND EXISTS (SELECT 1 FROM {vt} WHERE rowid = i.id)"
+               AND EXISTS (SELECT 1 FROM {vt} WHERE image_id = i.id)"
         );
-
-        let count: i64 =
-            conn.query_row(&sql, params![rel_path_str.as_ref(), hash], |row| row.get(0))?;
-        Ok(count > 0)
+        let mut rows = conn
+            .query(&sql, (rel_path_str, hash.to_string()))
+            .await?;
+        let row = rows.next().await?.context("COUNT returned no row")?;
+        Ok(col_i64(&row, 0, "count")? > 0)
     }
 
-    /// Search for similar images using sqlite-vec
-    pub fn search_similar_images(
+    /// Search for similar images, returning `(relative_path, distance)`.
+    pub async fn search_similar_images(
         &self,
         query_embedding: &[f32],
         limit: usize,
         distance_threshold: f32,
         max_k: usize,
     ) -> Result<Vec<(String, f32)>> {
-        // Use a reasonable k value that's at least the limit but not too large
         let k = limit.clamp(1, max_k);
-        let vt = self.vectors_table()?;
-
-        // `k` and the distance threshold are interpolated as the vec0 MATCH/k
-        // syntax requires literal values (not bound params). Both are trusted
-        // numeric config values, never user free-text.
-        let query = format!(
-            "SELECT i.path, distance
-             FROM {vt} v
-             JOIN images i ON i.id = v.rowid
-             WHERE v.embedding MATCH ? AND k={k}
-            AND distance <= {distance_threshold:.6}
-             ORDER BY distance LIMIT {k}"
-        );
-
+        let vt = self.vectors_table().await?;
+        let sql = crate::vector_sql::knn_query(&vt, "path, distance", "", "", k, 0, distance_threshold);
         let conn = self
             .pool
             .get()
+            .await
             .context("Failed to get DB connection for searching similar images")?;
-        let mut stmt = conn.prepare(&query)?;
-
-        let results = stmt.query_map(params![query_embedding.as_bytes()], |row| {
-            let rel_path: String = row.get(0)?;
-            let distance: f32 = row.get(1)?;
-
-            Ok((rel_path, distance))
-        })?;
-
-        let mut search_results = Vec::new();
-        for result in results {
-            search_results.push(result?);
+        let mut rows = conn
+            .query(&sql, (Value::Blob(to_le_bytes(query_embedding)),))
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push((
+                col_text(&row, 0, "path")?,
+                col_opt_f64(&row, 1)?.unwrap_or(0.0) as f32,
+            ));
         }
-
-        Ok(search_results)
+        Ok(out)
     }
 
-    pub fn search_similar_images_with_raw_blob(
+    pub async fn search_similar_images_with_raw_blob(
         &self,
         query_embedding: &[f32],
         limit: usize,
@@ -865,51 +777,44 @@ impl Database {
         distance_threshold: f32,
         max_k: usize,
     ) -> ImageSearchResult {
-        // Use a reasonable k value that's at least the limit but not too large
         let k = limit.clamp(1, max_k);
-        let vt = self.vectors_table()?;
-
-        // `k` and the distance threshold are interpolated as the vec0 MATCH/k
-        // syntax requires literal values (not bound params). Both are trusted
-        // numeric config values, never user free-text.
-        let query = format!(
-            "SELECT i.path, distance, t.thumbnail_data
-              FROM {vt} v
-              JOIN images i ON i.id = v.rowid
-              LEFT OUTER JOIN thumbnails t ON i.hash = t.image_hash AND t.size = 300
-              WHERE v.embedding MATCH ? AND k={k}
-            AND distance <= {distance_threshold:.6}
-              ORDER BY distance LIMIT {k} OFFSET {offset}"
+        let vt = self.vectors_table().await?;
+        let sql = crate::vector_sql::knn_query(
+            &vt,
+            "path, distance, thumbnail_data",
+            "LEFT OUTER JOIN thumbnails t ON i.hash = t.image_hash AND t.size = 300",
+            "",
+            k,
+            offset,
+            distance_threshold,
         );
-
         let conn = self
             .pool
             .get()
+            .await
             .context("Failed to get DB connection for searching similar images")?;
-        let mut stmt = conn.prepare(&query)?;
-
-        let results = stmt.query_map(params![query_embedding.as_bytes()], |row| {
-            let rel_path: String = row.get(0)?;
-            let distance: f32 = row.get(1)?;
-            let thumbnail_data: Option<Vec<u8>> = row.get(2)?;
-
-            Ok((rel_path, distance, thumbnail_data))
-        })?;
-
-        let mut search_results = Vec::new();
-        for result in results {
-            search_results.push(result?);
+        let mut rows = conn
+            .query(&sql, (Value::Blob(to_le_bytes(query_embedding)),))
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let thumb = match row.get_value(2)? {
+                Value::Blob(b) => Some(b),
+                _ => None,
+            };
+            out.push((
+                col_text(&row, 0, "path")?,
+                col_opt_f64(&row, 1)?.unwrap_or(0.0) as f32,
+                thumb,
+            ));
         }
-
-        Ok(search_results)
+        Ok(out)
     }
 
     /// Metadata-first search: returns `(image id, relative path, distance,
-    /// file_size)` with no thumbnail join. Joins `image_metadata` for
-    /// `file_size`. Mirrors the embedding-binding + execution idiom of
-    /// `search_similar_images_with_raw_blob`. The `id` lets callers build stable
+    /// file_size)` with no thumbnail join. The `id` lets callers build stable
     /// [`crate::sort::RowMeta`] rows from ranked results.
-    pub fn search_similar_images_meta(
+    pub async fn search_similar_images_meta(
         &self,
         query_embedding: &[f32],
         limit: usize,
@@ -918,60 +823,45 @@ impl Database {
         max_k: usize,
         filters: &Filters,
     ) -> Result<Vec<RankedMetaRow>> {
-        // k must cover offset+limit AFTER filtering. We also apply max_k as a
-        // floor so a full page survives post-MATCH filtering even on page 1.
-        // `k` and the distance threshold are interpolated as the vec0 MATCH/k
-        // syntax requires literal values (not bound params). Both are trusted
-        // numeric config values, never user free-text.
+        // k must cover offset+limit AFTER filtering; max_k acts as a floor so a
+        // full page survives post-scan filtering even on page 1.
         let k = (offset + limit).max(1).max(max_k);
-        let vt = self.vectors_table()?;
-        let (clause, fvalues) = build_filter_clause(filters);
-
-        let query = format!(
-            "SELECT i.id, i.path, v.distance, m.file_size
-               FROM {vt} v
-               JOIN images i ON i.id = v.rowid
-               LEFT JOIN image_metadata m ON m.image_id = i.id
-              WHERE v.embedding MATCH ? AND k = {k}
-                AND v.distance <= {distance_threshold:.6}{clause}
-              ORDER BY v.distance LIMIT {limit} OFFSET {offset}"
+        let vt = self.vectors_table().await?;
+        let (clause, fparams) = build_filter_clause_turso(filters);
+        let sql = crate::vector_sql::knn_query(
+            &vt,
+            "id, path, distance, file_size",
+            "",
+            &clause,
+            limit.min(k),
+            offset,
+            distance_threshold,
         );
-
         let conn = self
             .pool
             .get()
+            .await
             .context("DB connection for filtered vector search")?;
-        let mut stmt = conn.prepare(&query)?;
-        // Param order: embedding blob first (the `?` in MATCH), then filter params.
-        // Anonymous `?` is used for MATCH (not `?1`) so it composes with the
-        // appended filter `?`s under params_from_iter (positional + anonymous
-        // cannot be mixed in rusqlite).
-        let mut values: Vec<rusqlite::types::Value> = vec![rusqlite::types::Value::Blob(
-            query_embedding.as_bytes().to_vec(),
-        )];
-        values.extend(fvalues);
-        let results = stmt.query_map(params_from_iter(values), |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, f32>(2)?,
-                row.get::<_, Option<i64>>(3)?,
-            ))
-        })?;
-
-        let mut search_results = Vec::new();
-        for r in results {
-            search_results.push(r?);
+        let mut params: Vec<Value> = vec![Value::Blob(to_le_bytes(query_embedding))];
+        params.extend(fparams);
+        let mut rows = conn.query(&sql, turso::params_from_iter(params)).await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push((
+                col_i64(&row, 0, "id")?,
+                col_text(&row, 1, "path")?,
+                col_opt_f64(&row, 2)?.unwrap_or(0.0) as f32,
+                col_opt_i64(&row, 3)?,
+            ));
         }
-
-        Ok(search_results)
+        Ok(out)
     }
 
     /// Find images similar to an already-indexed image, using its STORED
-    /// embedding from the active model's vec0 table (no re-embedding). The seed
-    /// itself is typically the nearest neighbour (distance ~0); callers may filter
-    /// it out. Returns `(image id, relative_path, distance, file_size)` rows.
-    pub fn find_similar_to_path(
+    /// embedding from the active model's vector table (no re-embedding). The
+    /// seed itself is typically the nearest neighbour (distance ~0); callers may
+    /// filter it out. Returns `(image id, relative_path, distance, file_size)` rows.
+    pub async fn find_similar_to_path(
         &self,
         path: &RelativePath,
         limit: usize,
@@ -980,36 +870,49 @@ impl Database {
         max_k: usize,
         filters: &crate::filters::Filters,
     ) -> Result<Vec<RankedMetaRow>> {
-        let vt = self.vectors_table()?;
-        let rel = path.as_str();
+        let vt = self.vectors_table().await?;
+        let rel = path.as_str().into_owned();
         let conn = self
             .pool
             .get()
+            .await
             .context("Failed to get DB connection for find_similar_to_path")?;
 
-        let id: i64 = conn
-            .query_row(
-                "SELECT id FROM images WHERE path = ?1",
-                params![rel.as_ref()],
-                |row| row.get(0),
-            )
-            .with_context(|| format!("No indexed image at path {rel}"))?;
+        let id = {
+            let mut rows = conn
+                .query("SELECT id FROM images WHERE path = ?1", (rel.clone(),))
+                .await?;
+            let row = rows
+                .next()
+                .await?
+                .with_context(|| format!("No indexed image at path {rel}"))?;
+            col_i64(&row, 0, "id")?
+        };
 
-        let blob: Vec<u8> = conn
-            .query_row(
-                &format!("SELECT embedding FROM {vt} WHERE rowid = ?1"),
-                params![id],
-                |row| row.get(0),
-            )
-            .with_context(|| format!("No stored embedding for image id {id}"))?;
+        let blob = {
+            let mut rows = conn
+                .query(
+                    &format!("SELECT embedding FROM {vt} WHERE image_id = ?1"),
+                    (id,),
+                )
+                .await?;
+            let row = rows
+                .next()
+                .await?
+                .with_context(|| format!("No stored embedding for image id {id}"))?;
+            match row.get_value(0)? {
+                Value::Blob(b) => b,
+                _ => anyhow::bail!("stored embedding is not a blob"),
+            }
+        };
 
         // Stored vectors are LE-f32 and already L2-normalized; decode as-is.
         let embedding: Vec<f32> = blob
             .chunks_exact(4)
             .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
             .collect();
+        drop(conn);
 
-        // Reuse the existing vec0 search path with the stored vector.
         self.search_similar_images_meta(
             &embedding,
             limit,
@@ -1018,108 +921,107 @@ impl Database {
             max_k,
             filters,
         )
+        .await
     }
 
-    pub fn search_similar_images_with_blob(
+    pub async fn search_similar_images_with_blob(
         &self,
         query_embedding: &[f32],
         limit: usize,
         distance_threshold: f32,
         max_k: usize,
     ) -> Result<Vec<(String, f32, Option<String>)>> {
-        let search_results = self.search_similar_images_with_raw_blob(
-            query_embedding,
-            limit,
-            0,
-            distance_threshold,
-            max_k,
-        )?;
-        let search_results: Vec<(String, f32, Option<String>)> = search_results
+        let search_results = self
+            .search_similar_images_with_raw_blob(
+                query_embedding,
+                limit,
+                0,
+                distance_threshold,
+                max_k,
+            )
+            .await?;
+        Ok(search_results
             .into_iter()
             .map(|(path, distance, thumbnail_data)| {
                 let thumbnail_base64 =
                     thumbnail_data.map(|data| general_purpose::STANDARD.encode(&data));
                 (path, distance, thumbnail_base64)
             })
-            .collect();
-        Ok(search_results)
+            .collect())
     }
 
-    pub fn clean_missing_files(&mut self) -> Result<usize> {
-        let vt = self.vectors_table()?;
-        // Get all paths from database
+    pub async fn clean_missing_files(&self) -> Result<usize> {
+        let vt = self.vectors_table().await?;
         let conn = self
             .pool
             .get()
+            .await
             .context("Failed to get DB connection to clean missing files")?;
-        let mut stmt = conn.prepare("SELECT id, path FROM images")?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-        })?;
 
         let mut to_delete = Vec::new();
-        for row in rows {
-            let (id, rel_path) = row?;
-
-            // Convert relative path to absolute path for file existence check
-            let abs_path = RelativePath(PathBuf::from(rel_path)).to_absolute(&self.parent_dir);
-
-            if !abs_path.as_path().exists() {
-                to_delete.push(id);
+        {
+            let mut rows = conn.query("SELECT id, path FROM images", ()).await?;
+            while let Some(row) = rows.next().await? {
+                let id = col_i64(&row, 0, "id")?;
+                let rel_path = col_text(&row, 1, "path")?;
+                let abs_path =
+                    RelativePath(PathBuf::from(rel_path)).to_absolute(&self.parent_dir);
+                if !abs_path.as_path().exists() {
+                    to_delete.push(id);
+                }
             }
         }
+        drop(conn);
 
-        // Delete missing files from both tables in a single transaction
         let mut conn = self
             .pool
             .get()
+            .await
             .context("Failed to get DB connection to delete missing files")?;
-        let tx = conn.transaction()?;
+        let tx = conn.transaction().await?;
         let removed_count = to_delete.len();
         for id in to_delete {
-            // Delete from vector table first
-            tx.execute(&format!("DELETE FROM {vt} WHERE rowid = ?1"), params![id])?;
-            // Then delete from images table
-            tx.execute("DELETE FROM images WHERE id = ?1", params![id])?;
+            tx.execute(&format!("DELETE FROM {vt} WHERE image_id = ?1"), (id,))
+                .await?;
+            tx.execute("DELETE FROM images WHERE id = ?1", (id,)).await?;
         }
-        tx.commit()?;
-
+        tx.commit().await?;
         Ok(removed_count)
     }
 
-    pub fn get_image_count(&self) -> Result<i64> {
+    pub async fn get_image_count(&self) -> Result<i64> {
         let conn = self
             .pool
             .get()
+            .await
             .context("Failed to get DB connection to count images")?;
-        let mut stmt = conn.prepare("SELECT COUNT(*) FROM images")?;
-        let count: i64 = stmt.query_row([], |row| row.get(0))?;
-        Ok(count)
+        let mut rows = conn.query("SELECT COUNT(*) FROM images", ()).await?;
+        let row = rows.next().await?.context("COUNT returned no row")?;
+        col_i64(&row, 0, "count")
     }
 
-    pub fn get_sample_images(&self, limit: usize) -> Result<Vec<AbsolutePath>> {
+    pub async fn get_sample_images(&self, limit: usize) -> Result<Vec<AbsolutePath>> {
         let conn = self
             .pool
             .get()
+            .await
             .context("Failed to get DB connection to get sample images")?;
-        let mut stmt = conn.prepare("SELECT path FROM images ORDER BY created_at DESC LIMIT ?1")?;
-
-        let image_iter = stmt.query_map([limit], |row| {
-            let rel_path: String = row.get(0)?;
-            // Convert relative path back to absolute path
-            Ok(RelativePath(PathBuf::from(rel_path)).to_absolute(&self.parent_dir))
-        })?;
-
-        let mut results = Vec::new();
-        for image in image_iter {
-            results.push(image?);
+        let mut rows = conn
+            .query(
+                "SELECT path FROM images ORDER BY created_at DESC LIMIT ?1",
+                (limit as i64,),
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let rel_path = col_text(&row, 0, "path")?;
+            out.push(RelativePath(PathBuf::from(rel_path)).to_absolute(&self.parent_dir));
         }
-
-        Ok(results)
+        Ok(out)
     }
 
-    /// Insert a thumbnail into the database cache
-    pub fn insert_thumbnail(
+    /// Insert a thumbnail into the database cache.
+    pub async fn insert_thumbnail(
         &self,
         image_hash: &str,
         size: u32,
@@ -1128,189 +1030,184 @@ impl Database {
         let conn = self
             .pool
             .get()
+            .await
             .context("Failed to get DB connection to insert thumbnail")?;
         conn.execute(
-            "INSERT OR REPLACE INTO thumbnails (image_hash, size, thumbnail_data) VALUES (?1, ?2, ?3)",
-            params![image_hash, size as i64, thumbnail_data],
-        ).context("failed to insert or replace")?;
+            "INSERT OR REPLACE INTO thumbnails (image_hash, size, thumbnail_data) \
+             VALUES (?1, ?2, ?3)",
+            (
+                image_hash.to_string(),
+                size as i64,
+                thumbnail_data.to_vec(),
+            ),
+        )
+        .await
+        .context("failed to insert or replace")?;
         Ok(())
     }
 
-    /// Get a thumbnail from the database cache
-    pub fn get_thumbnail(&self, image_hash: &str, size: u32) -> Result<Vec<u8>> {
+    /// Get a thumbnail from the database cache.
+    pub async fn get_thumbnail(&self, image_hash: &str, size: u32) -> Result<Vec<u8>> {
         let conn = self
             .pool
             .get()
+            .await
             .context("Failed to get DB connection to get thumbnail")?;
-        let mut stmt = conn
-            .prepare("SELECT thumbnail_data FROM thumbnails WHERE image_hash = ?1 AND size = ?2")?;
-
-        let thumbnail_data: Vec<u8> =
-            stmt.query_row(params![image_hash, size as i64], |row| row.get(0))?;
-
-        Ok(thumbnail_data)
+        let mut rows = conn
+            .query(
+                "SELECT thumbnail_data FROM thumbnails WHERE image_hash = ?1 AND size = ?2",
+                (image_hash.to_string(), size as i64),
+            )
+            .await?;
+        let row = rows.next().await?.context("no thumbnail row")?;
+        match row.get_value(0)? {
+            Value::Blob(b) => Ok(b),
+            _ => anyhow::bail!("thumbnail_data is not a blob"),
+        }
     }
 
-    /// Get the hash for an image by its path
-    pub fn get_image_hash(&self, path: &RelativePath) -> Result<String> {
+    /// Get the hash for an image by its path.
+    pub async fn get_image_hash(&self, path: &RelativePath) -> Result<String> {
         let conn = self
             .pool
             .get()
+            .await
             .context("Failed to get DB connection to get image hash")?;
-        let mut stmt = conn.prepare("SELECT hash FROM images WHERE path = ?1")?;
-        let hash: String = stmt.query_row(params![path.as_str().as_ref()], |row| row.get(0))?;
-        Ok(hash)
+        let mut rows = conn
+            .query(
+                "SELECT hash FROM images WHERE path = ?1",
+                (path.as_str().into_owned(),),
+            )
+            .await?;
+        let row = rows.next().await?.context("no image row for hash lookup")?;
+        col_text(&row, 0, "hash")
     }
 
-    /// Get images that don't have thumbnails of a specific size
-    /// Returns a list of (path, hash) tuples for images missing thumbnails
-    pub fn get_images_without_thumbnails(
+    /// Get images that don't have thumbnails of a specific size.
+    /// Returns a list of `(path, hash)` tuples for images missing thumbnails.
+    pub async fn get_images_without_thumbnails(
         &self,
         size: u32,
         limit: usize,
     ) -> Result<Vec<(AbsolutePath, String)>> {
-        let query = "
-            SELECT i.path, i.hash 
-            FROM images i 
-            LEFT JOIN thumbnails t ON i.hash = t.image_hash AND t.size = ?1
-            WHERE t.id IS NULL
-            LIMIT ?2
-        ";
-
-        let images = {
-            let conn = self
-                .pool
-                .get()
-                .context("Failed to get DB connection for getting images without thumbnails")?;
-            let mut stmt = conn.prepare(query)?;
-            let results = stmt.query_map(params![size as i64, limit], |row| {
-                let rel_path: String = row.get(0)?;
-                let hash: String = row.get(1)?;
-
-                // Convert relative path back to absolute path
-                let abs_path = RelativePath(PathBuf::from(rel_path)).to_absolute(&self.parent_dir);
-
-                Ok((abs_path, hash))
-            })?;
-
-            let mut images = Vec::new();
-            for result in results {
-                images.push(result?);
-            }
-
-            images
-        };
-
-        Ok(images)
-    }
-    /// Count images that don't have thumbnails of a specific size
-    /// Returns the count of images missing thumbnails
-    pub fn count_images_without_thumbnails(&self, size: u32) -> Result<usize> {
-        let query = "
-            SELECT COUNT(*)
-            FROM images i 
-            LEFT JOIN thumbnails t ON i.hash = t.image_hash AND t.size = ?1
-            WHERE t.id IS NULL
-        ";
-
+        let limit = i64::try_from(limit).context("thumbnail LIMIT exceeds i64 range")?;
         let conn = self
             .pool
             .get()
-            .context("Failed to get DB connection for counting images without thumbnails")?;
-        let mut stmt = conn.prepare(query)?;
-        stmt.query_row(params![size as i64], |row| row.get(0))
-            .context("Failed to count images without thumbnails")
-            .map(|count: i64| count as usize)
+            .await
+            .context("Failed to get DB connection for getting images without thumbnails")?;
+        let mut rows = conn
+            .query(
+                "SELECT i.path, i.hash \
+                 FROM images i \
+                 LEFT JOIN thumbnails t ON i.hash = t.image_hash AND t.size = ?1 \
+                 WHERE t.id IS NULL \
+                 LIMIT ?2",
+                (size as i64, limit),
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let rel_path = col_text(&row, 0, "path")?;
+            let hash = col_text(&row, 1, "hash")?;
+            let abs_path = RelativePath(PathBuf::from(rel_path)).to_absolute(&self.parent_dir);
+            out.push((abs_path, hash));
+        }
+        Ok(out)
     }
 
-    /// Insert or update metadata for an image
-    pub fn insert_or_update_metadata(
-        &mut self,
+    /// Count images that don't have thumbnails of a specific size.
+    pub async fn count_images_without_thumbnails(&self, size: u32) -> Result<usize> {
+        let conn = self
+            .pool
+            .get()
+            .await
+            .context("Failed to get DB connection for counting images without thumbnails")?;
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) \
+                 FROM images i \
+                 LEFT JOIN thumbnails t ON i.hash = t.image_hash AND t.size = ?1 \
+                 WHERE t.id IS NULL",
+                (size as i64,),
+            )
+            .await?;
+        let row = rows.next().await?.context("COUNT returned no row")?;
+        Ok(col_i64(&row, 0, "count")? as usize)
+    }
+
+    /// Insert or update metadata for an image.
+    pub async fn insert_or_update_metadata(
+        &self,
         image_id: i64,
         metadata: &ImageMetadata,
     ) -> Result<()> {
         let conn = self
             .pool
             .get()
+            .await
             .context("Failed to get DB connection to insert metadata")?;
-
         conn.execute(
-            "INSERT OR REPLACE INTO image_metadata 
-             (image_id, file_size, width, height, latitude, longitude, 
-              camera_make, camera_model, datetime_taken) 
+            "INSERT OR REPLACE INTO image_metadata \
+             (image_id, file_size, width, height, latitude, longitude, \
+              camera_make, camera_model, datetime_taken) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                image_id,
-                metadata.file_size.map(|s| s as i64),
-                metadata.width.map(|w| w as i64),
-                metadata.height.map(|h| h as i64),
-                metadata.latitude,
-                metadata.longitude,
-                metadata.camera_make,
-                metadata.camera_model,
-                metadata.datetime_taken
-            ],
-        )?;
-
+            (
+                Value::Integer(image_id),
+                opt_i64(metadata.file_size.map(|s| s as i64)),
+                opt_i64(metadata.width.map(|w| w as i64)),
+                opt_i64(metadata.height.map(|h| h as i64)),
+                opt_f64(metadata.latitude),
+                opt_f64(metadata.longitude),
+                opt_text(metadata.camera_make.clone()),
+                opt_text(metadata.camera_model.clone()),
+                opt_text(metadata.datetime_taken.clone()),
+            ),
+        )
+        .await?;
         Ok(())
     }
 
-    /// Get images without metadata
-    pub fn get_images_without_metadata(
+    /// Get images without metadata.
+    pub async fn get_images_without_metadata(
         &self,
         limit: usize,
     ) -> Result<Vec<(i64, AbsolutePath, String)>> {
-        let query = "
-            SELECT i.id, i.path, i.hash 
-            FROM images i 
-            LEFT JOIN image_metadata m ON i.id = m.image_id
-            WHERE m.id IS NULL
-            LIMIT ?1
-        ";
-
+        let limit = i64::try_from(limit).context("metadata LIMIT exceeds i64 range")?;
         let conn = self
             .pool
             .get()
+            .await
             .context("Failed to get DB connection for images without metadata")?;
-        let mut stmt = conn.prepare(query)?;
-        let results = stmt.query_map(params![limit], |row| {
-            let id: i64 = row.get(0)?;
-            let rel_path: String = row.get(1)?;
-            let hash: String = row.get(2)?;
-
-            // Convert relative path back to absolute path
+        let mut rows = conn
+            .query(
+                "SELECT i.id, i.path, i.hash \
+                 FROM images i \
+                 LEFT JOIN image_metadata m ON i.id = m.image_id \
+                 WHERE m.id IS NULL \
+                 LIMIT ?1",
+                (limit,),
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let id = col_i64(&row, 0, "id")?;
+            let rel_path = col_text(&row, 1, "path")?;
+            let hash = col_text(&row, 2, "hash")?;
             let abs_path = RelativePath(PathBuf::from(rel_path)).to_absolute(&self.parent_dir);
-
-            Ok((id, abs_path, hash))
-        })?;
-
-        let mut images = Vec::new();
-        for result in results {
-            images.push(result?);
+            out.push((id, abs_path, hash));
         }
-
-        Ok(images)
+        Ok(out)
     }
 
-    /// Get images within geographic bounds
-    pub fn get_images_by_bounds(
+    /// Get images within geographic bounds.
+    pub async fn get_images_by_bounds(
         &self,
         north: f64,
         south: f64,
         east: f64,
         west: f64,
     ) -> Result<(Vec<ImageWithMetadata>, usize)> {
-        let query = "
-            SELECT i.path, i.hash, m.latitude, m.longitude, m.width, m.height, m.datetime_taken
-            FROM images i
-            JOIN image_metadata m ON i.id = m.image_id
-            WHERE m.latitude IS NOT NULL 
-              AND m.longitude IS NOT NULL
-              AND m.latitude BETWEEN ?1 AND ?2
-              AND m.longitude BETWEEN ?3 AND ?4
-            ORDER BY m.datetime_taken DESC
-        ";
-
         let lat_low = north.min(south);
         let lat_high = north.max(south);
         let long_low = east.min(west);
@@ -1319,42 +1216,42 @@ impl Database {
         let conn = self
             .pool
             .get()
+            .await
             .context("Failed to get DB connection for images by bounds")?;
-        let mut stmt = conn.prepare(query)?;
-        let results = stmt.query_map(params![lat_low, lat_high, long_low, long_high], |row| {
-            let rel_path: String = row.get(0)?;
-            let hash: String = row.get(1)?;
-            let latitude: Option<f64> = row.get(2)?;
-            let longitude: Option<f64> = row.get(3)?;
-            let width: Option<i64> = row.get(4)?;
-            let height: Option<i64> = row.get(5)?;
-            let datetime_taken: Option<String> = row.get(6)?;
+        let mut rows = conn
+            .query(
+                "SELECT i.path, i.hash, m.latitude, m.longitude, m.width, m.height, \
+                        m.datetime_taken \
+                 FROM images i \
+                 JOIN image_metadata m ON i.id = m.image_id \
+                 WHERE m.latitude IS NOT NULL AND m.longitude IS NOT NULL \
+                   AND m.latitude BETWEEN ?1 AND ?2 \
+                   AND m.longitude BETWEEN ?3 AND ?4 \
+                 ORDER BY m.datetime_taken DESC",
+                (lat_low, lat_high, long_low, long_high),
+            )
+            .await?;
 
-            // Convert relative path back to absolute path for thumbnail generation
-            let abs_path = RelativePath(PathBuf::from(&rel_path)).to_absolute(&self.parent_dir);
-
-            Ok(ImageWithMetadata {
-                path: rel_path, // Use relative path for frontend
+        let mut images = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let rel_path = col_text(&row, 0, "path")?;
+            let abs_path =
+                RelativePath(PathBuf::from(&rel_path)).to_absolute(&self.parent_dir);
+            images.push(ImageWithMetadata {
+                path: rel_path,
                 absolute_path: abs_path.as_str().into_owned(),
-                hash,
-                latitude,
-                longitude,
-                width: width.map(|w| w as u32),
-                height: height.map(|h| h as u32),
-                datetime_taken,
-            })
-        })?;
-
-        let images: Vec<ImageWithMetadata> = results
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .context("Failed to read image rows for bounds query")?;
+                hash: col_text(&row, 1, "hash")?,
+                latitude: col_opt_f64(&row, 2)?,
+                longitude: col_opt_f64(&row, 3)?,
+                width: col_opt_i64(&row, 4)?.map(|w| w as u32),
+                height: col_opt_i64(&row, 5)?.map(|h| h as u32),
+                datetime_taken: col_opt_text(&row, 6)?,
+            });
+        }
 
         let biggest_difference = (lat_high - lat_low).max(long_high - long_low);
-
         info!("Biggest difference was: {biggest_difference}");
-
         let grid_size = biggest_difference / 200.;
-
         let original_count = images.len();
 
         let mut clustered = if original_count < 100 || biggest_difference < 0.01 {
@@ -1362,11 +1259,9 @@ impl Database {
         } else {
             downsample_by_grid(images, grid_size, 10, 2)
         };
-
         if clustered.len() < 100 {
             apply_stable_jitter(&mut clustered);
         }
-
         Ok((clustered, original_count))
     }
 
@@ -1374,13 +1269,13 @@ impl Database {
     ///
     /// Images without a metadata row still appear when filters are permissive,
     /// because the join is a LEFT JOIN. Returns `(relative_path, file_size)` rows.
-    pub fn browse(
+    pub async fn browse(
         &self,
         f: &Filters,
         limit: usize,
         offset: usize,
     ) -> Result<Vec<(String, Option<i64>)>> {
-        let (clause, mut values) = build_filter_clause(f);
+        let (clause, mut values) = build_filter_clause_turso(f);
         let sql = format!(
             "SELECT i.path, m.file_size
                FROM images i
@@ -1391,14 +1286,13 @@ impl Database {
         );
         values.push(Value::Integer(limit as i64));
         values.push(Value::Integer(offset as i64));
-        let conn = self.pool.get().context("DB connection for browse")?;
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt
-            .query_map(params_from_iter(values), |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
+        let conn = self.pool.get().await.context("DB connection for browse")?;
+        let mut rows = conn.query(&sql, turso::params_from_iter(values)).await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push((col_text(&row, 0, "path")?, col_opt_i64(&row, 1)?));
+        }
+        Ok(out)
     }
 
     /// Browse **all** matching images in the given sort order, with no LIMIT/OFFSET.
@@ -1407,13 +1301,12 @@ impl Database {
     /// `ext` is derived Rust-side as the lowercased substring after the last `.`
     /// (empty string when there is no dot), matching [`crate::sort::ext_sql_expr`]
     /// used for SQL-level ordering.
-    pub fn browse_all(
+    pub async fn browse_all(
         &self,
         f: &Filters,
         sort: &crate::sort::Sort,
     ) -> Result<Vec<crate::sort::RowMeta>> {
-        use crate::sort::RowMeta;
-        let (clause, values) = build_filter_clause(f);
+        let (clause, values) = build_filter_clause_turso(f);
         let order = crate::sort::order_by_clause(sort);
         let sql = format!(
             "SELECT i.id, i.path, m.file_size
@@ -1422,31 +1315,17 @@ impl Database {
               WHERE 1=1{clause}
               ORDER BY {order}"
         );
-        let conn = self.pool.get().context("DB connection for browse_all")?;
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt
-            .query_map(params_from_iter(values), |row| {
-                let id: i64 = row.get(0)?;
-                let path: String = row.get(1)?;
-                let size: Option<i64> = row.get(2)?;
-                Ok((id, path, size))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?
-            .into_iter()
-            .map(|(id, path, size)| {
-                let ext = path
-                    .rsplit_once('.')
-                    .map(|(_, e)| e.to_lowercase())
-                    .unwrap_or_default();
-                RowMeta {
-                    id,
-                    path,
-                    size,
-                    ext,
-                }
-            })
-            .collect();
-        Ok(rows)
+        let conn = self
+            .pool
+            .get()
+            .await
+            .context("DB connection for browse_all")?;
+        let mut rows = conn.query(&sql, turso::params_from_iter(values)).await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push(row_meta(&row)?);
+        }
+        Ok(out)
     }
 
     /// Fetch [`crate::sort::RowMeta`] for an explicit ordered id list.
@@ -1454,9 +1333,7 @@ impl Database {
     /// Returns one `RowMeta` per id that exists in `images`, in the **same order
     /// as `ids`**. Ids not found in the database are silently dropped. An empty
     /// `ids` slice returns an empty `Vec` without touching the database.
-    pub fn rehydrate_rows(&self, ids: &[i64]) -> Result<Vec<crate::sort::RowMeta>> {
-        use std::collections::HashMap;
-
+    pub async fn rehydrate_rows(&self, ids: &[i64]) -> Result<Vec<crate::sort::RowMeta>> {
         use crate::sort::RowMeta;
 
         if ids.is_empty() {
@@ -1472,36 +1349,15 @@ impl Database {
         let conn = self
             .pool
             .get()
+            .await
             .context("DB connection for rehydrate_rows")?;
-        let mut stmt = conn.prepare(&sql)?;
-        let found: HashMap<i64, RowMeta> = stmt
-            .query_map(
-                params_from_iter(ids.iter().map(|i| Value::Integer(*i))),
-                |row| {
-                    let id: i64 = row.get(0)?;
-                    let path: String = row.get(1)?;
-                    let size: Option<i64> = row.get(2)?;
-                    Ok((id, path, size))
-                },
-            )?
-            .collect::<std::result::Result<Vec<_>, _>>()?
-            .into_iter()
-            .map(|(id, path, size)| {
-                let ext = path
-                    .rsplit_once('.')
-                    .map(|(_, e)| e.to_lowercase())
-                    .unwrap_or_default();
-                (
-                    id,
-                    RowMeta {
-                        id,
-                        path,
-                        size,
-                        ext,
-                    },
-                )
-            })
-            .collect();
+        let params: Vec<Value> = ids.iter().map(|i| Value::Integer(*i)).collect();
+        let mut rows = conn.query(&sql, turso::params_from_iter(params)).await?;
+        let mut found: HashMap<i64, RowMeta> = HashMap::new();
+        while let Some(row) = rows.next().await? {
+            let meta = row_meta(&row)?;
+            found.insert(meta.id, meta);
+        }
         Ok(ids.iter().filter_map(|id| found.get(id).cloned()).collect())
     }
 
@@ -1510,17 +1366,18 @@ impl Database {
     /// The extension is extracted Rust-side (via `rsplit_once('.')`) after
     /// `lower()` is applied in SQL, so both `a.JPG` and `b.jpg` yield `"jpg"`.
     /// Deduplication is handled by a `BTreeSet` (also giving alphabetical order).
-    pub fn distinct_extensions(&self) -> Result<Vec<String>> {
+    pub async fn distinct_extensions(&self) -> Result<Vec<String>> {
         let conn = self
             .pool
             .get()
+            .await
             .context("DB connection for distinct_extensions")?;
-        let mut stmt = conn.prepare("SELECT DISTINCT lower(path) FROM images")?;
-        let paths = stmt
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut rows = conn
+            .query("SELECT DISTINCT lower(path) FROM images", ())
+            .await?;
         let mut set = std::collections::BTreeSet::new();
-        for p in paths {
+        while let Some(row) = rows.next().await? {
+            let p = col_text(&row, 0, "path")?;
             if let Some((_, ext)) = p.rsplit_once('.')
                 && !ext.is_empty()
                 && !ext.contains('/')
@@ -1532,34 +1389,46 @@ impl Database {
     }
 
     /// `(min, max)` of non-null `file_size` values; `(0, 0)` when no rows have a size.
-    pub fn file_size_bounds(&self) -> Result<(i64, i64)> {
+    pub async fn file_size_bounds(&self) -> Result<(i64, i64)> {
         let conn = self
             .pool
             .get()
+            .await
             .context("DB connection for file_size_bounds")?;
-        let (min, max): (Option<i64>, Option<i64>) = conn.query_row(
-            "SELECT MIN(file_size), MAX(file_size) FROM image_metadata WHERE file_size IS NOT NULL",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        Ok((min.unwrap_or(0), max.unwrap_or(0)))
+        let mut rows = conn
+            .query(
+                "SELECT MIN(file_size), MAX(file_size) FROM image_metadata \
+                 WHERE file_size IS NOT NULL",
+                (),
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok((0, 0));
+        };
+        Ok((
+            col_opt_i64(&row, 0)?.unwrap_or(0),
+            col_opt_i64(&row, 1)?.unwrap_or(0),
+        ))
     }
 
-    /// Get the image ID by path
-    pub fn get_image_id(&self, path: &AbsolutePath) -> Result<i64> {
-        // Convert absolute path to relative path for database lookup
+    /// Get the image ID by path.
+    pub async fn get_image_id(&self, path: &AbsolutePath) -> Result<i64> {
         let rel_path = path.to_relative(&self.parent_dir).with_context(|| {
             format!("Failed to convert path {} to relative path", path.as_str())
         })?;
-        let rel_path_str = rel_path.as_str();
-
         let conn = self
             .pool
             .get()
+            .await
             .context("Failed to get DB connection to get image ID")?;
-        let mut stmt = conn.prepare("SELECT id FROM images WHERE path = ?1")?;
-        let id: i64 = stmt.query_row(params![rel_path_str.as_ref()], |row| row.get(0))?;
-        Ok(id)
+        let mut rows = conn
+            .query(
+                "SELECT id FROM images WHERE path = ?1",
+                (rel_path.as_str().into_owned(),),
+            )
+            .await?;
+        let row = rows.next().await?.context("no image row for id lookup")?;
+        col_i64(&row, 0, "id")
     }
 
     /// Read an image's stored EXIF/metadata from the `image_metadata` table by
@@ -1568,38 +1437,69 @@ impl Database {
     /// Returns `Ok(None)` when the path is unknown or has no metadata row.
     /// Dimensions/size are stored as `i64` (see [`Self::insert_or_update_metadata`])
     /// and cast back to `u64`/`u32` here.
-    pub fn get_image_metadata(&self, rel: &RelativePath) -> Result<Option<ImageMetadata>> {
+    pub async fn get_image_metadata(&self, rel: &RelativePath) -> Result<Option<ImageMetadata>> {
         let conn = self
             .pool
             .get()
+            .await
             .context("Failed to get DB connection to read stored metadata")?;
-        let mut stmt = conn.prepare(
-            "SELECT m.file_size, m.width, m.height, m.latitude, m.longitude,
-                    m.camera_make, m.camera_model, m.datetime_taken
-             FROM image_metadata m
-             JOIN images i ON i.id = m.image_id
-             WHERE i.path = ?1",
-        )?;
-        let meta = stmt
-            .query_row(params![rel.as_str().as_ref()], |row| {
-                let file_size: Option<i64> = row.get(0)?;
-                let width: Option<i64> = row.get(1)?;
-                let height: Option<i64> = row.get(2)?;
-                Ok(ImageMetadata {
-                    file_size: file_size.map(|s| s as u64),
-                    width: width.map(|w| w as u32),
-                    height: height.map(|h| h as u32),
-                    latitude: row.get(3)?,
-                    longitude: row.get(4)?,
-                    camera_make: row.get(5)?,
-                    camera_model: row.get(6)?,
-                    datetime_taken: row.get(7)?,
-                })
-            })
-            .optional()
-            .context("Failed to read stored image metadata")?;
-        Ok(meta)
+        let mut rows = conn
+            .query(
+                "SELECT m.file_size, m.width, m.height, m.latitude, m.longitude, \
+                        m.camera_make, m.camera_model, m.datetime_taken \
+                 FROM image_metadata m \
+                 JOIN images i ON i.id = m.image_id \
+                 WHERE i.path = ?1",
+                (rel.as_str().into_owned(),),
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        Ok(Some(ImageMetadata {
+            file_size: col_opt_i64(&row, 0)?.map(|s| s as u64),
+            width: col_opt_i64(&row, 1)?.map(|w| w as u32),
+            height: col_opt_i64(&row, 2)?.map(|h| h as u32),
+            latitude: col_opt_f64(&row, 3)?,
+            longitude: col_opt_f64(&row, 4)?,
+            camera_make: col_opt_text(&row, 5)?,
+            camera_model: col_opt_text(&row, 6)?,
+            datetime_taken: col_opt_text(&row, 7)?,
+        }))
     }
+}
+
+/// Build a [`crate::sort::RowMeta`] from a `(id, path, file_size)` row, deriving
+/// the lowercased extension Rust-side.
+fn row_meta(row: &turso::Row) -> Result<crate::sort::RowMeta> {
+    let id = col_i64(row, 0, "id")?;
+    let path = col_text(row, 1, "path")?;
+    let size = col_opt_i64(row, 2)?;
+    let ext = path
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_lowercase())
+        .unwrap_or_default();
+    Ok(crate::sort::RowMeta {
+        id,
+        path,
+        size,
+        ext,
+    })
+}
+
+/// Wrap an optional `i64` as a turso [`Value`] (`None` → `Null`).
+fn opt_i64(v: Option<i64>) -> Value {
+    v.map_or(Value::Null, Value::Integer)
+}
+
+/// Wrap an optional `f64` as a turso [`Value`] (`None` → `Null`).
+fn opt_f64(v: Option<f64>) -> Value {
+    v.map_or(Value::Null, Value::Real)
+}
+
+/// Wrap an optional `String` as a turso [`Value`] (`None` → `Null`).
+fn opt_text(v: Option<String>) -> Value {
+    v.map_or(Value::Null, Value::Text)
 }
 
 /// Metadata extracted from image EXIF data
@@ -1801,6 +1701,7 @@ fn generate_jitter(img: &ImageWithMetadata) -> (f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::LATEST_MIGRATION_VERSION;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     /// Unique temp directory for an isolated test database.
@@ -1812,73 +1713,42 @@ mod tests {
         dir.join(".imgfind").join("imgfind.db")
     }
 
-    /// Foreign keys must be enabled on *every* connection the pool hands out,
-    /// not just the one used during schema init. PRAGMAs are per-connection.
-    #[test]
-    fn foreign_keys_enabled_on_fresh_pool_connection() {
-        let db_path = temp_db_path();
-        let db = Database::new(&db_path).expect("create db");
-
-        // Hold one connection, then force the pool to build a *second*, fresh one.
-        // The old one-off PRAGMA only set foreign_keys on the connection used during
-        // schema init; any later connection would have FK enforcement off.
-        let _held = db.pool.get().expect("get first conn");
-        let conn = db.pool.get().expect("get second conn");
-        let fk_on: i64 = conn
-            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
-            .expect("read pragma");
-        assert_eq!(fk_on, 1, "foreign_keys should be ON for pooled connections");
-
-        // Remove the unique temp dir (grandparent of the .imgfind/imgfind.db path).
-        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+    /// Remove the unique temp dir (grandparent of the `.imgfind/imgfind.db` path).
+    fn cleanup(path: &Path) {
+        let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
     }
 
-    /// `busy_timeout` must be set on every pooled connection, not just the one
-    /// opened by the thumbnail batch writer. `PRAGMA busy_timeout` returns the
-    /// current value in milliseconds so we can assert the customizer fired.
-    #[test]
-    fn busy_timeout_set_on_fresh_pool_connection() {
-        let db_path = temp_db_path();
-        let db = Database::new(&db_path).expect("create db");
-
-        // Hold the first connection so the pool must build a second, fresh one.
-        let _held = db.pool.get().expect("get first conn");
-        let conn = db.pool.get().expect("get second conn");
-        let timeout_ms: i64 = conn
-            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
-            .expect("read pragma");
-        // POOL_BUSY_TIMEOUT is 5 s; SQLite reports it as 5000 ms.
-        assert_eq!(
-            timeout_ms, 5000,
-            "busy_timeout should be 5000 ms on every pooled connection"
-        );
-
-        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+    /// Embed a raw f32 slice as the `F32_BLOB` wire format for direct inserts.
+    fn emb_blob(v: &[f32]) -> Value {
+        Value::Blob(to_le_bytes(v))
     }
 
-    #[test]
-    fn get_image_metadata_reads_stored_row_without_decoding() {
+    #[tokio::test]
+    async fn get_image_metadata_reads_stored_row_without_decoding() {
         let db_path = temp_db_path();
-        let db = Database::new(&db_path).expect("create db");
+        let db = Database::new(&db_path).await.expect("create db");
         {
-            let conn = db.pool.get().expect("conn");
+            let conn = db.pool.get().await.expect("conn");
             conn.execute(
                 "INSERT INTO images (id, path, hash) VALUES (1, 'a.jpg', 'h')",
-                [],
+                (),
             )
+            .await
             .expect("insert image");
             conn.execute(
                 "INSERT INTO image_metadata
                  (image_id, file_size, width, height, latitude, longitude,
                   camera_make, camera_model, datetime_taken)
                  VALUES (1, 4096, 800, 600, 12.5, -77.25, 'Canon', 'R5', '2026:06:20 12:00:00')",
-                [],
+                (),
             )
+            .await
             .expect("insert metadata");
         }
 
         let meta = db
             .get_image_metadata(&RelativePath(PathBuf::from("a.jpg")))
+            .await
             .expect("query")
             .expect("metadata row present");
         assert_eq!(meta.file_size, Some(4096));
@@ -1892,15 +1762,17 @@ mod tests {
 
         // Image row exists but has no metadata row → Ok(None).
         {
-            let conn = db.pool.get().expect("conn");
+            let conn = db.pool.get().await.expect("conn");
             conn.execute(
                 "INSERT INTO images (id, path, hash) VALUES (2, 'b.jpg', 'h2')",
-                [],
+                (),
             )
+            .await
             .expect("insert image");
         }
         assert!(
             db.get_image_metadata(&RelativePath(PathBuf::from("b.jpg")))
+                .await
                 .expect("query")
                 .is_none(),
             "image without a metadata row should yield Ok(None)"
@@ -1909,119 +1781,170 @@ mod tests {
         // Unknown path → Ok(None).
         assert!(
             db.get_image_metadata(&RelativePath(PathBuf::from("nope.jpg")))
+                .await
                 .expect("query")
                 .is_none(),
             "unknown path should yield Ok(None)"
         );
 
-        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+        cleanup(&db_path);
     }
 
-    /// Deleting an image must cascade to its metadata row (ON DELETE CASCADE),
-    /// which only fires when foreign key enforcement is actually active.
-    #[test]
-    fn delete_image_cascades_to_metadata() {
-        let db_path = temp_db_path();
-        let db = Database::new(&db_path).expect("create db");
+    /// Deleting an image must cascade to its vector and metadata rows
+    /// (ON DELETE CASCADE), which only fires with foreign-key enforcement active.
+    #[tokio::test]
+    async fn delete_image_cascades_to_vectors_and_metadata() {
+        let (db, path) = test_db_with_rows(&[("a.jpg", Some(100))]).await;
 
-        // Force a fresh second connection so the cascade is exercised on a
-        // connection other than the one used during schema init.
-        let _held = db.pool.get().expect("get first conn");
-        let conn = db.pool.get().expect("get second conn");
+        // Insert an embedding for image id 1.
+        {
+            let conn = db.pool.get().await.expect("conn");
+            conn.execute(
+                "INSERT INTO image_vectors (image_id, embedding) VALUES (1, ?1)",
+                (emb_blob(&[0.5f32; 512]),),
+            )
+            .await
+            .expect("insert vector");
+        }
+
+        // Delete the image row; cascade should remove the vector + metadata rows.
+        {
+            let conn = db.pool.get().await.expect("conn");
+            conn.execute("DELETE FROM images WHERE id = 1", ())
+                .await
+                .expect("delete image");
+        }
+
+        let conn = db.pool.get().await.expect("conn");
+        let mut vrows = conn
+            .query("SELECT COUNT(*) FROM image_vectors WHERE image_id = 1", ())
+            .await
+            .unwrap();
+        let vrow = vrows.next().await.unwrap().unwrap();
+        assert_eq!(
+            col_i64(&vrow, 0, "count").unwrap(),
+            0,
+            "vector row should cascade-delete with its image"
+        );
+        let mut mrows = conn
+            .query("SELECT COUNT(*) FROM image_metadata WHERE image_id = 1", ())
+            .await
+            .unwrap();
+        let mrow = mrows.next().await.unwrap().unwrap();
+        assert_eq!(
+            col_i64(&mrow, 0, "count").unwrap(),
+            0,
+            "metadata row should cascade-delete with its image"
+        );
+        drop(conn);
+
+        cleanup(&path);
+    }
+
+    /// N concurrent tasks inserting thumbnails through the pool all succeed
+    /// (the pool must not deadlock under concurrent write load).
+    #[tokio::test]
+    async fn concurrent_writes_do_not_deadlock() {
+        let db_path = temp_db_path();
+        let db = Database::new(&db_path).await.expect("create db");
+
+        let mut handles = Vec::new();
+        for i in 0..16u32 {
+            let db = db.clone();
+            handles.push(tokio::spawn(async move {
+                db.insert_thumbnails_batch(&[(format!("h{i}"), 300, vec![i as u8; 8])])
+                    .await
+            }));
+        }
+        for h in handles {
+            h.await.expect("task joined").expect("thumbnail insert");
+        }
+
+        let conn = db.pool.get().await.expect("conn");
+        let mut rows = conn
+            .query("SELECT COUNT(*) FROM thumbnails", ())
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(col_i64(&row, 0, "count").unwrap(), 16);
+        drop(conn);
+
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn toggle_favorite_flips_state() {
+        let db_path = temp_db_path();
+        let db = Database::new(&db_path).await.expect("create db");
+
+        let conn = db.pool.get().await.expect("get conn");
         conn.execute(
             "INSERT INTO images (id, path, hash) VALUES (1, 'a.jpg', 'h')",
-            [],
+            (),
         )
+        .await
         .expect("insert image");
+        drop(conn);
+
+        let p = RelativePath(PathBuf::from("a.jpg"));
+        assert!(!db.is_favorite(&p).await.unwrap());
+        assert!(db.toggle_favorite(&p).await.unwrap());
+        assert!(db.is_favorite(&p).await.unwrap());
+        assert_eq!(db.list_favorites().await.unwrap(), vec![p.clone()]);
+        assert!(!db.toggle_favorite(&p).await.unwrap());
+        assert!(!db.is_favorite(&p).await.unwrap());
+
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn tag_and_collection_roundtrip() {
+        let db_path = temp_db_path();
+        let db = Database::new(&db_path).await.expect("create db");
+
+        let conn = db.pool.get().await.expect("get conn");
         conn.execute(
-            "INSERT INTO image_metadata (image_id, width) VALUES (1, 100)",
-            [],
+            "INSERT INTO images (id, path, hash) VALUES (1, 'a.jpg', 'h')",
+            (),
         )
-        .expect("insert metadata");
+        .await
+        .expect("insert image");
+        drop(conn);
 
-        conn.execute("DELETE FROM images WHERE id = 1", [])
-            .expect("delete image");
-
-        let meta_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM image_metadata WHERE image_id = 1",
-                [],
-                |row| row.get(0),
-            )
-            .expect("count metadata");
+        let p = RelativePath(PathBuf::from("a.jpg"));
+        db.tag_image(&p, "cats").await.unwrap();
         assert_eq!(
-            meta_count, 0,
-            "metadata should cascade-delete with its image"
+            db.tags_for_image(&p).await.unwrap(),
+            vec!["cats".to_string()]
+        );
+        assert_eq!(db.images_by_tag("cats").await.unwrap(), vec![p.clone()]);
+        db.untag_image(&p, "cats").await.unwrap();
+        assert!(db.tags_for_image(&p).await.unwrap().is_empty());
+        db.create_collection("trip").await.unwrap();
+        db.add_to_collection("trip", &p).await.unwrap();
+        assert_eq!(db.collection_images("trip").await.unwrap(), vec![p.clone()]);
+        assert_eq!(
+            db.list_collections().await.unwrap(),
+            vec!["trip".to_string()]
         );
 
-        // Remove the unique temp dir (grandparent of the .imgfind/imgfind.db path).
-        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+        cleanup(&db_path);
     }
 
-    #[test]
-    fn toggle_favorite_flips_state() {
+    #[tokio::test]
+    async fn migrations_set_schema_meta_and_create_tables() {
         let db_path = temp_db_path();
-        let db = Database::new(&db_path).expect("create db");
-
-        // Insert an image directly so the stored path is a known relative value.
-        let conn = db.pool.get().expect("get conn");
-        conn.execute(
-            "INSERT INTO images (id, path, hash) VALUES (1, 'a.jpg', 'h')",
-            [],
-        )
-        .expect("insert image");
-        drop(conn);
-
-        let p = RelativePath(PathBuf::from("a.jpg"));
-        assert!(!db.is_favorite(&p).unwrap());
-        assert!(db.toggle_favorite(&p).unwrap());
-        assert!(db.is_favorite(&p).unwrap());
-        assert_eq!(db.list_favorites().unwrap(), vec![p.clone()]);
-        assert!(!db.toggle_favorite(&p).unwrap());
-        assert!(!db.is_favorite(&p).unwrap());
-
-        // Remove the unique temp dir (grandparent of the .imgfind/imgfind.db path).
-        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
-    }
-
-    #[test]
-    fn tag_and_collection_roundtrip() {
-        let db_path = temp_db_path();
-        let db = Database::new(&db_path).expect("create db");
-
-        // Insert an image directly so the stored path is a known relative value.
-        let conn = db.pool.get().expect("get conn");
-        conn.execute(
-            "INSERT INTO images (id, path, hash) VALUES (1, 'a.jpg', 'h')",
-            [],
-        )
-        .expect("insert image");
-        drop(conn);
-
-        let p = RelativePath(PathBuf::from("a.jpg"));
-        db.tag_image(&p, "cats").unwrap();
-        assert_eq!(db.tags_for_image(&p).unwrap(), vec!["cats".to_string()]);
-        assert_eq!(db.images_by_tag("cats").unwrap(), vec![p.clone()]);
-        db.untag_image(&p, "cats").unwrap();
-        assert!(db.tags_for_image(&p).unwrap().is_empty());
-        db.create_collection("trip").unwrap();
-        db.add_to_collection("trip", &p).unwrap();
-        assert_eq!(db.collection_images("trip").unwrap(), vec![p.clone()]);
-        assert_eq!(db.list_collections().unwrap(), vec!["trip".to_string()]);
-
-        // Remove the unique temp dir (grandparent of the .imgfind/imgfind.db path).
-        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
-    }
-
-    #[test]
-    fn migrations_set_user_version_and_create_tables() {
-        let db_path = temp_db_path();
-        let db = Database::new(&db_path).expect("create db");
-        let conn = db.pool.get().unwrap();
-        let v: i32 = conn
-            .query_row("PRAGMA user_version", [], |r| r.get(0))
+        let db = Database::new(&db_path).await.expect("create db");
+        let conn = db.pool.get().await.unwrap();
+        let mut rows = conn
+            .query("SELECT version FROM schema_meta LIMIT 1", ())
+            .await
             .unwrap();
-        assert_eq!(v, LATEST_MIGRATION_VERSION);
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(
+            col_i64(&row, 0, "version").unwrap(),
+            LATEST_MIGRATION_VERSION as i64
+        );
         for t in [
             "images",
             "image_vectors",
@@ -2029,47 +1952,48 @@ mod tests {
             "image_metadata",
             "favorites",
         ] {
-            let n: i64 = conn
-                .query_row(
+            let mut trows = conn
+                .query(
                     "SELECT count(*) FROM sqlite_master WHERE name = ?1",
-                    [t],
-                    |r| r.get(0),
+                    (t,),
                 )
+                .await
                 .unwrap();
-            assert_eq!(n, 1, "table {t} should exist");
+            let trow = trows.next().await.unwrap().unwrap();
+            assert_eq!(col_i64(&trow, 0, "count").unwrap(), 1, "table {t} should exist");
         }
+        drop(conn);
 
-        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+        cleanup(&db_path);
     }
 
-    /// Regression test for the pagination bug: vec0's `k` bounds the TOTAL
-    /// neighbors returned, and OFFSET applies on top. If `k` only covers
-    /// `limit` (not `offset + limit`), page 2 gets zero rows. With the fix,
-    /// page 2 must return the next slice in distance order.
-    #[test]
-    fn search_meta_paginates_past_first_page() {
+    /// Regression test for the pagination bug: the requested page must include
+    /// rows past the first `limit` when `offset` is advanced.
+    #[tokio::test]
+    async fn search_meta_paginates_past_first_page() {
         let db_path = temp_db_path();
-        let db = Database::new(&db_path).expect("create db");
-        let conn = db.pool.get().expect("get conn");
+        let db = Database::new(&db_path).await.expect("create db");
+        let conn = db.pool.get().await.expect("get conn");
 
-        // Insert 10 images with embeddings whose first component decreases as
-        // the id grows. The query embedding is the unit vector along axis 0, so
-        // distance increases monotonically with id => a deterministic ordering.
+        // Insert 10 images with embeddings whose first component decreases as the
+        // id grows. The query embedding is the unit vector along axis 0, so the
+        // cosine distance increases monotonically with id.
         for id in 1..=10i64 {
             conn.execute(
                 "INSERT INTO images (id, path, hash) VALUES (?1, ?2, ?3)",
-                params![id, format!("img{id}.jpg"), format!("h{id}")],
+                (id, format!("img{id}.jpg"), format!("h{id}")),
             )
+            .await
             .expect("insert image");
 
             let mut emb = vec![0.0f32; 512];
-            // Larger id -> smaller axis-0 component -> larger cosine distance.
             emb[0] = 1.0 - (id as f32) * 0.01;
             emb[1] = (id as f32) * 0.01;
             conn.execute(
-                "INSERT INTO image_vectors (rowid, embedding) VALUES (?1, ?2)",
-                params![id, emb.as_slice().as_bytes()],
+                "INSERT INTO image_vectors (image_id, embedding) VALUES (?1, ?2)",
+                (Value::Integer(id), emb_blob(&emb)),
             )
+            .await
             .expect("insert vector");
         }
         drop(conn);
@@ -2077,13 +2001,13 @@ mod tests {
         let mut query = vec![0.0f32; 512];
         query[0] = 1.0;
 
-        // Page 1: first 4 (nearest) results.
         let page1 = db
             .search_similar_images_meta(&query, 4, 0, 2.0, 100, &crate::filters::Filters::default())
+            .await
             .expect("page 1");
-        // Page 2: next 4 results. Pre-fix this returned ZERO rows.
         let page2 = db
             .search_similar_images_meta(&query, 4, 4, 2.0, 100, &crate::filters::Filters::default())
+            .await
             .expect("page 2");
 
         assert_eq!(page1.len(), 4, "page 1 should be full");
@@ -2094,35 +2018,33 @@ mod tests {
         assert_eq!(p1_paths, ["img1.jpg", "img2.jpg", "img3.jpg", "img4.jpg"]);
         assert_eq!(p2_paths, ["img5.jpg", "img6.jpg", "img7.jpg", "img8.jpg"]);
 
-        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+        cleanup(&db_path);
     }
 
-    /// Regression test: when `offset + limit > max_k`, the clamped `k` was
-    /// re-capped to `max_k`, leaving sqlite-vec too few candidates to fill the
-    /// requested page. With the fix, `k` is set to `(offset + limit).max(max_k)`
-    /// so the KNN scan always covers the full window.
-    #[test]
-    fn search_meta_paginates_past_max_k() {
+    /// Regression test: the requested page must be full even when
+    /// `offset + limit > max_k`.
+    #[tokio::test]
+    async fn search_meta_paginates_past_max_k() {
         let db_path = temp_db_path();
-        let db = Database::new(&db_path).expect("create db");
-        let conn = db.pool.get().expect("get conn");
+        let db = Database::new(&db_path).await.expect("create db");
+        let conn = db.pool.get().await.expect("get conn");
 
-        // Insert 60 images. First axis-0 component decreases with id so the
-        // query vector (unit along axis 0) sees monotonically increasing distance.
         for id in 1..=60i64 {
             conn.execute(
                 "INSERT INTO images (id, path, hash) VALUES (?1, ?2, ?3)",
-                params![id, format!("img{id}.jpg"), format!("h{id}")],
+                (id, format!("img{id}.jpg"), format!("h{id}")),
             )
+            .await
             .expect("insert image");
 
             let mut emb = vec![0.0f32; 512];
             emb[0] = 1.0 - (id as f32) * 0.01;
             emb[1] = (id as f32) * 0.01;
             conn.execute(
-                "INSERT INTO image_vectors (rowid, embedding) VALUES (?1, ?2)",
-                params![id, emb.as_slice().as_bytes()],
+                "INSERT INTO image_vectors (image_id, embedding) VALUES (?1, ?2)",
+                (Value::Integer(id), emb_blob(&emb)),
             )
+            .await
             .expect("insert vector");
         }
         drop(conn);
@@ -2130,95 +2052,78 @@ mod tests {
         let mut query = vec![0.0f32; 512];
         query[0] = 1.0;
 
-        // offset=35, limit=20 => offset+limit=55 > max_k=40.
-        // Pre-fix: k was clamped back to 40, so sqlite-vec had no candidates
-        // beyond rank 40; with OFFSET 35 only 5 rows were returned.
-        // Post-fix: k = max(55, 40) = 55, so the scan covers all needed rows.
         let result = db
-            .search_similar_images_meta(
-                &query,
-                20,
-                35,
-                2.0,
-                40,
-                &crate::filters::Filters::default(),
-            )
+            .search_similar_images_meta(&query, 20, 35, 2.0, 40, &crate::filters::Filters::default())
+            .await
             .expect("paginated search");
 
         assert_eq!(result.len(), 20, "page must be full (offset+limit > max_k)");
 
-        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+        cleanup(&db_path);
     }
 
-    /// Regression test for the silent "Generated 0 thumbnails" bug.
-    ///
-    /// `index_directory` used to pass `usize::MAX` as the thumbnail batch `count`,
-    /// which flows into `get_images_without_thumbnails` as a SQL `LIMIT ?` bound
-    /// parameter. rusqlite binds usize via `i64::try_from`, so `usize::MAX` (2^64-1)
-    /// overflows i64 and the bind FAILS — the error was swallowed and zero thumbnails
-    /// were ever generated. The fix counts the missing images and passes that exact
-    /// number. This test pins both halves:
-    ///   1. `usize::MAX` as the LIMIT still errors (the trap is real).
-    ///   2. The count from `count_images_without_thumbnails` binds cleanly and the
-    ///      paired `get_images_without_thumbnails(size, count)` returns every missing
-    ///      image — i.e. the value `index_directory` now passes works end to end.
-    #[test]
-    fn missing_thumbnail_limit_bind_uses_real_count_not_usize_max() {
+    /// Regression test for the missing-thumbnail count path: counting the
+    /// missing images and passing that count returns every missing image.
+    #[tokio::test]
+    async fn missing_thumbnail_limit_bind_uses_real_count() {
         let db_path = temp_db_path();
-        let db = Database::new(&db_path).expect("create db");
-        let conn = db.pool.get().expect("get conn");
+        let db = Database::new(&db_path).await.expect("create db");
+        let conn = db.pool.get().await.expect("get conn");
 
-        // Three images, none with a thumbnail of size 300.
         for id in 1..=3i64 {
             conn.execute(
                 "INSERT INTO images (id, path, hash) VALUES (?1, ?2, ?3)",
-                params![id, format!("img{id}.jpg"), format!("h{id}")],
+                (id, format!("img{id}.jpg"), format!("h{id}")),
             )
+            .await
             .expect("insert image");
         }
         drop(conn);
 
-        // The bug: usize::MAX overflows the i64 LIMIT bind and errors out.
+        // usize::MAX overflows the i64 LIMIT bind and is rejected.
         assert!(
-            db.get_images_without_thumbnails(300, usize::MAX).is_err(),
-            "usize::MAX must overflow the i64 LIMIT bind (this is the bug the fix avoids)"
+            db.get_images_without_thumbnails(300, usize::MAX)
+                .await
+                .is_err(),
+            "usize::MAX must overflow the i64 LIMIT bind"
         );
 
-        // The fix: count the missing images, then pass that count.
         let missing = db
             .count_images_without_thumbnails(300)
+            .await
             .expect("count missing thumbnails must succeed");
         assert_eq!(missing, 3, "all three images are missing a 300px thumbnail");
 
-        // That count binds cleanly as LIMIT and returns every missing image.
         let rows = db
             .get_images_without_thumbnails(300, missing)
+            .await
             .expect("real-count LIMIT bind must succeed");
         assert_eq!(
             rows.len(),
             3,
-            "the count value index_directory now passes covers all missing images"
+            "the count value covers all missing images"
         );
 
-        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+        cleanup(&db_path);
     }
 
-    #[test]
-    fn migration_2_seeds_baseline_model_and_user_tables() {
+    #[tokio::test]
+    async fn migration_2_seeds_baseline_model_and_user_tables() {
         let db_path = temp_db_path();
-        let db = Database::new(&db_path).expect("create db");
-        let conn = db.pool.get().unwrap();
-        let v: i32 = conn
-            .query_row("PRAGMA user_version", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(v, LATEST_MIGRATION_VERSION);
-        let (name, dim, table, active): (String, i64, String, i64) = conn
-            .query_row(
+        let db = Database::new(&db_path).await.expect("create db");
+        let conn = db.pool.get().await.unwrap();
+        let mut rows = conn
+            .query(
                 "SELECT name, dim, table_name, is_active FROM models WHERE is_active = 1",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                (),
             )
+            .await
             .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let name = col_text(&row, 0, "name").unwrap();
+        let dim = col_i64(&row, 1, "dim").unwrap();
+        let table = col_text(&row, 2, "table_name").unwrap();
+        let active = col_i64(&row, 3, "is_active").unwrap();
         assert_eq!((dim, table.as_str(), active), (512, "image_vectors", 1));
         assert!(name.contains("clip"));
         for t in [
@@ -2228,154 +2133,156 @@ mod tests {
             "collection_images",
             "models",
         ] {
-            let n: i64 = conn
-                .query_row(
-                    "SELECT count(*) FROM sqlite_master WHERE name=?1",
-                    [t],
-                    |r| r.get(0),
-                )
+            let mut trows = conn
+                .query("SELECT count(*) FROM sqlite_master WHERE name=?1", (t,))
+                .await
                 .unwrap();
-            assert_eq!(n, 1, "table {t} exists");
+            let trow = trows.next().await.unwrap().unwrap();
+            assert_eq!(col_i64(&trow, 0, "count").unwrap(), 1, "table {t} exists");
         }
+        drop(conn);
 
-        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+        cleanup(&db_path);
     }
 
-    #[test]
-    fn active_model_defaults_to_baseline_table() {
+    #[tokio::test]
+    async fn active_model_defaults_to_baseline_table() {
         let db_path = temp_db_path();
-        let db = Database::new(&db_path).expect("create db");
-        let m = db.active_model().unwrap();
+        let db = Database::new(&db_path).await.expect("create db");
+        let m = db.active_model().await.unwrap();
         assert_eq!(m.dim, 512);
         assert_eq!(m.table, "image_vectors");
 
-        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+        cleanup(&db_path);
     }
 
-    #[test]
-    fn register_and_switch_model_creates_table_and_flips_active() {
+    #[tokio::test]
+    async fn register_and_switch_model_creates_table_and_flips_active() {
         let db_path = temp_db_path();
-        let db = Database::new(&db_path).expect("create db");
-        db.register_model("test-model", 256).unwrap();
-        db.set_active_model("test-model").unwrap();
-        let m = db.active_model().unwrap();
+        let db = Database::new(&db_path).await.expect("create db");
+        db.register_model("test-model", 256).await.unwrap();
+        db.set_active_model("test-model").await.unwrap();
+        let m = db.active_model().await.unwrap();
         assert_eq!((m.dim, m.table.as_str()), (256, "image_vectors_test_model"));
-        let n: i64 = db
-            .pool
-            .get()
-            .unwrap()
-            .query_row(
+        let conn = db.pool.get().await.unwrap();
+        let mut rows = conn
+            .query(
                 "SELECT count(*) FROM sqlite_master WHERE name='image_vectors_test_model'",
-                [],
-                |r| r.get(0),
+                (),
             )
+            .await
             .unwrap();
-        assert_eq!(n, 1);
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(col_i64(&row, 0, "count").unwrap(), 1);
+        drop(conn);
 
-        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+        cleanup(&db_path);
     }
 
     /// `is_image_indexed` is model-aware: an image indexed under one model is
-    /// reported as NOT indexed after switching to a different model (whose
-    /// vector table is empty), so a subsequent `index` run backfills the new
-    /// model's embeddings instead of skipping the file.
-    #[test]
-    fn is_image_indexed_is_model_aware() {
+    /// reported as NOT indexed after switching to a different (empty) model.
+    #[tokio::test]
+    async fn is_image_indexed_is_model_aware() {
         let db_path = temp_db_path();
-        let mut db = Database::new(&db_path).expect("create db");
+        let db = Database::new(&db_path).await.expect("create db");
 
         let abs = RelativePath(PathBuf::from("photo.jpg")).to_absolute(&db.parent_dir);
         let hash = "deadbeef";
 
-        // Nothing indexed yet.
-        assert!(!db.is_image_indexed(&abs, hash).unwrap());
+        assert!(!db.is_image_indexed(&abs, hash).await.unwrap());
 
-        // Index under the default model (dim 512, table image_vectors).
         db.insert_images_batch(&[("photo.jpg".to_string(), hash.to_string(), vec![0.1f32; 512])])
+            .await
             .unwrap();
         assert!(
-            db.is_image_indexed(&abs, hash).unwrap(),
+            db.is_image_indexed(&abs, hash).await.unwrap(),
             "indexed under default model"
         );
 
-        // Switch to a new model: its vector table is empty, so the same image
-        // is reported as NOT indexed and would be re-embedded on the next index.
-        db.register_model("other-model", 8).unwrap();
-        db.set_active_model("other-model").unwrap();
+        db.register_model("other-model", 8).await.unwrap();
+        db.set_active_model("other-model").await.unwrap();
         assert!(
-            !db.is_image_indexed(&abs, hash).unwrap(),
+            !db.is_image_indexed(&abs, hash).await.unwrap(),
             "not indexed under the freshly-switched model"
         );
 
-        // Backfill under the new model -> now indexed for it too.
         db.insert_images_batch(&[("photo.jpg".to_string(), hash.to_string(), vec![0.2f32; 8])])
+            .await
             .unwrap();
         assert!(
-            db.is_image_indexed(&abs, hash).unwrap(),
+            db.is_image_indexed(&abs, hash).await.unwrap(),
             "indexed under new model after backfill"
         );
 
-        // The original model's embedding is still present after switching back.
-        db.set_active_model("openai/clip-vit-base-patch32").unwrap();
+        db.set_active_model("openai/clip-vit-base-patch32")
+            .await
+            .unwrap();
         assert!(
-            db.is_image_indexed(&abs, hash).unwrap(),
+            db.is_image_indexed(&abs, hash).await.unwrap(),
             "default model embedding still present"
         );
 
-        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+        cleanup(&db_path);
     }
 
-    #[test]
-    fn migrations_are_idempotent() {
+    #[tokio::test]
+    async fn migrations_are_idempotent() {
         let db_path = temp_db_path();
-        let db = Database::new(&db_path).expect("create db");
-        let conn = db.pool.get().unwrap();
-        run_migrations(&conn).unwrap(); // re-run: no-op
-        let v: i32 = conn
-            .query_row("PRAGMA user_version", [], |r| r.get(0))
+        let db = Database::new(&db_path).await.expect("create db");
+        let conn = db.pool.get().await.unwrap();
+        crate::schema::run_migrations(&conn).await.unwrap(); // re-run: no-op
+        let mut rows = conn
+            .query("SELECT version FROM schema_meta LIMIT 1", ())
+            .await
             .unwrap();
-        assert_eq!(v, LATEST_MIGRATION_VERSION);
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(
+            col_i64(&row, 0, "version").unwrap(),
+            LATEST_MIGRATION_VERSION as i64
+        );
+        drop(conn);
 
-        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+        cleanup(&db_path);
     }
 
-    #[test]
-    fn find_similar_to_path_returns_neighbors_from_stored_embedding() {
+    #[tokio::test]
+    async fn find_similar_to_path_returns_neighbors_from_stored_embedding() {
         let db_path = temp_db_path();
-        let db = Database::new(&db_path).expect("create db");
+        let db = Database::new(&db_path).await.expect("create db");
 
-        // Two images with distinct 512-dim embeddings (default model dim).
         let mut a = vec![0.0f32; 512];
         a[0] = 1.0;
         let mut b = vec![0.0f32; 512];
         b[1] = 1.0;
 
         {
-            let conn = db.pool.get().expect("conn");
+            let conn = db.pool.get().await.expect("conn");
             conn.execute(
                 "INSERT INTO images (id, path, hash) VALUES (1, 'a.jpg', 'ha')",
-                [],
+                (),
             )
+            .await
             .expect("img a");
             conn.execute(
                 "INSERT INTO images (id, path, hash) VALUES (2, 'b.jpg', 'hb')",
-                [],
+                (),
             )
+            .await
             .expect("img b");
             conn.execute(
-                "INSERT INTO image_vectors (rowid, embedding) VALUES (?1, ?2)",
-                params![1i64, a.as_bytes()],
+                "INSERT INTO image_vectors (image_id, embedding) VALUES (1, ?1)",
+                (emb_blob(&a),),
             )
+            .await
             .expect("vec a");
             conn.execute(
-                "INSERT INTO image_vectors (rowid, embedding) VALUES (?1, ?2)",
-                params![2i64, b.as_bytes()],
+                "INSERT INTO image_vectors (image_id, embedding) VALUES (2, ?1)",
+                (emb_blob(&b),),
             )
+            .await
             .expect("vec b");
         }
 
-        // Seed = a.jpg. Its nearest neighbour is itself (distance ~0); b.jpg is
-        // orthogonal (L2 distance = sqrt(2) ≈ 1.414), so we use threshold 2.0.
         let rows = db
             .find_similar_to_path(
                 &RelativePath(PathBuf::from("a.jpg")),
@@ -2385,6 +2292,7 @@ mod tests {
                 100,
                 &crate::filters::Filters::default(),
             )
+            .await
             .expect("similar");
         let paths: Vec<&str> = rows.iter().map(|(_, p, _, _)| p.as_str()).collect();
         assert!(
@@ -2395,20 +2303,18 @@ mod tests {
             paths.contains(&"b.jpg"),
             "other image should appear among neighbours"
         );
-        // a.jpg (the seed) is closest to itself.
         assert_eq!(rows[0].1, "a.jpg");
 
-        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+        cleanup(&db_path);
     }
 
-    #[test]
-    fn browse_filters_by_size_type_and_gps() {
+    #[tokio::test]
+    async fn browse_filters_by_size_type_and_gps() {
         use crate::filters::{Filters, GpsFilter};
         let db_path = temp_db_path();
-        let db = Database::new(&db_path).expect("db");
+        let db = Database::new(&db_path).await.expect("db");
         {
-            let conn = db.pool.get().expect("conn");
-            // (id, path, size, lat, lon)
+            let conn = db.pool.get().await.expect("conn");
             let rows = [
                 (1, "a.jpg", 1000i64, Some(1.0f64), Some(2.0f64)),
                 (2, "b.png", 5000, None, None),
@@ -2418,21 +2324,28 @@ mod tests {
             for (id, path, size, lat, lon) in rows {
                 conn.execute(
                     "INSERT INTO images (id, path, hash) VALUES (?1, ?2, ?3)",
-                    rusqlite::params![id, path, format!("h{id}")],
+                    (id, path, format!("h{id}")),
                 )
+                .await
                 .unwrap();
                 conn.execute(
-                    "INSERT INTO image_metadata (image_id, file_size, latitude, longitude) VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![id, size, lat, lon],
+                    "INSERT INTO image_metadata (image_id, file_size, latitude, longitude) \
+                     VALUES (?1, ?2, ?3, ?4)",
+                    (
+                        Value::Integer(id),
+                        Value::Integer(size),
+                        opt_f64(lat),
+                        opt_f64(lon),
+                    ),
                 )
+                .await
                 .unwrap();
             }
         }
 
-        let all = db.browse(&Filters::default(), 100, 0).unwrap();
+        let all = db.browse(&Filters::default(), 100, 0).await.unwrap();
         assert_eq!(all.len(), 4);
 
-        // jpg only
         let jpg = db
             .browse(
                 &Filters {
@@ -2442,12 +2355,12 @@ mod tests {
                 100,
                 0,
             )
+            .await
             .unwrap();
         let p: Vec<&str> = jpg.iter().map(|(x, _)| x.as_str()).collect();
         assert_eq!(p.len(), 2);
         assert!(p.contains(&"a.jpg") && p.contains(&"c.jpg"));
 
-        // size 500..6000
         let sized = db
             .browse(
                 &Filters {
@@ -2458,6 +2371,7 @@ mod tests {
                 100,
                 0,
             )
+            .await
             .unwrap();
         let p: Vec<&str> = sized.iter().map(|(x, _)| x.as_str()).collect();
         assert!(
@@ -2467,7 +2381,6 @@ mod tests {
                 && !p.contains(&"d.nef")
         );
 
-        // has GPS
         let gps = db
             .browse(
                 &Filters {
@@ -2477,71 +2390,74 @@ mod tests {
                 100,
                 0,
             )
+            .await
             .unwrap();
         let p: Vec<&str> = gps.iter().map(|(x, _)| x.as_str()).collect();
         assert_eq!(p.len(), 2);
         assert!(p.contains(&"a.jpg") && p.contains(&"c.jpg"));
 
-        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+        cleanup(&db_path);
     }
 
-    #[test]
-    fn distinct_extensions_and_size_bounds() {
+    #[tokio::test]
+    async fn distinct_extensions_and_size_bounds() {
         let db_path = temp_db_path();
-        let db = Database::new(&db_path).expect("db");
+        let db = Database::new(&db_path).await.expect("db");
         {
-            let conn = db.pool.get().expect("conn");
+            let conn = db.pool.get().await.expect("conn");
             for (id, path, size) in [(1, "a.JPG", 10i64), (2, "b.png", 50), (3, "c.jpg", 30)] {
                 conn.execute(
                     "INSERT INTO images (id, path, hash) VALUES (?1,?2,?3)",
-                    rusqlite::params![id, path, format!("h{id}")],
+                    (id, path, format!("h{id}")),
                 )
+                .await
                 .unwrap();
                 conn.execute(
                     "INSERT INTO image_metadata (image_id, file_size) VALUES (?1,?2)",
-                    rusqlite::params![id, size],
+                    (id, size),
                 )
+                .await
                 .unwrap();
             }
         }
-        let mut exts = db.distinct_extensions().unwrap();
+        let mut exts = db.distinct_extensions().await.unwrap();
         exts.sort();
-        assert_eq!(exts, vec!["jpg".to_string(), "png".to_string()]); // lowercased, deduped
-        assert_eq!(db.file_size_bounds().unwrap(), (10, 50));
-        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+        assert_eq!(exts, vec!["jpg".to_string(), "png".to_string()]);
+        assert_eq!(db.file_size_bounds().await.unwrap(), (10, 50));
+        cleanup(&db_path);
     }
 
-    #[test]
-    fn filtered_vector_search_excludes_nonmatching_types() {
+    #[tokio::test]
+    async fn filtered_vector_search_excludes_nonmatching_types() {
         use crate::filters::Filters;
-        use zerocopy::IntoBytes;
         let db_path = temp_db_path();
-        let db = Database::new(&db_path).expect("db");
+        let db = Database::new(&db_path).await.expect("db");
         {
-            let conn = db.pool.get().expect("conn");
-            // Two near-identical embeddings; different extensions.
+            let conn = db.pool.get().await.expect("conn");
             let mut a = vec![0.0f32; 512];
             a[0] = 1.0;
             let b = a.clone();
             for (id, path, emb) in [(1, "a.jpg", &a), (2, "b.png", &b)] {
                 conn.execute(
                     "INSERT INTO images (id, path, hash) VALUES (?1,?2,?3)",
-                    rusqlite::params![id, path, format!("h{id}")],
+                    (id, path, format!("h{id}")),
                 )
+                .await
                 .unwrap();
                 conn.execute(
                     "INSERT INTO image_metadata (image_id, file_size) VALUES (?1, 1000)",
-                    rusqlite::params![id],
+                    (id,),
                 )
+                .await
                 .unwrap();
                 conn.execute(
-                    "INSERT INTO image_vectors (rowid, embedding) VALUES (?1, ?2)",
-                    rusqlite::params![id, emb.as_bytes()],
+                    "INSERT INTO image_vectors (image_id, embedding) VALUES (?1, ?2)",
+                    (Value::Integer(id), emb_blob(emb)),
                 )
+                .await
                 .unwrap();
             }
         }
-        // Query close to both, filter to jpg only → only a.jpg.
         let mut q = vec![0.0f32; 512];
         q[0] = 1.0;
         let jpg_only = Filters {
@@ -2550,6 +2466,7 @@ mod tests {
         };
         let rows = db
             .search_similar_images_meta(&q, 80, 0, 1.3, 100, &jpg_only)
+            .await
             .unwrap();
         let paths: Vec<&str> = rows.iter().map(|(_, p, _, _)| p.as_str()).collect();
         assert!(paths.contains(&"a.jpg"));
@@ -2557,23 +2474,22 @@ mod tests {
             !paths.contains(&"b.png"),
             "png filtered out of vector results"
         );
-        // No filter → both present.
         let both = db
             .search_similar_images_meta(&q, 80, 0, 1.3, 100, &Filters::default())
+            .await
             .unwrap();
         assert_eq!(both.len(), 2);
-        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+        cleanup(&db_path);
     }
 
-    #[test]
-    fn extracts_metadata_from_raw_fixture() {
+    #[tokio::test]
+    async fn extracts_metadata_from_raw_fixture() {
         let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sample.dng");
         let md = extract_image_metadata(fixture).expect("metadata extraction");
         assert!(
             md.width.is_some() && md.height.is_some(),
             "dimensions populated"
         );
-        // At least one EXIF identity field should be present in a real RAW.
         assert!(
             md.camera_make.is_some() || md.camera_model.is_some() || md.datetime_taken.is_some(),
             "some EXIF field populated"
@@ -2587,39 +2503,42 @@ mod tests {
     /// Rows are inserted with sequential ids (1, 2, 3 …). An `image_metadata` row is
     /// always written for each image so the LEFT JOIN sees a match; `file_size` is set
     /// to the given `Option<i64>` (NULL when `None`).
-    fn test_db_with_rows(rows: &[(&str, Option<i64>)]) -> (Database, std::path::PathBuf) {
+    async fn test_db_with_rows(rows: &[(&str, Option<i64>)]) -> (Database, PathBuf) {
         let db_path = temp_db_path();
-        let db = Database::new(&db_path).expect("create test db");
+        let db = Database::new(&db_path).await.expect("create test db");
         {
-            let conn = db.pool.get().expect("get conn");
+            let conn = db.pool.get().await.expect("get conn");
             for (id, (path, size)) in rows.iter().enumerate() {
                 let id = (id + 1) as i64;
                 conn.execute(
                     "INSERT INTO images (id, path, hash) VALUES (?1, ?2, ?3)",
-                    rusqlite::params![id, path, format!("h{id}")],
+                    (id, *path, format!("h{id}")),
                 )
+                .await
                 .expect("insert image");
                 conn.execute(
                     "INSERT INTO image_metadata (image_id, file_size) VALUES (?1, ?2)",
-                    rusqlite::params![id, size],
+                    (Value::Integer(id), opt_i64(*size)),
                 )
+                .await
                 .expect("insert metadata");
             }
         }
         (db, db_path)
     }
 
-    #[test]
-    fn browse_all_sorts_by_size_then_name_nulls_last() {
+    #[tokio::test]
+    async fn browse_all_sorts_by_size_then_name_nulls_last() {
         use crate::filters::Filters;
         use crate::sort::{Sort, SortDir, SortKey};
 
-        let (db, _tmp) = test_db_with_rows(&[
+        let (db, tmp) = test_db_with_rows(&[
             ("b.jpg", Some(10)),
             ("a.jpg", None),
             ("c.jpg", Some(10)),
             ("d.jpg", Some(5)),
-        ]);
+        ])
+        .await;
         let rows = db
             .browse_all(
                 &Filters::default(),
@@ -2628,20 +2547,22 @@ mod tests {
                     dir: SortDir::Asc,
                 },
             )
+            .await
             .unwrap();
         assert_eq!(
             rows.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
             vec!["d.jpg", "b.jpg", "c.jpg", "a.jpg"]
         );
-        let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
+        cleanup(&tmp);
     }
 
-    #[test]
-    fn browse_all_sorts_by_type_then_name() {
+    #[tokio::test]
+    async fn browse_all_sorts_by_type_then_name() {
         use crate::filters::Filters;
         use crate::sort::{Sort, SortDir, SortKey};
 
-        let (db, _tmp) = test_db_with_rows(&[("z.PNG", None), ("a.png", None), ("m.jpg", None)]);
+        let (db, tmp) =
+            test_db_with_rows(&[("z.PNG", None), ("a.png", None), ("m.jpg", None)]).await;
         let rows = db
             .browse_all(
                 &Filters::default(),
@@ -2650,23 +2571,22 @@ mod tests {
                     dir: SortDir::Asc,
                 },
             )
+            .await
             .unwrap();
-        // jpg < png; within png, path asc
         assert_eq!(
             rows.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
             vec!["m.jpg", "a.png", "z.PNG"]
         );
-        // ext is lowercased (derived Rust-side from the raw path)
         assert_eq!(rows[2].ext, "png");
-        let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
+        cleanup(&tmp);
     }
 
-    #[test]
-    fn browse_all_name_desc() {
+    #[tokio::test]
+    async fn browse_all_name_desc() {
         use crate::filters::Filters;
         use crate::sort::{Sort, SortDir, SortKey};
 
-        let (db, _tmp) = test_db_with_rows(&[("a.jpg", None), ("b.jpg", None)]);
+        let (db, tmp) = test_db_with_rows(&[("a.jpg", None), ("b.jpg", None)]).await;
         let rows = db
             .browse_all(
                 &Filters::default(),
@@ -2675,21 +2595,21 @@ mod tests {
                     dir: SortDir::Desc,
                 },
             )
+            .await
             .unwrap();
         assert_eq!(rows[0].path, "b.jpg");
-        let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
+        cleanup(&tmp);
     }
 
     /// Pin the invariant that `browse_all(Filters::default(), …)` returns **every**
-    /// indexed image. The GUI's clear-search path calls exactly this to restore the
-    /// full library; if a filter sneaks into `Filters::default()` this test will catch it.
-    #[test]
-    fn browse_all_default_filters_returns_all() {
+    /// indexed image (the GUI's clear-search path relies on exactly this).
+    #[tokio::test]
+    async fn browse_all_default_filters_returns_all() {
         use crate::filters::Filters;
         use crate::sort::{Sort, SortDir, SortKey};
 
-        let (db, _tmp) =
-            test_db_with_rows(&[("a.jpg", Some(1)), ("b.jpg", Some(2)), ("c.jpg", Some(3))]);
+        let (db, tmp) =
+            test_db_with_rows(&[("a.jpg", Some(1)), ("b.jpg", Some(2)), ("c.jpg", Some(3))]).await;
         let rows = db
             .browse_all(
                 &Filters::default(),
@@ -2698,114 +2618,107 @@ mod tests {
                     dir: SortDir::Asc,
                 },
             )
+            .await
             .unwrap();
         assert_eq!(rows.len(), 3, "default filters must return every image");
-        let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
+        cleanup(&tmp);
     }
 
     // ── rehydrate_rows tests ───────────────────────────────────────────────────
 
-    #[test]
-    fn rehydrate_preserves_order_and_drops_missing() {
-        let (db, _tmp) =
-            test_db_with_rows(&[("a.jpg", Some(1)), ("b.jpg", Some(2)), ("c.jpg", Some(3))]);
-        // ids are 1,2,3 in insert order; request reversed + a missing id 999
+    #[tokio::test]
+    async fn rehydrate_preserves_order_and_drops_missing() {
+        let (db, tmp) =
+            test_db_with_rows(&[("a.jpg", Some(1)), ("b.jpg", Some(2)), ("c.jpg", Some(3))]).await;
         let want = vec![3i64, 999, 1];
-        let rows = db.rehydrate_rows(&want).unwrap();
+        let rows = db.rehydrate_rows(&want).await.unwrap();
         assert_eq!(
             rows.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
-            vec!["c.jpg", "a.jpg"] // 999 dropped, order preserved
+            vec!["c.jpg", "a.jpg"]
         );
-        let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
+        cleanup(&tmp);
     }
 
-    #[test]
-    fn rehydrate_empty_is_empty() {
-        let (db, _tmp) = test_db_with_rows(&[("a.jpg", Some(1))]);
-        assert!(db.rehydrate_rows(&[]).unwrap().is_empty());
-        let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
+    #[tokio::test]
+    async fn rehydrate_empty_is_empty() {
+        let (db, tmp) = test_db_with_rows(&[("a.jpg", Some(1))]).await;
+        assert!(db.rehydrate_rows(&[]).await.unwrap().is_empty());
+        cleanup(&tmp);
     }
 
-    /// Characterization test: `rehydrate_rows` uses a single `IN` query with a
-    /// metadata LEFT JOIN. Asserts that: (a) rows are returned in input-id order
-    /// even when the request order differs from insert order, (b) ids with no row
-    /// are silently dropped, and (c) the `size` field (from `image_metadata`) is
-    /// populated (i.e. the LEFT JOIN lands).
-    #[test]
-    fn rehydrate_rows_ordered_with_metadata_populated() {
-        // Insert three images with distinct sizes. Insert order → ids 1, 2, 3.
-        let (db, _tmp) = test_db_with_rows(&[
+    /// Characterization test for `rehydrate_rows`: input-id order preserved, missing
+    /// ids dropped, and the metadata LEFT JOIN populates `size`.
+    #[tokio::test]
+    async fn rehydrate_rows_ordered_with_metadata_populated() {
+        let (db, tmp) = test_db_with_rows(&[
             ("img1.jpg", Some(100)),
             ("img2.jpg", Some(200)),
             ("img3.jpg", Some(300)),
-        ]);
-        // Request in reverse order (3, 1, 2) with a bogus id (999) interspersed.
+        ])
+        .await;
         let ids = vec![3i64, 999, 1, 2];
-        let rows = db.rehydrate_rows(&ids).unwrap();
+        let rows = db.rehydrate_rows(&ids).await.unwrap();
 
-        // 999 is dropped; remaining rows follow the *input* order [3, 1, 2].
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].id, 3);
         assert_eq!(rows[1].id, 1);
         assert_eq!(rows[2].id, 2);
 
-        // Paths match.
         assert_eq!(rows[0].path, "img3.jpg");
         assert_eq!(rows[1].path, "img1.jpg");
         assert_eq!(rows[2].path, "img2.jpg");
 
-        // Metadata (file_size) must be populated via the LEFT JOIN — not None.
         assert_eq!(rows[0].size, Some(300));
         assert_eq!(rows[1].size, Some(100));
         assert_eq!(rows[2].size, Some(200));
 
-        let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
+        cleanup(&tmp);
     }
 
-    #[test]
-    fn ui_state_round_trips_through_db() {
-        let (db, _tmp) = test_db_with_rows(&[("a.jpg", Some(1))]);
-        assert!(db.get_ui_state().unwrap().is_none());
+    #[tokio::test]
+    async fn ui_state_round_trips_through_db() {
+        let (db, tmp) = test_db_with_rows(&[("a.jpg", Some(1))]).await;
+        assert!(db.get_ui_state().await.unwrap().is_none());
         let st = UiState {
             search_text: "dog".into(),
             result_ids: vec![1],
             selected_index: Some(0),
             ..Default::default()
         };
-        db.set_ui_state(&st).unwrap();
-        assert_eq!(db.get_ui_state().unwrap().unwrap(), st);
-        // upsert overwrites the single row
+        db.set_ui_state(&st).await.unwrap();
+        assert_eq!(db.get_ui_state().await.unwrap().unwrap(), st);
         let st2 = UiState {
             search_text: "cat".into(),
             result_ids: vec![1],
             selected_index: Some(0),
             ..Default::default()
         };
-        db.set_ui_state(&st2).unwrap();
-        assert_eq!(db.get_ui_state().unwrap().unwrap().search_text, "cat");
+        db.set_ui_state(&st2).await.unwrap();
+        assert_eq!(db.get_ui_state().await.unwrap().unwrap().search_text, "cat");
 
-        let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
+        cleanup(&tmp);
     }
 
-    #[test]
-    fn malformed_ui_state_is_none() {
-        let (db, _tmp) = test_db_with_rows(&[("a.jpg", Some(1))]);
-        let conn = db.pool.get().unwrap();
+    #[tokio::test]
+    async fn malformed_ui_state_is_none() {
+        let (db, tmp) = test_db_with_rows(&[("a.jpg", Some(1))]).await;
+        let conn = db.pool.get().await.unwrap();
         conn.execute(
             "INSERT INTO ui_state (id, state_json) VALUES (1, '{not json')",
-            [],
+            (),
         )
+        .await
         .unwrap();
         drop(conn);
-        assert!(db.get_ui_state().unwrap().is_none());
+        assert!(db.get_ui_state().await.unwrap().is_none());
 
-        let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
+        cleanup(&tmp);
     }
 
     /// Convenience wrapper: build a temp DB with image rows (no file-size metadata).
-    fn test_db_with_images(paths: &[&str]) -> (Database, std::path::PathBuf) {
+    async fn test_db_with_images(paths: &[&str]) -> (Database, PathBuf) {
         let rows: Vec<(&str, Option<i64>)> = paths.iter().map(|p| (*p, None)).collect();
-        test_db_with_rows(&rows)
+        test_db_with_rows(&rows).await
     }
 
     /// Convenience constructor for a `RelativePath` from a string literal.
@@ -2813,16 +2726,15 @@ mod tests {
         RelativePath(PathBuf::from(s))
     }
 
-    #[test]
-    fn browse_all_filters_by_tags_all_and_any() {
+    #[tokio::test]
+    async fn browse_all_filters_by_tags_all_and_any() {
         use crate::filters::{Filters, TagMatch};
         use crate::sort::Sort;
 
-        let (db, _tmp) = test_db_with_images(&["a.jpg", "b.jpg", "c.jpg"]);
-        db.tag_image(&rel("a.jpg"), "beach").unwrap();
-        db.tag_image(&rel("a.jpg"), "sunset").unwrap();
-        db.tag_image(&rel("b.jpg"), "beach").unwrap();
-        // c.jpg has no tags.
+        let (db, tmp) = test_db_with_images(&["a.jpg", "b.jpg", "c.jpg"]).await;
+        db.tag_image(&rel("a.jpg"), "beach").await.unwrap();
+        db.tag_image(&rel("a.jpg"), "sunset").await.unwrap();
+        db.tag_image(&rel("b.jpg"), "beach").await.unwrap();
 
         let all_beach_sunset = Filters {
             tags: vec!["beach".into(), "sunset".into()],
@@ -2830,7 +2742,10 @@ mod tests {
             tags_enabled: true,
             ..Default::default()
         };
-        let got = db.browse_all(&all_beach_sunset, &Sort::default()).unwrap();
+        let got = db
+            .browse_all(&all_beach_sunset, &Sort::default())
+            .await
+            .unwrap();
         let paths: Vec<&str> = got.iter().map(|r| r.path.as_str()).collect();
         assert_eq!(paths, vec!["a.jpg"]);
 
@@ -2838,7 +2753,10 @@ mod tests {
             tag_match: TagMatch::AnyOf,
             ..all_beach_sunset.clone()
         };
-        let mut got = db.browse_all(&any_beach_sunset, &Sort::default()).unwrap();
+        let mut got = db
+            .browse_all(&any_beach_sunset, &Sort::default())
+            .await
+            .unwrap();
         got.sort_by(|x, y| x.path.cmp(&y.path));
         let paths: Vec<&str> = got.iter().map(|r| r.path.as_str()).collect();
         assert_eq!(paths, vec!["a.jpg", "b.jpg"]);
@@ -2847,45 +2765,62 @@ mod tests {
             tags_enabled: false,
             ..all_beach_sunset
         };
-        let got = db.browse_all(&disabled, &Sort::default()).unwrap();
+        let got = db.browse_all(&disabled, &Sort::default()).await.unwrap();
         assert_eq!(got.len(), 3);
 
-        let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
+        cleanup(&tmp);
     }
 
-    #[test]
-    fn batch_tag_and_untag_images() {
-        let (db, _tmp) = test_db_with_images(&["p1.jpg", "p2.jpg", "p3.jpg"]);
+    #[tokio::test]
+    async fn batch_tag_and_untag_images() {
+        let (db, tmp) = test_db_with_images(&["p1.jpg", "p2.jpg", "p3.jpg"]).await;
 
-        // batch_tag_images: all three carry the tag.
         db.batch_tag_images(&["p1.jpg", "p2.jpg", "p3.jpg"], "beach")
+            .await
             .unwrap();
-        assert_eq!(db.tags_for_image(&rel("p1.jpg")).unwrap(), vec!["beach"]);
-        assert_eq!(db.tags_for_image(&rel("p2.jpg")).unwrap(), vec!["beach"]);
-        assert_eq!(db.tags_for_image(&rel("p3.jpg")).unwrap(), vec!["beach"]);
+        assert_eq!(
+            db.tags_for_image(&rel("p1.jpg")).await.unwrap(),
+            vec!["beach"]
+        );
+        assert_eq!(
+            db.tags_for_image(&rel("p2.jpg")).await.unwrap(),
+            vec!["beach"]
+        );
+        assert_eq!(
+            db.tags_for_image(&rel("p3.jpg")).await.unwrap(),
+            vec!["beach"]
+        );
 
-        // batch_untag_images: remove from p1 and p3; only p2 keeps the tag.
         db.batch_untag_images(&["p1.jpg", "p3.jpg"], "beach")
+            .await
             .unwrap();
         assert_eq!(
-            db.tags_for_image(&rel("p1.jpg")).unwrap(),
+            db.tags_for_image(&rel("p1.jpg")).await.unwrap(),
             Vec::<String>::new()
         );
-        assert_eq!(db.tags_for_image(&rel("p2.jpg")).unwrap(), vec!["beach"]);
         assert_eq!(
-            db.tags_for_image(&rel("p3.jpg")).unwrap(),
+            db.tags_for_image(&rel("p2.jpg")).await.unwrap(),
+            vec!["beach"]
+        );
+        assert_eq!(
+            db.tags_for_image(&rel("p3.jpg")).await.unwrap(),
             Vec::<String>::new()
         );
 
-        // Idempotent: applying again should not error.
-        db.batch_tag_images(&["p2.jpg"], "beach").unwrap();
-        assert_eq!(db.tags_for_image(&rel("p2.jpg")).unwrap(), vec!["beach"]);
+        db.batch_tag_images(&["p2.jpg"], "beach").await.unwrap();
+        assert_eq!(
+            db.tags_for_image(&rel("p2.jpg")).await.unwrap(),
+            vec!["beach"]
+        );
 
-        // Missing path is silently skipped.
         db.batch_tag_images(&["p1.jpg", "nonexistent.jpg"], "beach")
+            .await
             .unwrap();
-        assert_eq!(db.tags_for_image(&rel("p1.jpg")).unwrap(), vec!["beach"]);
+        assert_eq!(
+            db.tags_for_image(&rel("p1.jpg")).await.unwrap(),
+            vec!["beach"]
+        );
 
-        let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
+        cleanup(&tmp);
     }
 }

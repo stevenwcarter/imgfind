@@ -43,13 +43,18 @@ pub fn knn_query(
     } else {
         format!("\n    {extra_joins}")
     };
+    // The filter clause references the `i` / `m` table aliases, so it must live
+    // INSIDE the subquery where those aliases are in scope. The outer query only
+    // sees the projected columns (id, path, file_size, distance), so the
+    // distance threshold is applied there.
     format!(
         "SELECT {select} FROM (\n  \
            SELECT i.id AS id, i.path AS path, m.file_size AS file_size,\n         \
                   vector_distance_cos(v.embedding, ?) AS distance\n    \
              FROM {vt} v JOIN images i ON i.id = v.image_id\n    \
-             LEFT JOIN image_metadata m ON m.image_id = i.id{joins}\n\
-         ) WHERE distance <= {threshold}{filter_clause}\n  \
+             LEFT JOIN image_metadata m ON m.image_id = i.id{joins}\n    \
+             WHERE 1=1{filter_clause}\n\
+         ) WHERE distance <= {threshold}\n  \
            ORDER BY distance LIMIT {limit} OFFSET {offset}"
     )
 }

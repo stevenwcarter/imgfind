@@ -82,9 +82,6 @@ mod tests {
         let conn = pool.get().await.unwrap();
         let mut rows = conn.query("SELECT 1", ()).await.unwrap();
         let row = rows.next().await.unwrap().unwrap();
-        assert_eq!(
-            row.get_value(0).unwrap().as_integer().copied(),
-            Some(1_i64)
-        );
+        assert_eq!(row.get_value(0).unwrap().as_integer().copied(), Some(1_i64));
     }
 }

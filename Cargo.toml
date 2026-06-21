@@ -22,7 +22,10 @@ opt-level = 3
 opt-level = 3
 
 [features]
-default = ["tui"]
+# `tui` is temporarily out of `default` during the async-turso migration: the
+# TUI call sites are converted to async in a later task and do not compile yet.
+# Re-add it to `default` once the TUI is ported.
+default = []
 tui = ["crossterm", "futures", "ratatui", "ratatui-image", "tui-input"]
 ratatui-image = ["dep:ratatui-image"]
 

@@ -40,11 +40,7 @@ pub fn sanitize_model_table(name: &str) -> String {
 /// The table name is validated as a safe SQL identifier (only ASCII
 /// alphanumerics and underscores are allowed) before interpolation to
 /// prevent SQL injection from caller-supplied names.
-pub async fn create_vector_table(
-    conn: &turso::Connection,
-    table: &str,
-    dim: usize,
-) -> Result<()> {
+pub async fn create_vector_table(conn: &turso::Connection, table: &str, dim: usize) -> Result<()> {
     anyhow::ensure!(
         table.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
         "invalid table name: {table}"
@@ -364,10 +360,7 @@ mod tests {
     use super::*;
 
     async fn mem() -> turso::Connection {
-        let db = turso::Builder::new_local(":memory:")
-            .build()
-            .await
-            .unwrap();
+        let db = turso::Builder::new_local(":memory:").build().await.unwrap();
         db.connect().unwrap()
     }
 
@@ -434,14 +427,8 @@ mod tests {
             .await
             .unwrap();
         let row = rows.next().await.unwrap().unwrap();
-        assert_eq!(
-            row.get_value(0).unwrap().as_integer().copied(),
-            Some(512)
-        );
-        assert_eq!(
-            row.get_value(2).unwrap().as_integer().copied(),
-            Some(1)
-        );
+        assert_eq!(row.get_value(0).unwrap().as_integer().copied(), Some(512));
+        assert_eq!(row.get_value(2).unwrap().as_integer().copied(), Some(1));
     }
 
     #[tokio::test]
@@ -467,11 +454,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(
-            create_vector_table(&conn, "bad name!", 512).await.is_err()
-        );
-        assert!(
-            create_vector_table(&conn, "good_name", 128).await.is_ok()
-        );
+        assert!(create_vector_table(&conn, "bad name!", 512).await.is_err());
+        assert!(create_vector_table(&conn, "good_name", 128).await.is_ok());
     }
 }

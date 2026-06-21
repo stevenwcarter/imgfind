@@ -1,3 +1,4 @@
+use crate::block_on;
 use crate::database::{Database, ImageMetadata, extract_image_metadata};
 
 use anyhow::Result;
@@ -6,7 +7,7 @@ use rayon::prelude::*;
 use tracing::{debug, info, warn};
 
 pub fn extract_missing_metadata(db: &mut Database, quiet: bool, count: usize) -> Result<()> {
-    let images_without_metadata = db.get_images_without_metadata(count)?;
+    let images_without_metadata = block_on(db.get_images_without_metadata(count))?;
 
     if !images_without_metadata.is_empty() {
         if !quiet {
@@ -60,7 +61,7 @@ pub fn extract_missing_metadata(db: &mut Database, quiet: bool, count: usize) ->
 
             match result {
                 Ok(metadata) => {
-                    if let Err(e) = db.insert_or_update_metadata(image_id, &metadata) {
+                    if let Err(e) = block_on(db.insert_or_update_metadata(image_id, &metadata)) {
                         warn!(
                             "Failed to store backfilled metadata for {}: {}",
                             image_path, e

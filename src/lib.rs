@@ -37,6 +37,7 @@ pub mod schema;
 pub mod search;
 pub mod sort;
 pub mod thumbnail;
+#[cfg(feature = "tui")]
 pub mod tui;
 pub mod ui_state;
 pub mod vector_sql;
