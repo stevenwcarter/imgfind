@@ -1,7 +1,7 @@
 use crate::filters::{Filters, build_filter_clause_turso};
 use crate::ids::{CollectionId, ImageId, TagId};
 use crate::ui_state::UiState;
-use crate::{AbsolutePath, MaxK, RelativePath, db_pool, get_db_parent_dir};
+use crate::{AbsolutePath, EmbeddingDim, MaxK, RelativePath, db_pool, get_db_parent_dir};
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose};
 use hashbrown::HashMap;
@@ -159,7 +159,7 @@ impl Database {
 #[derive(Debug, Clone)]
 pub struct ModelInfo {
     pub name: String,
-    pub dim: usize,
+    pub dim: EmbeddingDim,
     pub table: String,
 }
 
@@ -177,7 +177,7 @@ impl Database {
         let row = rows.next().await?.context("no active model")?;
         Ok(ModelInfo {
             name: col_text(&row, 0, "name")?,
-            dim: col_i64(&row, 1, "dim")? as usize,
+            dim: EmbeddingDim(col_i64(&row, 1, "dim")? as usize),
             table: col_text(&row, 2, "table_name")?,
         })
     }
@@ -194,12 +194,12 @@ impl Database {
     }
 
     /// Register a new embedding model and create its (inactive) vector table.
-    pub async fn register_model(&self, name: &str, dim: usize) -> Result<()> {
+    pub async fn register_model(&self, name: &str, dim: EmbeddingDim) -> Result<()> {
         let table = crate::schema::sanitize_model_table(name);
         let conn = self.pool.get().await.context("get connection")?;
         conn.execute(
             "INSERT OR IGNORE INTO models (name, dim, table_name, is_active) VALUES (?1, ?2, ?3, 0)",
-            (name.to_string(), dim as i64, table.clone()),
+            (name.to_string(), dim.get() as i64, table.clone()),
         )
         .await?;
         crate::schema::create_vector_table(&conn, &table, dim).await?;
@@ -2223,7 +2223,7 @@ mod tests {
         let db_path = temp_db_path();
         let db = Database::new(&db_path).await.expect("create db");
         let m = db.active_model().await.unwrap();
-        assert_eq!(m.dim, 512);
+        assert_eq!(m.dim, EmbeddingDim(512));
         assert_eq!(m.table, "image_vectors");
 
         cleanup(&db_path);
@@ -2233,10 +2233,15 @@ mod tests {
     async fn register_and_switch_model_creates_table_and_flips_active() {
         let db_path = temp_db_path();
         let db = Database::new(&db_path).await.expect("create db");
-        db.register_model("test-model", 256).await.unwrap();
+        db.register_model("test-model", EmbeddingDim(256))
+            .await
+            .unwrap();
         db.set_active_model("test-model").await.unwrap();
         let m = db.active_model().await.unwrap();
-        assert_eq!((m.dim, m.table.as_str()), (256, "image_vectors_test_model"));
+        assert_eq!(
+            (m.dim, m.table.as_str()),
+            (EmbeddingDim(256), "image_vectors_test_model")
+        );
         let conn = db.pool.get().await.unwrap();
         let mut rows = conn
             .query(
@@ -2272,7 +2277,9 @@ mod tests {
             "indexed under default model"
         );
 
-        db.register_model("other-model", 8).await.unwrap();
+        db.register_model("other-model", EmbeddingDim(8))
+            .await
+            .unwrap();
         db.set_active_model("other-model").await.unwrap();
         assert!(
             !db.is_image_indexed(&abs, hash).await.unwrap(),

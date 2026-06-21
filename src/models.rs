@@ -1,5 +1,6 @@
 //! Glue between imgfind's DB model registry (W52) and clipper's model catalog.
 
+use crate::EmbeddingDim;
 use crate::database::Database;
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -51,7 +52,7 @@ pub async fn ensure_and_activate_model(db: &Database, name: &str) -> Result<()> 
             .collect();
         format!("unknown model '{name}'; supported models: {known:?}")
     })?;
-    db.register_model(name, dim).await?;
+    db.register_model(name, EmbeddingDim(dim)).await?;
     db.set_active_model(name).await?;
     Ok(())
 }
@@ -121,7 +122,7 @@ mod tests {
             .unwrap();
         let active = db.active_model().await.unwrap();
         assert_eq!(active.name, "laion/CLIP-ViT-L-14-laion2B-s32B-b82K");
-        assert_eq!(active.dim, 768);
+        assert_eq!(active.dim, EmbeddingDim(768));
         cleanup(&path);
     }
 
@@ -141,7 +142,7 @@ mod tests {
         let path = temp_db_path();
         let db = Database::new(&path).await.expect("create db");
         // Register the LAION name with the WRONG dim, then try to activate it.
-        db.register_model("laion/CLIP-ViT-L-14-laion2B-s32B-b82K", 512)
+        db.register_model("laion/CLIP-ViT-L-14-laion2B-s32B-b82K", EmbeddingDim(512))
             .await
             .unwrap();
         let err = ensure_and_activate_model(&db, "laion/CLIP-ViT-L-14-laion2B-s32B-b82K")

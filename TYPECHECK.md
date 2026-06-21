@@ -29,19 +29,6 @@ Last triage: 2026-06-21 against `main` @ 20d80f38. Toolchain: cargo build/check 
 
 ## Medium
 
-### T6. Embedding dimension is a bare `usize` that must equal the model's true dim: `embedding dimension` (src/database.rs:161)
-- **Lens:** newtype
-- **Impact:** 4 (bug-prevention med × blast 2)
-- **Effort:** S
-- **Risk:** low
-- **Current type:** `usize` (512 / 768).
-- **Proposed type:** `struct EmbeddingDim(usize)`.
-- **Evidence:** the dim flows from the model registry into `F32_BLOB(dim)` schema creation and vector-table sizing; a wrong dim produces malformed embeddings / mismatched vector tables. Rarely transposed in practice, but it's a load-bearing correctness invariant currently indistinguishable from any other count.
-- **Blast radius:** src/database.rs:161, :179, :196; src/schema.rs:43, :52.
-- **Invariants/caveats:** None serde-facing (derived from the active model at runtime). Pairs conceptually with the per-model `F32_BLOB(dim)` invariant.
-- **Proposed migration:** introduce `EmbeddingDim(usize)`; carry it from `ensure_and_activate_model` through schema/vector-table creation; fix to green.
-- [x] execute   [ ] skip
-
 ### T8. Four adjacent `f64` bounds invite N/S/E/W swaps: `geographic bounds` (src/database.rs:1211)
 - **Lens:** newtype
 - **Impact:** 3 (bug-prevention med × blast 1, but a real silent-wrong-result class)

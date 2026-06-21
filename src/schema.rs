@@ -14,6 +14,8 @@
 
 use anyhow::{Context, Result};
 
+use crate::EmbeddingDim;
+
 /// The highest migration version applied by this module.
 pub const LATEST_MIGRATION_VERSION: i32 = 3;
 
@@ -40,11 +42,16 @@ pub fn sanitize_model_table(name: &str) -> String {
 /// The table name is validated as a safe SQL identifier (only ASCII
 /// alphanumerics and underscores are allowed) before interpolation to
 /// prevent SQL injection from caller-supplied names.
-pub async fn create_vector_table(conn: &turso::Connection, table: &str, dim: usize) -> Result<()> {
+pub async fn create_vector_table(
+    conn: &turso::Connection,
+    table: &str,
+    dim: EmbeddingDim,
+) -> Result<()> {
     anyhow::ensure!(
         !table.is_empty() && table.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
         "invalid table name: {table}"
     );
+    let dim = dim.get();
     conn.execute(
         &format!(
             "CREATE TABLE IF NOT EXISTS {table} (\
@@ -139,7 +146,7 @@ async fn migration_001_baseline(conn: &turso::Connection) -> Result<()> {
     .context("create images")?;
 
     // Vector embedding table (F32_BLOB instead of vec0 virtual table).
-    create_vector_table(conn, "image_vectors", 512).await?;
+    create_vector_table(conn, "image_vectors", EmbeddingDim(512)).await?;
 
     // Path index for fast lookup.
     conn.execute(
@@ -454,7 +461,15 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(create_vector_table(&conn, "bad name!", 512).await.is_err());
-        assert!(create_vector_table(&conn, "good_name", 128).await.is_ok());
+        assert!(
+            create_vector_table(&conn, "bad name!", EmbeddingDim(512))
+                .await
+                .is_err()
+        );
+        assert!(
+            create_vector_table(&conn, "good_name", EmbeddingDim(128))
+                .await
+                .is_ok()
+        );
     }
 }
