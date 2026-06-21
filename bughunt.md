@@ -32,16 +32,6 @@ _(none)_
 - Proposed fix: Set `.with_ansi(false)` on the file writer (keep color only for a TTY terminal layer if desired).
 - [ ] execute   [ ] skip
 
-### B10. Session-state restore failure silently swallowed (`.ok().flatten()`): `get_ui_state restore` (imgfind-gui/src/main.rs:1688)
-- Category: observability
-- Impact: 6 (severity 3 × blast-radius 2)
-- Effort: S
-- Risk: low
-- Evidence: `get_ui_state().ok().flatten().unwrap_or_default()` suppresses any restore error so the user loses their prior session with no log explaining why.
-- Blast radius: imgfind-gui/src/main.rs:1688
-- Proposed fix: Replace with an explicit `match` that `tracing::warn!`s on `Err` before defaulting. Verify whether `Database::get_ui_state` already logs to avoid double-logging.
-- [x] execute   [ ] skip
-
 ### B11. N+1 query: `image_id` lookup per tag operation: `tag_image/untag_image` (src/database.rs:534)
 - Category: caching
 - Impact: 6 (severity 3 × blast-radius 2)

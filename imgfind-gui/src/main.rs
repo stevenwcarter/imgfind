@@ -2059,7 +2059,14 @@ fn persist_rail(
     mm_buffer: &Arc<Mutex<Vec<String>>>,
     rail_visible: bool,
 ) {
-    let mut st = backend.get_ui_state().ok().flatten().unwrap_or_default();
+    let mut st = match backend.get_ui_state() {
+        Ok(Some(s)) => s,
+        Ok(None) => UiState::default(),
+        Err(e) => {
+            tracing::warn!("session restore failed while persisting rail, starting with defaults: {e:#}");
+            UiState::default()
+        }
+    };
     {
         let b = brushes.lock();
         st.brushes = std::array::from_fn(|i| imgfind::ui_state::TagBrush { tags: b[i].clone() });
