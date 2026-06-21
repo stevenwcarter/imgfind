@@ -1,7 +1,11 @@
 # Dep-retirement follow-up: remove rusqlite / sqlite-vec after migration
 
 **Date:** 2026-06-20
-**Status:** Checklist — to be executed in a SEPARATE future PR, NOT in this branch.
+**Status:** ✅ DONE (executed 2026-06-21). `src/migrate.rs`, the `Migrate` subcommand,
+`guard_not_legacy`, the GUI legacy-DB guard, and the `rusqlite`/`r2d2`/`r2d2_sqlite`/
+`sqlite-vec`/`zerocopy` deps (plus the unused `diesel`/`diesel_migrations`) have been
+removed; the workspace no longer links the native sqlite3 C library. Checklist below kept
+for historical reference.
 **Context:** The Turso migration (Tasks 1–9) leaves `rusqlite`, `r2d2`, `r2d2_sqlite`,
 `sqlite-vec`, and `zerocopy` in the workspace solely to support `src/migrate.rs` and its
 tests. Once the author's own library has been confirmed migrated cleanly, these deps and the

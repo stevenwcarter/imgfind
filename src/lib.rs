@@ -32,7 +32,6 @@ pub mod filters;
 pub mod indexing;
 pub mod logging;
 pub mod metadata;
-pub mod migrate;
 pub mod models;
 pub mod schema;
 pub mod search;

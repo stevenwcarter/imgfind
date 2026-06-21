@@ -187,18 +187,7 @@ imgfind completions fish > ~/.config/fish/completions/imgfind.fish
 # or: eval "$(imgfind completions bash)"
 ```
 
-### 8. Migrate from a Previous Version
-
-If you have a database created by an older version of `imgfind` (rusqlite/sqlite-vec backend), upgrade it to the new Turso engine:
-
-```bash
-imgfind migrate           # upgrade in-place; keeps imgfind.db.rusqlite.bak as a backup
-imgfind migrate --force   # overwrite an existing backup from a prior run
-```
-
-This preserves all embeddings, thumbnails, metadata, tags, and collections without re-indexing. The original file is kept as `imgfind.db.rusqlite.bak`. The command is a no-op if the database is already migrated. Other subcommands will print a one-line hint and exit if a legacy database is detected.
-
-### 9. Clean Database
+### 8. Clean Database
 
 Remove entries for images that no longer exist:
 ```bash

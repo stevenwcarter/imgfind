@@ -137,16 +137,6 @@ enum Commands {
         #[command(subcommand)]
         action: ModelsAction,
     },
-    /// Migrate a legacy (rusqlite/sqlite-vec) database to the Turso engine.
-    ///
-    /// Copies images, embeddings, thumbnails, metadata, tags, and collections
-    /// into a fresh Turso database without re-indexing, keeping the original as
-    /// a `*.db.rusqlite.bak` backup. A no-op if the database is already migrated.
-    Migrate {
-        /// Overwrite an existing `*.db.rusqlite.bak` backup from a prior run.
-        #[arg(long)]
-        force: bool,
-    },
     /// Generate a shell completion script
     Completions { shell: clap_complete::Shell },
 }
@@ -190,18 +180,6 @@ enum ConfigCommands {
     },
 }
 
-/// If `db_path` points at a legacy (pre-Turso) database, print a one-line hint
-/// and exit cleanly (non-zero, no panic/backtrace) so the user knows to run
-/// `imgfind migrate`. Returns normally for fresh or already-migrated databases.
-fn guard_not_legacy(db_path: &std::path::Path) {
-    if imgfind::block_on(imgfind::migrate::is_legacy_db(db_path)) {
-        eprintln!(
-            "legacy database detected; run `imgfind migrate` to upgrade it to the new engine"
-        );
-        std::process::exit(1);
-    }
-}
-
 fn main() -> Result<()> {
     init_tracing().context("Failed to initialize logging")?;
 
@@ -211,14 +189,12 @@ fn main() -> Result<()> {
         #[cfg(feature = "tui")]
         Commands::Tui { dir } => {
             let db_path = get_db_path(dir.as_deref())?;
-            guard_not_legacy(&db_path);
             let db = imgfind::block_on(Database::new(&db_path))?;
             imgfind::block_on(imgfind::tui::tui(db))?;
         }
         Commands::Gui { args } => launch_gui(&args)?,
         Commands::Metadata { dir, quiet, count } => {
             let db_path = get_db_path(dir.as_deref())?;
-            guard_not_legacy(&db_path);
             let mut db = imgfind::block_on(Database::new(&db_path))?;
             metadata(&mut db, quiet, count)?;
         }
@@ -237,7 +213,6 @@ fn main() -> Result<()> {
             } else {
                 get_db_path(None)?
             };
-            guard_not_legacy(&db_path);
             // A brand-new database is seeded with the configured default model;
             // an explicit --model (applied below) still wins over it.
             let default_model = config::Config::load()?.default_model;
@@ -269,7 +244,6 @@ fn main() -> Result<()> {
             model,
         } => {
             let db_path = get_db_path(None)?;
-            guard_not_legacy(&db_path);
             let db = imgfind::block_on(Database::new(&db_path))?;
             if let Some(m) = model {
                 imgfind::block_on(imgfind::models::ensure_and_activate_model(&db, &m))?;
@@ -290,13 +264,11 @@ fn main() -> Result<()> {
         }
         Commands::Clean => {
             let db_path = get_db_path(None)?;
-            guard_not_legacy(&db_path);
             let mut db = imgfind::block_on(Database::new(&db_path))?;
             clean_database(&mut db)?;
         }
         Commands::Status => {
             let db_path = get_db_path(None)?;
-            guard_not_legacy(&db_path);
             let db = imgfind::block_on(Database::new(&db_path))?;
             show_status(&db, &db_path)?;
         }
@@ -309,7 +281,6 @@ fn main() -> Result<()> {
             gui_sizes,
         } => {
             let db_path = get_db_path(None)?;
-            guard_not_legacy(&db_path);
             let mut db = imgfind::block_on(Database::new(&db_path))?;
             for s in resolve_thumbnail_sizes(&size, gui_sizes)? {
                 generate_thumbnails_batch(&mut db, s, count)?;
@@ -317,7 +288,6 @@ fn main() -> Result<()> {
         }
         Commands::Models { action } => {
             let db_path = get_db_path(None)?;
-            guard_not_legacy(&db_path);
             let db = imgfind::block_on(Database::new(&db_path))?;
             match action {
                 ModelsAction::List => {
@@ -340,28 +310,6 @@ fn main() -> Result<()> {
                         cfg.save()?;
                         println!("Saved {name} as the global default model.");
                     }
-                }
-            }
-        }
-        Commands::Migrate { force } => {
-            let db_path = get_db_path(None)?;
-            match imgfind::block_on(imgfind::migrate::migrate_db(&db_path, force))? {
-                imgfind::migrate::MigrateOutcome::AlreadyMigrated => {
-                    println!("Database at {db_path:?} is already migrated; nothing to do.");
-                }
-                imgfind::migrate::MigrateOutcome::Migrated {
-                    images,
-                    embeddings,
-                    thumbnails,
-                } => {
-                    println!(
-                        "Migrated {images} images, {embeddings} embeddings, \
-                         {thumbnails} thumbnails to the Turso engine."
-                    );
-                    println!(
-                        "The original database was kept at {:?}.",
-                        imgfind::migrate::backup_path(&db_path)
-                    );
                 }
             }
         }
@@ -856,8 +804,7 @@ fn search_images(
 
     // Filter results to those under current_dir, resolving DB-relative paths
     // against the DB parent directory (not cwd).
-    let filtered_results =
-        filter_results(all_results, &db.parent_dir, &current_dir, all, limit);
+    let filtered_results = filter_results(all_results, &db.parent_dir, &current_dir, all, limit);
 
     if filtered_results.is_empty() {
         if !short {
