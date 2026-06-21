@@ -39,8 +39,8 @@ pub fn format_metadata(meta: &ImageMetadata) -> String {
     if let Some(dt) = &meta.datetime_taken {
         lines.push(format!("Taken: {dt}"));
     }
-    if let (Some(lat), Some(lon)) = (meta.latitude, meta.longitude) {
-        lines.push(format!("GPS: {lat:.5}, {lon:.5}"));
+    if let Some(c) = &meta.coords {
+        lines.push(format!("GPS: {:.5}, {:.5}", c.lat, c.lon));
     }
     lines.join("\n")
 }
@@ -48,14 +48,14 @@ pub fn format_metadata(meta: &ImageMetadata) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use imgfind::database::GpsCoords;
 
     fn empty_meta() -> ImageMetadata {
         ImageMetadata {
             file_size: None,
             width: None,
             height: None,
-            latitude: None,
-            longitude: None,
+            coords: None,
             camera_make: None,
             camera_model: None,
             datetime_taken: None,
@@ -90,8 +90,10 @@ mod tests {
         meta.camera_make = Some("Canon".to_string());
         meta.camera_model = Some("R6".to_string());
         meta.datetime_taken = Some("2024:01:02 03:04:05".to_string());
-        meta.latitude = Some(37.7749);
-        meta.longitude = Some(-122.4194);
+        meta.coords = Some(GpsCoords {
+            lat: 37.7749,
+            lon: -122.4194,
+        });
         let out = format_metadata(&meta);
         assert!(out.contains("Dimensions: 800×600"));
         assert!(out.contains("Size: 2 KB"));

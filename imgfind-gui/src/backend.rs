@@ -245,6 +245,7 @@ impl Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use imgfind::database::GpsCoords;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     fn temp_db() -> (Database, PathBuf) {
@@ -360,8 +361,7 @@ mod tests {
                 file_size: Some(1000),
                 width: None,
                 height: None,
-                latitude: Some(1.0),
-                longitude: Some(1.0),
+                coords: Some(GpsCoords { lat: 1.0, lon: 1.0 }),
                 camera_make: None,
                 camera_model: None,
                 datetime_taken: None,
@@ -374,8 +374,7 @@ mod tests {
                 file_size: Some(50),
                 width: None,
                 height: None,
-                latitude: None,
-                longitude: None,
+                coords: None,
                 camera_make: None,
                 camera_model: None,
                 datetime_taken: None,
@@ -435,8 +434,7 @@ mod tests {
                 file_size: Some(2048),
                 width: Some(1024),
                 height: Some(768),
-                latitude: Some(5.5),
-                longitude: Some(6.5),
+                coords: Some(GpsCoords { lat: 5.5, lon: 6.5 }),
                 camera_make: None,
                 camera_model: None,
                 datetime_taken: None,
@@ -450,8 +448,7 @@ mod tests {
         assert_eq!(meta.file_size, Some(2048));
         assert_eq!(meta.width, Some(1024));
         assert_eq!(meta.height, Some(768));
-        assert_eq!(meta.latitude, Some(5.5));
-        assert_eq!(meta.longitude, Some(6.5));
+        assert_eq!(meta.coords, Some(GpsCoords { lat: 5.5, lon: 6.5 }));
         let _ = std::fs::remove_dir_all(root);
     }
 

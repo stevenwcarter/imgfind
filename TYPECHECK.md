@@ -29,19 +29,6 @@ Last triage: 2026-06-21 against `main` @ 20d80f38. Toolchain: cargo build/check 
 
 ## Medium
 
-### T4. Half-a-coordinate GPS is representable: `ImageMetadata` latitude + longitude (src/database.rs:1513-1524)
-- **Lens:** illegal-states
-- **Impact:** 4 (bug-prevention med × blast 2)
-- **Effort:** M
-- **Risk:** low
-- **Current type:** two independent `Option<f64>` (latitude, longitude).
-- **Proposed type:** `Option<(f64, f64)>` or `enum GpsCoords { Present(f64, f64), Absent }` — makes `lat = Some, lon = None` (and the reverse) unrepresentable.
-- **Evidence:** every read already pairs the two with an `if let (Some, Some)` guard, so no live bug — but the field shape permits a half-present coordinate that callers must keep remembering to reject.
-- **Blast radius:** src/database.rs:1167-1168, :1250-1251, :1469-1470, :1604-1605, :1648, :1674; imgfind-gui/src/detail.rs:42.
-- **Invariants/caveats:** Serde/persistence compat needs care if `ImageMetadata` is ever serialized into ui_state or cached — verify the on-disk shape and add a round-trip test before changing field count. Lens recommended deferring; included as a clean illegal-states removal once the serde shape is confirmed.
-- **Proposed migration:** introduce `GpsCoords`; replace the two fields; collapse every paired `if let` to a single match at source; fix to green.
-- [x] execute   [ ] skip
-
 ### T5. `max_k` and `limit` are both `usize` and silently swappable: `max_k` (src/database.rs:759)
 - **Lens:** newtype
 - **Impact:** 4 (bug-prevention med × blast 2)

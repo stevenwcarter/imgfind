@@ -1171,8 +1171,8 @@ impl Database {
                 opt_i64(metadata.file_size.map(|s| s as i64)),
                 opt_i64(metadata.width.map(|w| w as i64)),
                 opt_i64(metadata.height.map(|h| h as i64)),
-                opt_f64(metadata.latitude),
-                opt_f64(metadata.longitude),
+                opt_f64(metadata.coords.map(|c| c.lat)),
+                opt_f64(metadata.coords.map(|c| c.lon)),
                 opt_text(metadata.camera_make.clone()),
                 opt_text(metadata.camera_model.clone()),
                 opt_text(metadata.datetime_taken.clone()),
@@ -1473,8 +1473,9 @@ impl Database {
             file_size: col_opt_i64(&row, 0)?.map(|s| s as u64),
             width: col_opt_i64(&row, 1)?.map(|w| w as u32),
             height: col_opt_i64(&row, 2)?.map(|h| h as u32),
-            latitude: col_opt_f64(&row, 3)?,
-            longitude: col_opt_f64(&row, 4)?,
+            coords: col_opt_f64(&row, 3)?
+                .zip(col_opt_f64(&row, 4)?)
+                .map(|(lat, lon)| GpsCoords { lat, lon }),
             camera_make: col_opt_text(&row, 5)?,
             camera_model: col_opt_text(&row, 6)?,
             datetime_taken: col_opt_text(&row, 7)?,
@@ -1515,14 +1516,21 @@ fn opt_text(v: Option<String>) -> Value {
     v.map_or(Value::Null, Value::Text)
 }
 
+/// A complete GPS fix: latitude and longitude are always present together, so a
+/// half-present coordinate (one without the other) is unrepresentable.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GpsCoords {
+    pub lat: f64,
+    pub lon: f64,
+}
+
 /// Metadata extracted from image EXIF data
 #[derive(Debug, Clone)]
 pub struct ImageMetadata {
     pub file_size: Option<u64>,
     pub width: Option<u32>,
     pub height: Option<u32>,
-    pub latitude: Option<f64>,
-    pub longitude: Option<f64>,
+    pub coords: Option<GpsCoords>,
     pub camera_make: Option<String>,
     pub camera_model: Option<String>,
     pub datetime_taken: Option<String>,
@@ -1551,8 +1559,7 @@ pub fn extract_image_metadata(file_path: &str) -> Result<ImageMetadata> {
         file_size: None,
         width: None,
         height: None,
-        latitude: None,
-        longitude: None,
+        coords: None,
         camera_make: None,
         camera_model: None,
         datetime_taken: None,
@@ -1608,8 +1615,10 @@ pub fn extract_image_metadata(file_path: &str) -> Result<ImageMetadata> {
                     ),
                 )
             {
-                metadata.latitude = Some(latitude);
-                metadata.longitude = Some(longitude);
+                metadata.coords = Some(GpsCoords {
+                    lat: latitude,
+                    lon: longitude,
+                });
             }
         }
     }
@@ -1768,8 +1777,13 @@ mod tests {
         assert_eq!(meta.file_size, Some(4096));
         assert_eq!(meta.width, Some(800));
         assert_eq!(meta.height, Some(600));
-        assert_eq!(meta.latitude, Some(12.5));
-        assert_eq!(meta.longitude, Some(-77.25));
+        assert_eq!(
+            meta.coords,
+            Some(GpsCoords {
+                lat: 12.5,
+                lon: -77.25
+            })
+        );
         assert_eq!(meta.camera_make.as_deref(), Some("Canon"));
         assert_eq!(meta.camera_model.as_deref(), Some("R5"));
         assert_eq!(meta.datetime_taken.as_deref(), Some("2026:06:20 12:00:00"));
@@ -1799,6 +1813,33 @@ mod tests {
                 .expect("query")
                 .is_none(),
             "unknown path should yield Ok(None)"
+        );
+
+        // Half-present coordinate: latitude stored, longitude NULL. The paired
+        // `coords` field makes this unrepresentable, so it must read back `None`.
+        {
+            let conn = db.pool.get().await.expect("conn");
+            conn.execute(
+                "INSERT INTO images (id, path, hash) VALUES (3, 'c.jpg', 'h3')",
+                (),
+            )
+            .await
+            .expect("insert image");
+            conn.execute(
+                "INSERT INTO image_metadata (image_id, latitude) VALUES (3, 12.5)",
+                (),
+            )
+            .await
+            .expect("insert half coordinate");
+        }
+        let half = db
+            .get_image_metadata(&RelativePath(PathBuf::from("c.jpg")))
+            .await
+            .expect("query")
+            .expect("metadata row present");
+        assert_eq!(
+            half.coords, None,
+            "latitude without longitude must yield coords: None"
         );
 
         cleanup(&db_path);
