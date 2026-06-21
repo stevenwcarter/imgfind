@@ -45,16 +45,6 @@ _(none)_
 
 ## Low
 
-### B14. rehydrate_rows does N+1 queries on session restore: `rehydrate_rows` (src/database.rs:1416)
-- Category: caching
-- Impact: 4 (severity 2 × blast-radius 2)
-- Effort: S
-- Risk: low
-- Evidence: `rehydrate_rows` (session restore, 80-100 ids) fetches rows by id in a loop = 100+ queries; `browse_all` and `search_similar_images_meta` JOIN in one pass but rehydrate doesn't.
-- Blast radius: src/database.rs:1416, imgfind-gui/src/main.rs:1896
-- Proposed fix: Replace the per-id loop with one `WHERE id IN (...)` query joined to metadata; build a HashMap and reorder.
-- [x] execute   [ ] skip
-
 ### B15. Open-in-OS-viewer failure only logged, no UI feedback: `on_tile_open_external` (imgfind-gui/src/main.rs:744)
 - Category: api-surface
 - Impact: 4 (severity 2 × blast-radius 2)

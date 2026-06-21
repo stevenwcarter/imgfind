@@ -2734,6 +2734,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
     }
 
+    /// Characterization test: `rehydrate_rows` uses a single `IN` query with a
+    /// metadata LEFT JOIN. Asserts that: (a) rows are returned in input-id order
+    /// even when the request order differs from insert order, (b) ids with no row
+    /// are silently dropped, and (c) the `size` field (from `image_metadata`) is
+    /// populated (i.e. the LEFT JOIN lands).
+    #[test]
+    fn rehydrate_rows_ordered_with_metadata_populated() {
+        // Insert three images with distinct sizes. Insert order → ids 1, 2, 3.
+        let (db, _tmp) = test_db_with_rows(&[
+            ("img1.jpg", Some(100)),
+            ("img2.jpg", Some(200)),
+            ("img3.jpg", Some(300)),
+        ]);
+        // Request in reverse order (3, 1, 2) with a bogus id (999) interspersed.
+        let ids = vec![3i64, 999, 1, 2];
+        let rows = db.rehydrate_rows(&ids).unwrap();
+
+        // 999 is dropped; remaining rows follow the *input* order [3, 1, 2].
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].id, 3);
+        assert_eq!(rows[1].id, 1);
+        assert_eq!(rows[2].id, 2);
+
+        // Paths match.
+        assert_eq!(rows[0].path, "img3.jpg");
+        assert_eq!(rows[1].path, "img1.jpg");
+        assert_eq!(rows[2].path, "img2.jpg");
+
+        // Metadata (file_size) must be populated via the LEFT JOIN — not None.
+        assert_eq!(rows[0].size, Some(300));
+        assert_eq!(rows[1].size, Some(100));
+        assert_eq!(rows[2].size, Some(200));
+
+        let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
+    }
+
     #[test]
     fn ui_state_round_trips_through_db() {
         let (db, _tmp) = test_db_with_rows(&[("a.jpg", Some(1))]);
