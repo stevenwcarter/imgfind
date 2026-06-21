@@ -10,6 +10,7 @@ mod meta_cache;
 mod nav;
 mod preload;
 mod selection;
+mod sort_option;
 mod state;
 mod tagset;
 mod window;
@@ -28,6 +29,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use slint::{Image, Model, ModelRc, SharedString, Timer, TimerMode, VecModel, Weak};
 
+use crate::sort_option::SortOption;
 use backend::Backend;
 use detail::{DetailState, filename_of, format_metadata, select};
 use imgfind::filters::{Filters, GpsFilter, TagMatch};
@@ -2516,20 +2518,17 @@ fn apply_sort_change(
     let Some(w) = weak.upgrade() else { return };
     let idx = w.get_sort_index() as usize;
     let desc = w.get_sort_desc();
-    let option_str: String = {
-        let model = w.get_sort_options();
-        model
-            .row_data(idx)
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "Name".to_string())
-    };
     let dir = if desc { SortDir::Desc } else { SortDir::Asc };
     let mode = mode_ref.lock().clone();
+    // Browse mode omits Relevance from the selector; search/similar include it.
+    let with_relevance = !matches!(&mode, SearchMode::Text(q) if q.is_empty());
+    let option = selected_sort_option(idx, with_relevance);
     match mode {
         SearchMode::Text(q) if q.is_empty() => {
-            // Browse mode: re-issue the browse query with the new sort.
+            // Browse mode: re-issue the browse query with the new sort. Browse
+            // has no Relevance option, so the key is always concrete.
             let sort = Sort {
-                key: option_str_to_sort_key(&option_str),
+                key: option.to_sort_key().unwrap_or(SortKey::Name),
                 dir,
             };
             state_ref.lock().sort = sort;
@@ -2547,17 +2546,18 @@ fn apply_sort_change(
             // Search/similar mode: in-memory resort (no backend round-trip).
             {
                 let mut s = state_ref.lock();
-                if option_str == "Relevance" {
-                    s.resort_to_relevance();
-                    // Keep sort field as default placeholder — Relevance has
-                    // no SortKey equivalent; browse after a clear will reset.
-                    s.sort = Sort::default();
-                } else {
-                    let sort = Sort {
-                        key: option_str_to_sort_key(&option_str),
-                        dir,
-                    };
-                    s.resort(&sort);
+                match option.to_sort_key() {
+                    None => {
+                        // Relevance: restore relevance order.
+                        s.resort_to_relevance();
+                        // Keep sort field as default placeholder — Relevance has
+                        // no SortKey equivalent; browse after a clear will reset.
+                        s.sort = Sort::default();
+                    }
+                    Some(key) => {
+                        let sort = Sort { key, dir };
+                        s.resort(&sort);
+                    }
                 }
             }
             // Bump generation so the loader timer rebuilds the tile model.
@@ -3473,26 +3473,27 @@ fn load_lightbox_image(
 /// prepended as the first option so it is selected by default.  For browse mode
 /// it is omitted because browse results have no relevance ranking.
 fn make_sort_options_model(with_relevance: bool) -> ModelRc<SharedString> {
-    let mut opts: Vec<SharedString> = Vec::new();
-    if with_relevance {
-        opts.push("Relevance".into());
-    }
-    opts.push("Name".into());
-    opts.push("Size".into());
-    opts.push("Type".into());
+    let opts: Vec<SharedString> = SortOption::all()
+        .iter()
+        .filter(|o| with_relevance || **o != SortOption::Relevance)
+        .map(|o| SharedString::from(o.to_string()))
+        .collect();
     ModelRc::from(Rc::new(VecModel::from(opts)))
 }
 
-/// Map a sort-selector option string to a [`SortKey`].
+/// Resolve the selector's row index to its [`SortOption`], honoring whether
+/// Relevance is present (search mode) or omitted (browse mode).
 ///
-/// "Relevance" is handled by the caller before this point; any other unknown
-/// string falls back to `SortKey::Name`.
-fn option_str_to_sort_key(s: &str) -> SortKey {
-    match s {
-        "Size" => SortKey::Size,
-        "Type" => SortKey::Type,
-        _ => SortKey::Name,
-    }
+/// The model order matches `make_sort_options_model`: in search mode the rows
+/// are `SortOption::all()` (Relevance first); in browse mode Relevance is
+/// dropped, shifting the concrete keys up by one. An out-of-range index falls
+/// back to `Name`.
+fn selected_sort_option(idx: usize, with_relevance: bool) -> SortOption {
+    SortOption::all()
+        .into_iter()
+        .filter(|o| with_relevance || *o != SortOption::Relevance)
+        .nth(idx)
+        .unwrap_or(SortOption::Name)
 }
 
 #[cfg(test)]
@@ -3850,7 +3851,39 @@ mod restore_tests {
 
 #[cfg(test)]
 mod sort_sel_tests {
-    use super::{FileSize, ImageId, RowMeta, SelectAfter, resolve_selection};
+    use super::{
+        FileSize, ImageId, RowMeta, SelectAfter, SortKey, SortOption, resolve_selection,
+        selected_sort_option,
+    };
+
+    #[test]
+    fn selected_option_search_mode_includes_relevance() {
+        // Search mode model: [Relevance, Name, Size, Type].
+        assert_eq!(selected_sort_option(0, true), SortOption::Relevance);
+        assert_eq!(selected_sort_option(1, true), SortOption::Name);
+        assert_eq!(selected_sort_option(2, true), SortOption::Size);
+        assert_eq!(selected_sort_option(3, true), SortOption::Type);
+    }
+
+    #[test]
+    fn selected_option_browse_mode_omits_relevance() {
+        // Browse mode model: [Name, Size, Type].
+        assert_eq!(selected_sort_option(0, false), SortOption::Name);
+        assert_eq!(selected_sort_option(1, false), SortOption::Size);
+        assert_eq!(selected_sort_option(2, false), SortOption::Type);
+    }
+
+    #[test]
+    fn selected_option_out_of_range_falls_back_to_name() {
+        assert_eq!(selected_sort_option(99, true), SortOption::Name);
+        assert_eq!(selected_sort_option(99, false), SortOption::Name);
+    }
+
+    #[test]
+    fn relevance_has_no_sort_key() {
+        assert_eq!(SortOption::Relevance.to_sort_key(), None);
+        assert_eq!(SortOption::Type.to_sort_key(), Some(SortKey::Type));
+    }
 
     fn make_row(id: i64) -> RowMeta {
         RowMeta {

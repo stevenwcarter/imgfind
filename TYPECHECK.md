@@ -14,19 +14,6 @@ Last triage: 2026-06-21 against `main` @ 20d80f38. Toolchain: cargo build/check 
 
 ## High
 
-### T2. UI sort-selector strings sit un-typed above the existing `SortKey` enum: `make_sort_options_model` / `option_str_to_sort_key` (imgfind-gui/src/main.rs:2542, :3467, :3482)
-- **Lens:** stringly-typed
-- **Impact:** 6 (bug-prevention high × blast 2)
-- **Effort:** M
-- **Risk:** low
-- **Current type:** `String`/`SharedString` selector labels. NOTE: the *core* sort is already strongly typed (`SortKey { Name, Size, Type }` + `SortDir` + `Sort` in src/sort.rs); this finding is strictly the **GUI selector-string layer that maps onto `SortKey` plus a `Relevance` special case** — not "sort is stringly-typed" at the core (it isn't).
-- **Proposed type:** `enum SortOption { Relevance, Name, Size, Type }` with `Display` (for the Slint string model) and a total mapping to `Option<SortKey>` (Relevance → None / the relevance-order special case). The selector model and `*_to_selector_index` helpers key off the enum instead of label strings.
-- **Evidence:** option labels are compared with `if option_str == "Relevance"` and `match` on `"Size"`/`"Type"`, while `make_sort_options_model` pushes `"Relevance"`/`"Name"`/`"Size"`/`"Type"` in a fixed order. The model order and the `sort_key_to_browse_index` / `sort_to_selector_index` integer indices are tightly coupled by hand — a label typo or a reorder of the pushes silently mismaps the dropdown selection to the wrong sort, and `"Relevance"` (which has no `SortKey`) is an unguarded string special-case.
-- **Blast radius:** imgfind-gui/src/main.rs:2542 (`if option_str == "Relevance"`), :3470 (push `"Relevance"`), :3472-3474 (push Name/Size/Type), :3484-3485 (`match "Size"/"Type"`).
-- **Invariants/caveats:** Purely UI — no serde/DB boundary crossed (the persisted sort goes through the typed `Sort`). Safe to do independently of T1.
-- **Proposed migration:** introduce `SortOption` with `Display` + `to_sort_key()`; build the Slint model by iterating the enum variants; replace the string compares/matches at source and fix breaks to green.
-- [x] execute   [ ] skip
-
 ## Medium
 
 ### T8. Four adjacent `f64` bounds invite N/S/E/W swaps: `geographic bounds` (src/database.rs:1211)
