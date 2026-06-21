@@ -324,6 +324,31 @@ mod tests {
     }
 
     #[test]
+    fn filters_serialize_size_bounds_as_bare_integers() {
+        // Pins the load-bearing invariant that the Filters serde seam (which crosses
+        // to persisted ui_state JSON) emits size bounds as BARE INTEGERS, not floats.
+        // A future #[serde(flatten)] refactor would coerce 1024 -> 1024.0 and silently
+        // corrupt saved sessions; this test would catch it. (FileSize is #[serde(transparent)].)
+        let f = Filters {
+            size_min: Some(FileSize(1024)),
+            size_max: Some(FileSize(5_000_000)),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&f).unwrap();
+        assert!(
+            json.contains("\"size_min\":1024"),
+            "size_min must be a bare int, got: {json}"
+        );
+        assert!(
+            json.contains("\"size_max\":5000000"),
+            "size_max must be a bare int, got: {json}"
+        );
+        // And it round-trips back to the same value (no precision/type drift).
+        let back: Filters = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, f);
+    }
+
+    #[test]
     fn carry_tag_filter_preserves_tags_and_size() {
         let mut rebuilt = Filters {
             size_min: Some(FileSize(1024)),
