@@ -276,6 +276,9 @@ fn main() -> Result<()> {
     let gui_config = imgfind::config::Config::load()
         .map(|c| c.gui)
         .unwrap_or_else(|e| {
+            // Surface on stderr so a user launching from a terminal sees a bad
+            // config without needing RUST_LOG; keep the default fallback.
+            eprintln!("imgfind-gui: failed to load config, using defaults: {e:#}");
             tracing::warn!("Failed to load config, using defaults: {e}");
             imgfind::config::GuiConfig::default()
         });

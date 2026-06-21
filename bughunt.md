@@ -55,16 +55,6 @@ _(none)_
 - Proposed fix: On `Err`, surface a transient UI error (toast/status field).
 - [ ] execute   [ ] skip
 
-### B18. Malformed GUI `config.toml` silently ignored, defaults applied: `GuiConfig load` (imgfind-gui/src/main.rs:267)
-- Category: api-surface
-- Impact: 2 (severity 1 × blast-radius 2)
-- Effort: S
-- Risk: low
-- Evidence: `Config::load()` is `unwrap_or_else -> GuiConfig::default()` with only a `tracing::warn!`; a corrupt `config.toml` is silently ignored and only visible if `RUST_LOG` is set.
-- Blast radius: imgfind-gui/src/main.rs:267
-- Proposed fix: Keep the default-fallback but make the warning more discoverable (stderr line on parse error). Small surgical change.
-- [x] execute   [ ] skip
-
 ### B19. Detail-panel metadata re-fetched from DB on every open: `backend.metadata` (imgfind-gui/src/backend.rs:174)
 - Category: caching
 - Impact: 2 (severity 1 × blast-radius 2)
