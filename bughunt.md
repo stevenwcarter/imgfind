@@ -20,16 +20,6 @@ _(none)_
 
 ## High
 
-### B2. CLI search: relative DB paths passed to `canonicalize()`, resolved against cwd: `search command path handling` (src/main.rs:765)
-- Category: correctness
-- Impact: 15 (severity 5 × blast-radius 3)
-- Effort: S
-- Risk: medium
-- Evidence: `search_similar_images` returns paths relative to the DB parent dir, but the search command treats them as absolute and calls `canonicalize()` (~769), which resolves relative to cwd, not the DB parent. When the DB is not under cwd this wrongly filters/displays results and the path-prefix filter misbehaves.
-- Blast radius: src/main.rs:757-790, src/main.rs:814-843
-- Proposed fix: Convert with `relative_to_abs_path(Path::new(path), &db.parent_dir)` before filtering/canonicalizing; fix the misleading comment.
-- [x] execute   [ ] skip
-
 ### B3. Pervasive `.lock().unwrap()` in GUI event loop (poison-on-panic cascade): `Mutex locks across main.rs` (imgfind-gui/src/main.rs:121)
 - Category: api-surface
 - Impact: 15 (severity 3 × blast-radius 5)
