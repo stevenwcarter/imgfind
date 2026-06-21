@@ -3499,6 +3499,7 @@ dependencies = [
  "imgfind",
  "lru",
  "open",
+ "parking_lot",
  "rusqlite",
  "slint",
  "slint-build",

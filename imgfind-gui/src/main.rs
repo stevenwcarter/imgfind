@@ -16,9 +16,11 @@ mod window;
 use std::collections::{BTreeSet, HashSet};
 use std::ops::Range;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+
+use parking_lot::Mutex;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -118,7 +120,7 @@ impl SelectionHandles {
     /// Clear the multi-selection and mark it dirty. Used on the few result-set
     /// resets that bypass [`apply_fetch_result`] (in-memory resort, idle reset).
     fn clear(&self) {
-        self.selection.lock().unwrap().clear();
+        self.selection.lock().clear();
         self.dirty.store(true, Ordering::Relaxed);
     }
 }
@@ -458,7 +460,7 @@ fn main() -> Result<()> {
                 return;
             }
             let query = query.trim().to_string();
-            let current_filters = filters_ref.lock().unwrap().clone();
+            let current_filters = filters_ref.lock().clone();
 
             if query.is_empty() {
                 clear_to_browse(
@@ -482,15 +484,15 @@ fn main() -> Result<()> {
 
             // Dismiss any open lightbox and detail panel before showing new
             // results — stored indices would otherwise be stale.
-            *lb_ref.lock().unwrap() = None;
-            *detail_ref.lock().unwrap() = None;
-            *mode_ref.lock().unwrap() = SearchMode::Text(query.clone());
+            *lb_ref.lock() = None;
+            *detail_ref.lock() = None;
+            *mode_ref.lock() = SearchMode::Text(query.clone());
             if let Some(w) = weak.upgrade() {
                 w.set_lightbox_open(false);
                 w.set_detail_open(false);
             }
 
-            state_ref.lock().unwrap().start_search(query.clone());
+            state_ref.lock().start_search(query.clone());
             if let Some(w) = weak.upgrade() {
                 w.set_status("Searching\u{2026}".into());
                 w.set_can_search(false);
@@ -533,7 +535,7 @@ fn main() -> Result<()> {
             }
             let Some(w) = weak.upgrade() else { return };
             w.set_query_text("".into());
-            let current_filters = filters_ref.lock().unwrap().clone();
+            let current_filters = filters_ref.lock().clone();
             clear_to_browse(
                 &weak,
                 &state_ref,
@@ -564,19 +566,19 @@ fn main() -> Result<()> {
         window.on_tile_selected(move |index| {
             let idx = index as usize;
             // Keep the shared selection in sync so keyboard and mouse share one highlight.
-            *selected_ref.lock().unwrap() = Some(idx);
+            *selected_ref.lock() = Some(idx);
             if let Some(w) = weak.upgrade() {
                 w.set_selected_index(index);
             }
             let path = {
-                let s = state_ref.lock().unwrap();
+                let s = state_ref.lock();
                 s.results.get(idx).map(|r| r.path.clone())
             };
             let Some(path) = path else { return };
 
             // Compute detail identity synchronously (just string ops).
             let ds = select(path.clone());
-            *detail_ref.lock().unwrap() = Some(ds.clone());
+            *detail_ref.lock() = Some(ds.clone());
 
             // Open the panel immediately. A cache hit can show the image now;
             // a miss shows a placeholder until the worker decodes it.
@@ -616,7 +618,7 @@ fn main() -> Result<()> {
             {
                 let my_gen = preload_gen_detail.fetch_add(1, Ordering::SeqCst) + 1;
                 let paths = {
-                    let s = state_ref.lock().unwrap();
+                    let s = state_ref.lock();
                     neighbor_paths(&s.results, idx, preload_n)
                 };
                 spawn_detail_preload(
@@ -636,7 +638,7 @@ fn main() -> Result<()> {
                 std::thread::spawn(move || {
                     let tags = backend3.tags_for(&path_for_tags).unwrap_or_default();
                     let _ = slint::invoke_from_event_loop(move || {
-                        if detail_shows(&detail3.lock().unwrap(), &path_for_tags)
+                        if detail_shows(&detail3.lock(), &path_for_tags)
                             && let Some(w) = w.upgrade()
                         {
                             push_detail_tags(&w, &tags);
@@ -664,22 +666,22 @@ fn main() -> Result<()> {
                 return;
             };
             if ctrl {
-                selection_ref.lock().unwrap().ctrl_toggle(idx);
-                *selected_ref.lock().unwrap() = Some(idx);
+                selection_ref.lock().ctrl_toggle(idx);
+                *selected_ref.lock() = Some(idx);
                 selection_dirty_ref.store(true, Ordering::Relaxed);
                 w.set_selected_index(index);
                 push_statusline(&w, &selection_ref, &state_ref);
             } else if shift {
-                let anchor = selected_ref.lock().unwrap().unwrap_or(idx);
-                selection_ref.lock().unwrap().range_to(anchor, idx);
-                *selected_ref.lock().unwrap() = Some(idx);
+                let anchor = selected_ref.lock().unwrap_or(idx);
+                selection_ref.lock().range_to(anchor, idx);
+                *selected_ref.lock() = Some(idx);
                 selection_dirty_ref.store(true, Ordering::Relaxed);
                 w.set_selected_index(index);
                 push_statusline(&w, &selection_ref, &state_ref);
             } else {
                 // Plain click: collapse any selection to this tile, then open
                 // the detail panel (which sets the cursor, loads, restatuses).
-                selection_ref.lock().unwrap().clear();
+                selection_ref.lock().clear();
                 selection_dirty_ref.store(true, Ordering::Relaxed);
                 w.invoke_tile_selected(index);
             }
@@ -697,16 +699,11 @@ fn main() -> Result<()> {
         let preload_gen_ta = Arc::clone(&preload_generation);
         window.on_tile_activated(move |index| {
             let idx = index as usize;
-            let path = state_ref
-                .lock()
-                .unwrap()
-                .results
-                .get(idx)
-                .map(|r| r.path.clone());
+            let path = state_ref.lock().results.get(idx).map(|r| r.path.clone());
             let Some(rel) = path else { return };
-            *lb_ref.lock().unwrap() = Some(idx);
+            *lb_ref.lock() = Some(idx);
             // Seed the grid selection so closing the lightbox (Esc) lands on this tile.
-            *selected_ref.lock().unwrap() = Some(idx);
+            *selected_ref.lock() = Some(idx);
             if let Some(w) = weak.upgrade() {
                 w.set_selected_index(index);
             }
@@ -716,7 +713,7 @@ fn main() -> Result<()> {
             {
                 let my_gen = preload_gen_ta.fetch_add(1, Ordering::SeqCst) + 1;
                 let paths = {
-                    let s = state_ref.lock().unwrap();
+                    let s = state_ref.lock();
                     neighbor_paths(&s.results, idx, preload_n)
                 };
                 spawn_preload(
@@ -736,7 +733,7 @@ fn main() -> Result<()> {
         let state_ref = Arc::clone(&state);
         window.on_tile_open_external(move |index| {
             let path = {
-                let s = state_ref.lock().unwrap();
+                let s = state_ref.lock();
                 s.results.get(index as usize).map(|r| r.path.clone())
             };
             if let Some(rel) = path {
@@ -753,7 +750,7 @@ fn main() -> Result<()> {
         let weak = window.as_weak();
         let detail_ref = Arc::clone(&detail);
         window.on_detail_close(move || {
-            *detail_ref.lock().unwrap() = None;
+            *detail_ref.lock() = None;
             if let Some(w) = weak.upgrade() {
                 w.set_detail_open(false);
             }
@@ -766,7 +763,7 @@ fn main() -> Result<()> {
         let detail_ref = Arc::clone(&detail);
         let w = window.as_weak();
         window.on_detail_tag_committed(move |text| {
-            let Some(path) = detail_ref.lock().unwrap().as_ref().map(|d| d.path.clone()) else {
+            let Some(path) = detail_ref.lock().as_ref().map(|d| d.path.clone()) else {
                 return;
             };
             let backend = backend.clone();
@@ -801,7 +798,7 @@ fn main() -> Result<()> {
         let detail_ref = Arc::clone(&detail);
         let w = window.as_weak();
         window.on_detail_tag_remove(move |tag| {
-            let Some(path) = detail_ref.lock().unwrap().as_ref().map(|d| d.path.clone()) else {
+            let Some(path) = detail_ref.lock().as_ref().map(|d| d.path.clone()) else {
                 return;
             };
             let backend = backend.clone();
@@ -833,7 +830,7 @@ fn main() -> Result<()> {
         let preload_gen_vf = Arc::clone(&preload_generation);
         window.on_detail_view_full(move || {
             let seed_path = {
-                let d = detail_ref.lock().unwrap();
+                let d = detail_ref.lock();
                 d.as_ref().map(|ds| ds.path.clone())
             };
             let Some(rel) = seed_path else { return };
@@ -844,10 +841,10 @@ fn main() -> Result<()> {
             // that filtered the seed out of its own result set), lb_index is
             // None and prev/next will start from slot 0 — that is intentional.
             let idx = {
-                let st = state_ref.lock().unwrap();
+                let st = state_ref.lock();
                 st.results.iter().position(|r| r.path == rel)
             };
-            *lb_ref.lock().unwrap() = idx;
+            *lb_ref.lock() = idx;
 
             load_lightbox_image(weak.clone(), backend_vf.clone(), rel, gen_ref.clone());
 
@@ -855,7 +852,7 @@ fn main() -> Result<()> {
             if let Some(center) = idx {
                 let my_gen = preload_gen_vf.fetch_add(1, Ordering::SeqCst) + 1;
                 let paths = {
-                    let s = state_ref.lock().unwrap();
+                    let s = state_ref.lock();
                     neighbor_paths(&s.results, center, preload_n)
                 };
                 spawn_preload(
@@ -886,21 +883,21 @@ fn main() -> Result<()> {
         let backend_sim = backend.clone();
         window.on_search_similar(move || {
             let seed_path = {
-                let d = detail_ref.lock().unwrap();
+                let d = detail_ref.lock();
                 d.as_ref().map(|ds| ds.path.clone())
             };
             let Some(seed_path) = seed_path else { return };
 
             let filename = filename_of(&seed_path);
-            let current_filters = filters_ref.lock().unwrap().clone();
-            *mode_ref.lock().unwrap() = SearchMode::Similar(seed_path.clone());
+            let current_filters = filters_ref.lock().clone();
+            *mode_ref.lock() = SearchMode::Similar(seed_path.clone());
 
             // `start_search` records the seed path as the "committed query".
             // NOTE: `committed_query` holds a file path here, NOT a text query;
             // `search_mode` (not this field) drives dispatch, and
             // `committed_query` is never displayed — do NOT rely on it being a
             // real text query during a similarity search.
-            state_ref.lock().unwrap().start_search(seed_path.clone());
+            state_ref.lock().start_search(seed_path.clone());
             if let Some(w) = weak.upgrade() {
                 w.set_status(format!("Similar to {filename}").into());
                 w.set_can_search(false);
@@ -931,7 +928,7 @@ fn main() -> Result<()> {
         let gen_ref = Arc::clone(&lb_generation);
         window.on_lightbox_close(move || {
             tracing::debug!("lightbox-close invoked");
-            *lb_ref.lock().unwrap() = None;
+            *lb_ref.lock() = None;
             // Invalidate any in-flight decode so its completion cannot re-assert
             // lightbox-open = true and reopen the lightbox we just closed.
             gen_ref.fetch_add(1, Ordering::SeqCst);
@@ -954,20 +951,19 @@ fn main() -> Result<()> {
         window.on_lightbox_prev(move || {
             tracing::debug!("lightbox-prev invoked");
             let new_idx = {
-                let mut guard = lb_ref.lock().unwrap();
+                let mut guard = lb_ref.lock();
                 let current = guard.unwrap_or(0);
                 let next = clamp_prev(current);
                 *guard = Some(next);
                 next
             };
             // Mirror into the grid selection so closing the lightbox lands on this tile.
-            *selected_ref.lock().unwrap() = Some(new_idx);
+            *selected_ref.lock() = Some(new_idx);
             if let Some(w) = weak.upgrade() {
                 w.set_selected_index(new_idx as i32);
             }
             let path = state_ref
                 .lock()
-                .unwrap()
                 .results
                 .get(new_idx)
                 .map(|r| r.path.clone());
@@ -979,7 +975,7 @@ fn main() -> Result<()> {
             {
                 let my_gen = preload_gen_prev.fetch_add(1, Ordering::SeqCst) + 1;
                 let paths = {
-                    let s = state_ref.lock().unwrap();
+                    let s = state_ref.lock();
                     neighbor_paths(&s.results, new_idx, preload_n)
                 };
                 spawn_preload(
@@ -1005,9 +1001,9 @@ fn main() -> Result<()> {
         window.on_lightbox_next(move || {
             tracing::debug!("lightbox-next invoked");
             let (new_idx, len) = {
-                let s = state_ref.lock().unwrap();
+                let s = state_ref.lock();
                 let len = s.results.len();
-                let mut guard = lb_ref.lock().unwrap();
+                let mut guard = lb_ref.lock();
                 let current = guard.unwrap_or(0);
                 let next = clamp_next(current, len);
                 *guard = Some(next);
@@ -1017,13 +1013,12 @@ fn main() -> Result<()> {
                 return;
             }
             // Mirror into the grid selection so closing the lightbox lands on this tile.
-            *selected_ref.lock().unwrap() = Some(new_idx);
+            *selected_ref.lock() = Some(new_idx);
             if let Some(w) = weak.upgrade() {
                 w.set_selected_index(new_idx as i32);
             }
             let path = state_ref
                 .lock()
-                .unwrap()
                 .results
                 .get(new_idx)
                 .map(|r| r.path.clone());
@@ -1035,7 +1030,7 @@ fn main() -> Result<()> {
             {
                 let my_gen = preload_gen_next.fetch_add(1, Ordering::SeqCst) + 1;
                 let paths = {
-                    let s = state_ref.lock().unwrap();
+                    let s = state_ref.lock();
                     neighbor_paths(&s.results, new_idx, preload_n)
                 };
                 spawn_preload(
@@ -1060,15 +1055,15 @@ fn main() -> Result<()> {
             let Some(dir) = nav::NavDir::from_i32(dir_i) else {
                 return;
             };
-            let len = state_ref.lock().unwrap().results.len();
-            let cur = *selected_ref.lock().unwrap();
+            let len = state_ref.lock().results.len();
+            let cur = *selected_ref.lock();
             let new = nav::move_selection(cur, dir, cols_i.max(0) as usize, len);
-            *selected_ref.lock().unwrap() = new;
+            *selected_ref.lock() = new;
             // Move the multi-selection cursor so a Range selection grows/shrinks
             // live as the cursor moves (a no-op in Normal mode). Drop the guard
             // before any `invoke_*`/`set_*` to avoid re-entrant deadlock.
             if let Some(i) = new {
-                selection_ref.lock().unwrap().cursor_moved(i);
+                selection_ref.lock().cursor_moved(i);
             }
             selection_dirty_ref.store(true, Ordering::Relaxed);
             if let Some(w) = weak.upgrade() {
@@ -1090,11 +1085,11 @@ fn main() -> Result<()> {
         let weak = window.as_weak();
         window.on_grid_open_detail(move || {
             // Copy the selection out and DROP the guard before invoking
-            // tile-selected, which re-locks `selected`. std::sync::Mutex is not
+            // tile-selected, which re-locks `selected`. parking_lot::Mutex is not
             // reentrant, so holding the guard across the invoke (as an if-let
             // scrutinee temporary does — it lives through the body) deadlocks the
             // UI thread.
-            let sel = *selected_ref.lock().unwrap();
+            let sel = *selected_ref.lock();
             if let (Some(i), Some(w)) = (sel, weak.upgrade()) {
                 w.invoke_tile_selected(i as i32);
             }
@@ -1109,7 +1104,7 @@ fn main() -> Result<()> {
             // Drop the `selected` guard before invoking tile-activated (which
             // re-locks `selected`); see on_grid_open_detail above — a held
             // if-let scrutinee guard across the invoke deadlocks the UI thread.
-            let sel = *selected_ref.lock().unwrap();
+            let sel = *selected_ref.lock();
             if let (Some(i), Some(w)) = (sel, weak.upgrade()) {
                 w.invoke_tile_activated(i as i32);
             }
@@ -1126,9 +1121,9 @@ fn main() -> Result<()> {
         window.on_selection_enter_range(move || {
             // Anchor at the current cursor; seed to 0 so Shift+V on a fresh grid
             // anchors the first tile.
-            let cur = selected_ref.lock().unwrap().unwrap_or(0);
-            *selected_ref.lock().unwrap() = Some(cur);
-            selection_ref.lock().unwrap().enter_range(cur);
+            let cur = selected_ref.lock().unwrap_or(0);
+            *selected_ref.lock() = Some(cur);
+            selection_ref.lock().enter_range(cur);
             selection_dirty_ref.store(true, Ordering::Relaxed);
             if let Some(w) = weak.upgrade() {
                 w.set_selected_index(cur as i32);
@@ -1144,7 +1139,7 @@ fn main() -> Result<()> {
         let state_ref = Arc::clone(&state);
         let weak = window.as_weak();
         window.on_selection_enter_free(move || {
-            selection_ref.lock().unwrap().enter_free();
+            selection_ref.lock().enter_free();
             selection_dirty_ref.store(true, Ordering::Relaxed);
             if let Some(w) = weak.upgrade() {
                 push_statusline(&w, &selection_ref, &state_ref);
@@ -1162,14 +1157,11 @@ fn main() -> Result<()> {
         window.on_grid_space(move || {
             // Read the mode into a local so the `selection` guard is released
             // before any re-entrant `invoke_*` (the lightbox path re-locks state).
-            let is_free = matches!(
-                selection_ref.lock().unwrap().mode(),
-                selection::SelectionMode::Free
-            );
+            let is_free = matches!(selection_ref.lock().mode(), selection::SelectionMode::Free);
             if is_free {
-                let cur = *selected_ref.lock().unwrap();
+                let cur = *selected_ref.lock();
                 if let Some(cur) = cur {
-                    selection_ref.lock().unwrap().toggle(cur);
+                    selection_ref.lock().toggle(cur);
                     selection_dirty_ref.store(true, Ordering::Relaxed);
                     if let Some(w) = weak.upgrade() {
                         push_statusline(&w, &selection_ref, &state_ref);
@@ -1191,9 +1183,9 @@ fn main() -> Result<()> {
         window.on_grid_escape(move || {
             // Read active-state into a local so the guard drops before any
             // `invoke_*`/`set_*`.
-            let was_active = selection_ref.lock().unwrap().is_active();
+            let was_active = selection_ref.lock().is_active();
             if was_active {
-                selection_ref.lock().unwrap().clear();
+                selection_ref.lock().clear();
                 selection_dirty_ref.store(true, Ordering::Relaxed);
                 if let Some(w) = weak.upgrade() {
                     push_statusline(&w, &selection_ref, &state_ref);
@@ -1237,14 +1229,14 @@ fn main() -> Result<()> {
                 Some(w) => (w.get_size_lo(), w.get_size_hi(), w.get_gps_mode()),
                 None => return,
             };
-            let exts = selected_exts_ref.lock().unwrap().clone();
+            let exts = selected_exts_ref.lock().clone();
             let mut new_filters = build_filters(lo, hi, size_bounds, &exts, gps_mode);
             let label = build_size_label(lo, hi, size_bounds);
             if let Some(w) = weak.upgrade() {
                 w.set_size_label(label);
             }
             {
-                let mut stored = filters_ref.lock().unwrap();
+                let mut stored = filters_ref.lock();
                 new_filters.carry_tag_filter_from(&stored);
                 *stored = new_filters.clone();
             }
@@ -1276,14 +1268,14 @@ fn main() -> Result<()> {
         window.on_ext_toggled(move |name| {
             let ext = name.to_string().to_lowercase();
             {
-                let mut set = selected_exts_ref.lock().unwrap();
+                let mut set = selected_exts_ref.lock();
                 if set.contains(&ext) {
                     set.remove(&ext);
                 } else {
                     set.insert(ext);
                 }
             }
-            let active_exts = selected_exts_ref.lock().unwrap().clone();
+            let active_exts = selected_exts_ref.lock().clone();
             let model = build_chips_model(&all_exts_et, &active_exts);
             let (lo, hi, gps_mode) = weak
                 .upgrade()
@@ -1294,7 +1286,7 @@ fn main() -> Result<()> {
             }
             let mut new_filters = build_filters(lo, hi, size_bounds, &active_exts, gps_mode);
             {
-                let mut stored = filters_ref.lock().unwrap();
+                let mut stored = filters_ref.lock();
                 new_filters.carry_tag_filter_from(&stored);
                 *stored = new_filters.clone();
             }
@@ -1330,10 +1322,10 @@ fn main() -> Result<()> {
                 .upgrade()
                 .map(|w| (w.get_size_lo(), w.get_size_hi()))
                 .unwrap_or((0.0, 1.0));
-            let exts = selected_exts_ref.lock().unwrap().clone();
+            let exts = selected_exts_ref.lock().clone();
             let mut new_filters = build_filters(lo, hi, size_bounds, &exts, mode);
             {
-                let mut stored = filters_ref.lock().unwrap();
+                let mut stored = filters_ref.lock();
                 new_filters.carry_tag_filter_from(&stored);
                 *stored = new_filters.clone();
             }
@@ -1365,7 +1357,7 @@ fn main() -> Result<()> {
         window.on_filter_tags_committed(move |text| {
             let Some(w) = weak.upgrade() else { return };
             let new_filters = {
-                let mut f = filters_ref.lock().unwrap();
+                let mut f = filters_ref.lock();
                 tagset::set_words(&mut f.tags, text.as_str());
                 push_filter_tags(&w, &f);
                 f.clone()
@@ -1396,7 +1388,7 @@ fn main() -> Result<()> {
         window.on_filter_tag_remove(move |tag| {
             let Some(w) = weak.upgrade() else { return };
             let new_filters = {
-                let mut f = filters_ref.lock().unwrap();
+                let mut f = filters_ref.lock();
                 tagset::remove(&mut f.tags, tag.as_str());
                 push_filter_tags(&w, &f);
                 f.clone()
@@ -1428,7 +1420,7 @@ fn main() -> Result<()> {
         window.on_tag_match_toggled(move || {
             let Some(w) = weak.upgrade() else { return };
             let new_filters = {
-                let mut f = filters_ref.lock().unwrap();
+                let mut f = filters_ref.lock();
                 f.tag_match = match f.tag_match {
                     TagMatch::AllOf => TagMatch::AnyOf,
                     TagMatch::AnyOf => TagMatch::AllOf,
@@ -1462,7 +1454,7 @@ fn main() -> Result<()> {
         window.on_tags_enabled_toggled(move || {
             let Some(w) = weak.upgrade() else { return };
             let new_filters = {
-                let mut f = filters_ref.lock().unwrap();
+                let mut f = filters_ref.lock();
                 f.tags_enabled = !f.tags_enabled;
                 push_filter_tags(&w, &f);
                 f.clone()
@@ -1519,8 +1511,8 @@ fn main() -> Result<()> {
             // Capture the currently selected item's id BEFORE the resort,
             // so we can follow it to its new position after the direction flip.
             let prev_id: Option<i64> = {
-                let sel = *sel_handles.selected.lock().unwrap();
-                let s = state_ref.lock().unwrap();
+                let sel = *sel_handles.selected.lock();
+                let s = state_ref.lock();
                 sel.and_then(|i| s.results.get(i)).map(|r| r.id)
             };
             apply_sort_change(
@@ -1545,11 +1537,11 @@ fn main() -> Result<()> {
         window.on_brush_committed(move |idx, text| {
             let Some(w) = weak.upgrade() else { return };
             {
-                let mut b = brushes_ref.lock().unwrap();
+                let mut b = brushes_ref.lock();
                 if let Some(slot) = b.get_mut(idx as usize) {
                     tagset::set_words(slot, text.as_str());
                 }
-                let recent = mm_ref.lock().unwrap();
+                let recent = mm_ref.lock();
                 push_rail_models(&w, &b, &recent);
             }
             persist_rail(&backend_bc, &brushes_ref, &mm_ref, w.get_rail_visible());
@@ -1565,11 +1557,11 @@ fn main() -> Result<()> {
         window.on_brush_remove(move |idx, tag| {
             let Some(w) = weak.upgrade() else { return };
             {
-                let mut b = brushes_ref.lock().unwrap();
+                let mut b = brushes_ref.lock();
                 if let Some(slot) = b.get_mut(idx as usize) {
                     tagset::remove(slot, tag.as_str());
                 }
-                let recent = mm_ref.lock().unwrap();
+                let recent = mm_ref.lock();
                 push_rail_models(&w, &b, &recent);
             }
             persist_rail(&backend_br, &brushes_ref, &mm_ref, w.get_rail_visible());
@@ -1585,8 +1577,8 @@ fn main() -> Result<()> {
         window.on_recent_remove(move |tag| {
             let Some(w) = weak.upgrade() else { return };
             {
-                let b = brushes_ref.lock().unwrap();
-                let mut recent = mm_ref.lock().unwrap();
+                let b = brushes_ref.lock();
+                let mut recent = mm_ref.lock();
                 tagset::remove(&mut recent, tag.as_str());
                 push_rail_models(&w, &b, &recent);
             }
@@ -1623,11 +1615,11 @@ fn main() -> Result<()> {
             }
             // Copy state out before any `invoke_*` so no guard is held across a
             // re-entrant UI callback (tile-selected re-locks `selected`).
-            let empty = state_ref.lock().unwrap().results.is_empty();
+            let empty = state_ref.lock().results.is_empty();
             if empty {
                 return;
             }
-            let idx = selected_ref.lock().unwrap().unwrap_or(0);
+            let idx = selected_ref.lock().unwrap_or(0);
             w.invoke_tile_selected(idx as i32);
         });
     }
@@ -1701,7 +1693,7 @@ fn main() -> Result<()> {
 
             // Advance the pure chord state machine.
             let (next, action) = {
-                let mut pend = pending_chord.lock().unwrap();
+                let mut pend = pending_chord.lock();
                 let (next, action) = chords::resolve(*pend, key.as_str());
                 *pend = next;
                 (next, action)
@@ -1714,7 +1706,7 @@ fn main() -> Result<()> {
                     TimerMode::SingleShot,
                     Duration::from_millis(800),
                     move || {
-                        *pc.lock().unwrap() = chords::Pending::None;
+                        *pc.lock() = chords::Pending::None;
                     },
                 );
             } else {
@@ -1748,7 +1740,7 @@ fn main() -> Result<()> {
                     paint_brush_by_index(c.index(), &paint_ctx);
                 }
                 chords::Action::RepeatLast => {
-                    let tags = mm_ref.lock().unwrap().clone();
+                    let tags = mm_ref.lock().clone();
                     let paths = selected_paths(&selection_ref, &state_ref);
                     if paths.is_empty() {
                         apply_tags_to_focused(&weak, &backend_key, &tag_ctx, tags);
@@ -1758,8 +1750,8 @@ fn main() -> Result<()> {
                 }
                 chords::Action::LoadBrushIntoFilter(c) => {
                     let new_filters = {
-                        let tags = brushes_ref.lock().unwrap()[c.index()].clone();
-                        let mut f = filters_ref.lock().unwrap();
+                        let tags = brushes_ref.lock()[c.index()].clone();
+                        let mut f = filters_ref.lock();
                         f.tags = tags;
                         push_filter_tags(&w, &f);
                         f.clone()
@@ -1777,7 +1769,7 @@ fn main() -> Result<()> {
                 }
                 chords::Action::ToggleTagFilter => {
                     let new_filters = {
-                        let mut f = filters_ref.lock().unwrap();
+                        let mut f = filters_ref.lock();
                         f.tags_enabled = !f.tags_enabled;
                         push_filter_tags(&w, &f);
                         f.clone()
@@ -1824,8 +1816,8 @@ fn main() -> Result<()> {
             } else {
                 apply_tags_to_paths(&weak, &backend_modal, &tag_ctx, paths, tags.clone());
             }
-            *mm_ref.lock().unwrap() = tags;
-            push_rail_models(&w, &brushes_ref.lock().unwrap(), &mm_ref.lock().unwrap());
+            *mm_ref.lock() = tags;
+            push_rail_models(&w, &brushes_ref.lock(), &mm_ref.lock());
             w.set_tag_modal_open(false);
         });
     }
@@ -1915,7 +1907,7 @@ fn main() -> Result<()> {
         }
         Ok(None) => {
             init_fresh_rail(&window, &brushes, &mm_buffer);
-            push_filter_tags(&window, &filters.lock().unwrap());
+            push_filter_tags(&window, &filters.lock());
             start_default_browse(
                 window.as_weak(),
                 Arc::clone(&state),
@@ -1928,7 +1920,7 @@ fn main() -> Result<()> {
         Err(e) => {
             tracing::warn!("Failed to read persisted session, starting fresh: {e:#}");
             init_fresh_rail(&window, &brushes, &mm_buffer);
-            push_filter_tags(&window, &filters.lock().unwrap());
+            push_filter_tags(&window, &filters.lock());
             start_default_browse(
                 window.as_weak(),
                 Arc::clone(&state),
@@ -2041,8 +2033,8 @@ fn init_fresh_rail(
     brushes: &Arc<Mutex<[Vec<String>; 5]>>,
     mm_buffer: &Arc<Mutex<Vec<String>>>,
 ) {
-    let b = brushes.lock().unwrap();
-    let recent = mm_buffer.lock().unwrap();
+    let b = brushes.lock();
+    let recent = mm_buffer.lock();
     push_rail_models(window, &b, &recent);
     window.set_rail_visible(true);
 }
@@ -2059,10 +2051,10 @@ fn persist_rail(
 ) {
     let mut st = backend.get_ui_state().ok().flatten().unwrap_or_default();
     {
-        let b = brushes.lock().unwrap();
+        let b = brushes.lock();
         st.brushes = std::array::from_fn(|i| imgfind::ui_state::TagBrush { tags: b[i].clone() });
     }
-    st.recent_tags = mm_buffer.lock().unwrap().clone();
+    st.recent_tags = mm_buffer.lock().clone();
     st.rail_visible = rail_visible;
     if let Err(e) = backend.set_ui_state(&st) {
         tracing::warn!("Failed to persist rail state: {e:#}");
@@ -2092,14 +2084,14 @@ fn start_default_browse(
     // set_total_items and render the grid. Mirror the pattern used by every
     // other browse/search caller (lines ~318, ~1217).
     {
-        let mut s = state_ref.lock().unwrap();
+        let mut s = state_ref.lock();
         s.sort = sort;
         s.start_search(String::new());
     }
     // Pre-seed the selection to 0; apply_fetch_result re-clamps it to 0 when
     // results are non-empty (reset=false keeps an in-range index). A freshly
     // opened DB with zero images clears it to None via the filter.
-    *selection.selected.lock().unwrap() = Some(0);
+    *selection.selected.lock() = Some(0);
     spawn_browse(
         weak,
         state_ref,
@@ -2207,7 +2199,7 @@ fn restore_session(st: UiState, ctx: RestoreCtx<'_>) {
     let results_len = rows.len();
     let is_search = mode_is_search(&st.mode);
     {
-        let mut s = ctx.state.lock().unwrap();
+        let mut s = ctx.state.lock();
         s.start_search(String::new());
         s.sort = st.sort;
         if is_search {
@@ -2236,7 +2228,7 @@ fn restore_session(st: UiState, ctx: RestoreCtx<'_>) {
             }
         }
     };
-    *ctx.search_mode.lock().unwrap() = restored_mode;
+    *ctx.search_mode.lock() = restored_mode;
 
     // Install the grid: total-items spans the full set, clearing tiles + bumping
     // the generation makes the loader timer rebuild the visible window.
@@ -2246,7 +2238,7 @@ fn restore_session(st: UiState, ctx: RestoreCtx<'_>) {
 
     // Fresh session has no multi-selection; ensure it is clear and mark dirty so
     // the loader tick pushes a `NORMAL` statusline with the restored set's count.
-    ctx.selection.lock().unwrap().clear();
+    ctx.selection.lock().clear();
     ctx.selection_dirty.store(true, Ordering::Relaxed);
 
     // 2. Search text — programmatic set does NOT fire `search` (only `accepted`
@@ -2255,7 +2247,7 @@ fn restore_session(st: UiState, ctx: RestoreCtx<'_>) {
 
     // 3. Selection — clamp the stored index to the restored length.
     let sel = st.selected_index.filter(|&i| i < results_len);
-    *ctx.selected.lock().unwrap() = sel;
+    *ctx.selected.lock() = sel;
     w.set_selected_index(sel.map(|i| i as i32).unwrap_or(-1));
 
     // 4. Scroll — the stored value is the raw (<= 0) viewport-y; the loader timer
@@ -2273,8 +2265,8 @@ fn restore_session(st: UiState, ctx: RestoreCtx<'_>) {
     //    filter widgets back to the persisted state.
     {
         let exts: HashSet<String> = st.filters.extensions.iter().cloned().collect();
-        *ctx.filters.lock().unwrap() = st.filters.clone();
-        *ctx.selected_exts.lock().unwrap() = exts.clone();
+        *ctx.filters.lock() = st.filters.clone();
+        *ctx.selected_exts.lock() = exts.clone();
         let lo = bytes_to_fraction(
             st.filters.size_min,
             ctx.size_bounds.0,
@@ -2304,12 +2296,12 @@ fn restore_session(st: UiState, ctx: RestoreCtx<'_>) {
         && let Some(idx) = sel
     {
         let path = {
-            let s = ctx.state.lock().unwrap();
+            let s = ctx.state.lock();
             s.results.get(idx).map(|r| r.path.clone())
         };
         if let Some(path) = path {
             let ds = select(path.clone());
-            *ctx.detail.lock().unwrap() = Some(ds.clone());
+            *ctx.detail.lock() = Some(ds.clone());
             let cached = detail_cache::get(&path);
             w.set_detail_open(true);
             w.set_detail_filename(ds.filename.into());
@@ -2342,7 +2334,7 @@ fn restore_session(st: UiState, ctx: RestoreCtx<'_>) {
                 std::thread::spawn(move || {
                     let tags = backend3.tags_for(&path_for_tags).unwrap_or_default();
                     let _ = slint::invoke_from_event_loop(move || {
-                        if detail_shows(&detail3.lock().unwrap(), &path_for_tags)
+                        if detail_shows(&detail3.lock(), &path_for_tags)
                             && let Some(w) = weak3.upgrade()
                         {
                             push_detail_tags(&w, &tags);
@@ -2356,11 +2348,11 @@ fn restore_session(st: UiState, ctx: RestoreCtx<'_>) {
     // 8. Left rail — load the brushes/recent buffer from the persisted state,
     //    push the models, and restore rail visibility.
     {
-        let mut b = ctx.brushes.lock().unwrap();
+        let mut b = ctx.brushes.lock();
         for (i, slot) in b.iter_mut().enumerate() {
             *slot = st.brushes[i].tags.clone();
         }
-        let mut recent = ctx.mm_buffer.lock().unwrap();
+        let mut recent = ctx.mm_buffer.lock();
         *recent = st.recent_tags.clone();
         push_rail_models(&w, &b, &recent);
     }
@@ -2385,12 +2377,12 @@ fn persist_session(
     mm_buffer: &Arc<Mutex<Vec<String>>>,
 ) {
     let (result_ids, sort) = {
-        let s = state.lock().unwrap();
+        let s = state.lock();
         (s.results.iter().map(|r| r.id).collect::<Vec<i64>>(), s.sort)
     };
     let search_text;
     let mode = {
-        let m = search_mode.lock().unwrap().clone();
+        let m = search_mode.lock().clone();
         match m {
             SearchMode::Text(q) if q.is_empty() => {
                 search_text = String::new();
@@ -2419,16 +2411,16 @@ fn persist_session(
         search_text,
         mode,
         sort,
-        filters: filters.lock().unwrap().clone(),
+        filters: filters.lock().clone(),
         result_ids,
-        selected_index: *selected.lock().unwrap(),
-        detail_open: detail.lock().unwrap().is_some(),
+        selected_index: *selected.lock(),
+        detail_open: detail.lock().is_some(),
         scroll_y: window.get_grid_viewport_y(),
         brushes: {
-            let b = brushes.lock().unwrap();
+            let b = brushes.lock();
             std::array::from_fn(|i| imgfind::ui_state::TagBrush { tags: b[i].clone() })
         },
-        recent_tags: mm_buffer.lock().unwrap().clone(),
+        recent_tags: mm_buffer.lock().clone(),
         rail_visible: window.get_rail_visible(),
     };
 
@@ -2498,7 +2490,7 @@ fn apply_sort_change(
             .unwrap_or_else(|| "Name".to_string())
     };
     let dir = if desc { SortDir::Desc } else { SortDir::Asc };
-    let mode = mode_ref.lock().unwrap().clone();
+    let mode = mode_ref.lock().clone();
     match mode {
         SearchMode::Text(q) if q.is_empty() => {
             // Browse mode: re-issue the browse query with the new sort.
@@ -2506,8 +2498,8 @@ fn apply_sort_change(
                 key: option_str_to_sort_key(&option_str),
                 dir,
             };
-            state_ref.lock().unwrap().sort = sort;
-            let current_filters = filters_ref.lock().unwrap().clone();
+            state_ref.lock().sort = sort;
+            let current_filters = filters_ref.lock().clone();
             spawn_browse(
                 weak,
                 state_ref,
@@ -2520,7 +2512,7 @@ fn apply_sort_change(
         _ => {
             // Search/similar mode: in-memory resort (no backend round-trip).
             {
-                let mut s = state_ref.lock().unwrap();
+                let mut s = state_ref.lock();
                 if option_str == "Relevance" {
                     s.resort_to_relevance();
                     // Keep sort field as default placeholder — Relevance has
@@ -2539,7 +2531,7 @@ fn apply_sort_change(
             // The row order changed: drop the multi-selection (its indices point
             // into the old order) and mark dirty so the tick re-statuses.
             selection.clear();
-            let results = state_ref.lock().unwrap().results.clone();
+            let results = state_ref.lock().results.clone();
             apply_selection_after_results(&w, &selection.selected, &results, &after);
         }
     }
@@ -2560,10 +2552,10 @@ fn fire_debounced_query(
     filters: Filters,
     selection: SelectionHandles,
 ) {
-    let mode = mode_ref.lock().unwrap().clone();
+    let mode = mode_ref.lock().clone();
     match mode {
         SearchMode::Text(query) if !query.is_empty() => {
-            state_ref.lock().unwrap().start_search(query.clone());
+            state_ref.lock().start_search(query.clone());
             if let Some(w) = weak.upgrade() {
                 w.set_status("Searching\u{2026}".into());
                 w.set_can_search(false);
@@ -2581,7 +2573,7 @@ fn fire_debounced_query(
         // Text("") = browse mode (or idle — browse with filters anyway).
         // Text("") with default filters — restore idle state, nothing to browse.
         SearchMode::Text(_) if filters == Filters::default() => {
-            *selection.selected.lock().unwrap() = None;
+            *selection.selected.lock() = None;
             // Drop the multi-selection too: the result list is gone.
             selection.clear();
             // Bump the generation so the loader timer resets and stops loading.
@@ -2595,7 +2587,7 @@ fn fire_debounced_query(
         }
         // Text("") with active filters — browse with filters.
         SearchMode::Text(_) => {
-            state_ref.lock().unwrap().start_search(String::new());
+            state_ref.lock().start_search(String::new());
             if let Some(w) = weak.upgrade() {
                 w.set_status("Searching\u{2026}".into());
                 w.set_can_search(false);
@@ -2610,7 +2602,7 @@ fn fire_debounced_query(
             );
         }
         SearchMode::Similar(seed) => {
-            state_ref.lock().unwrap().start_search(seed.clone());
+            state_ref.lock().start_search(seed.clone());
             if let Some(w) = weak.upgrade() {
                 let filename = filename_of(&seed);
                 w.set_status(format!("Similar to {filename}").into());
@@ -2730,7 +2722,7 @@ fn loader_tick(t: LoaderTick<'_>) {
     let cols = t.window.get_cols().max(0) as usize;
     let viewport_h = t.window.get_grid_viewport_h();
     let scroll_px = (-t.window.get_grid_viewport_y()).max(0.0);
-    let total = t.state_ref.lock().unwrap().results.len();
+    let total = t.state_ref.lock().results.len();
     let (first_row, last_row) = window::visible_rows(scroll_px, viewport_h, window::TILE_PITCH_Y);
     let range = window::window_range(first_row, last_row, cols, total);
 
@@ -2740,7 +2732,7 @@ fn loader_tick(t: LoaderTick<'_>) {
     let selection_changed = t.selection_dirty.swap(false, Ordering::Relaxed);
     let range_changed = t.last_range.as_ref() != Some(&range);
     if range_changed || gen_changed || cached_new || selection_changed {
-        let sel = t.selection.lock().unwrap().set().clone();
+        let sel = t.selection.lock().set().clone();
         rebuild_window(t.window, t.state_ref, t.cache, &range, &sel);
         if range_changed || gen_changed {
             tracing::debug!(
@@ -2761,7 +2753,7 @@ fn loader_tick(t: LoaderTick<'_>) {
 
     // 4. Request missing thumbnails for the visible window.
     let paths: Vec<String> = {
-        let s = t.state_ref.lock().unwrap();
+        let s = t.state_ref.lock();
         s.results
             .get(range.clone())
             .map(|slice| slice.iter().map(|r| r.path.clone()).collect())
@@ -2790,7 +2782,7 @@ fn rebuild_window(
     selected: &BTreeSet<usize>,
 ) {
     let slice: Vec<RowMeta> = {
-        let s = state_ref.lock().unwrap();
+        let s = state_ref.lock();
         s.results
             .get(range.clone())
             .map(<[_]>::to_vec)
@@ -2810,8 +2802,8 @@ fn push_statusline(
     state: &Arc<Mutex<SearchState>>,
 ) {
     let line = {
-        let sel = selection.lock().unwrap();
-        let s = state.lock().unwrap();
+        let sel = selection.lock();
+        let s = state.lock();
         format_statusline(&sel, &s.results)
     };
     w.set_statusline(line.into());
@@ -2853,7 +2845,7 @@ fn apply_fetch_result(
         let Some(w) = weak.upgrade() else { return };
 
         let (vs, error_msg, results) = {
-            let mut s = state_ref.lock().unwrap();
+            let mut s = state_ref.lock();
             match res {
                 Ok(rows) => {
                     if is_search {
@@ -2879,7 +2871,7 @@ fn apply_fetch_result(
         // The result list was replaced: drop the vim-style multi-selection (its
         // indices would dangle into the old set) and mark it dirty so the loader
         // tick rebuilds the grid and refreshes the statusline for the new set.
-        sel.selection.lock().unwrap().clear();
+        sel.selection.lock().clear();
         sel.selection_dirty.store(true, Ordering::Relaxed);
 
         apply_selection_after_results(&w, &sel.selected, &results, &sel.after);
@@ -2898,7 +2890,7 @@ fn apply_fetch_result(
             w.set_sort_options(make_sort_options_model(true));
             w.set_sort_index(0); // Relevance selected by default
             w.set_sort_desc(false);
-            state_ref.lock().unwrap().sort = Sort::default();
+            state_ref.lock().sort = Sort::default();
         }
     })
     .ok();
@@ -2965,11 +2957,11 @@ fn clear_to_browse(
     filters: Filters,
     sel: SelectionPolicy,
 ) {
-    *lb.lock().unwrap() = None;
-    *detail.lock().unwrap() = None;
-    *mode.lock().unwrap() = SearchMode::Text(String::new());
+    *lb.lock() = None;
+    *detail.lock() = None;
+    *mode.lock() = SearchMode::Text(String::new());
     {
-        let mut s = state.lock().unwrap();
+        let mut s = state.lock();
         s.sort = Sort::default();
         s.start_search(String::new());
     }
@@ -3006,7 +2998,7 @@ fn spawn_browse(
     sel: SelectionPolicy,
 ) {
     std::thread::spawn(move || {
-        let sort = state_ref.lock().unwrap().sort;
+        let sort = state_ref.lock().sort;
         let res = backend.browse(&filters, &sort);
         // Check model readiness just before marshalling back to the UI thread.
         // For the startup browse this races the model load; the model_timer owns
@@ -3026,9 +3018,9 @@ fn apply_selection_after_results(
     results: &[RowMeta],
     after: &SelectAfter,
 ) {
-    let prev = *selected_ref.lock().unwrap();
+    let prev = *selected_ref.lock();
     let new_sel = resolve_selection(after, results, prev);
-    *selected_ref.lock().unwrap() = new_sel;
+    *selected_ref.lock() = new_sel;
     w.set_selected_index(new_sel.map(|i| i as i32).unwrap_or(-1));
 }
 
@@ -3044,21 +3036,16 @@ fn focused_path(
 ) -> Option<String> {
     // Copy the index out before locking `state` so we never hold two locks at
     // once in an order that could deadlock against another path.
-    let lb = *lb_index.lock().unwrap();
+    let lb = *lb_index.lock();
     if let Some(i) = lb {
-        return state.lock().unwrap().results.get(i).map(|r| r.path.clone());
+        return state.lock().results.get(i).map(|r| r.path.clone());
     }
-    let detail_path = detail.lock().unwrap().as_ref().map(|d| d.path.clone());
+    let detail_path = detail.lock().as_ref().map(|d| d.path.clone());
     if let Some(p) = detail_path {
         return Some(p);
     }
-    let sel = (*selected.lock().unwrap())?;
-    state
-        .lock()
-        .unwrap()
-        .results
-        .get(sel)
-        .map(|r| r.path.clone())
+    let sel = (*selected.lock())?;
+    state.lock().results.get(sel).map(|r| r.path.clone())
 }
 
 /// Holders needed to resolve the focused image and refresh the detail panel
@@ -3092,7 +3079,7 @@ fn paint_brush_by_index(idx: usize, ctx: &PaintCtx) {
     let Some(w) = ctx.weak.upgrade() else {
         return;
     };
-    let Some(tags) = ctx.brushes.lock().unwrap().get(idx).cloned() else {
+    let Some(tags) = ctx.brushes.lock().get(idx).cloned() else {
         return;
     };
     let paths = selected_paths(&ctx.selection, &ctx.state);
@@ -3101,8 +3088,8 @@ fn paint_brush_by_index(idx: usize, ctx: &PaintCtx) {
     } else {
         apply_tags_to_paths(&ctx.weak, &ctx.backend, &ctx.tag_ctx, paths, tags.clone());
     }
-    *ctx.mm.lock().unwrap() = tags;
-    push_rail_models(&w, &ctx.brushes.lock().unwrap(), &ctx.mm.lock().unwrap());
+    *ctx.mm.lock() = tags;
+    push_rail_models(&w, &ctx.brushes.lock(), &ctx.mm.lock());
 }
 
 /// Apply `tags` to the currently-focused image (see [`focused_path`]).
@@ -3144,11 +3131,11 @@ fn selected_paths(
     selection: &Arc<Mutex<selection::Selection>>,
     state: &Arc<Mutex<SearchState>>,
 ) -> Vec<String> {
-    let sel = selection.lock().unwrap();
+    let sel = selection.lock();
     if !sel.is_active() || sel.is_empty() {
         return Vec::new();
     }
-    let s = state.lock().unwrap();
+    let s = state.lock();
     sel.set()
         .iter()
         .filter_map(|&i| s.results.get(i).map(|r| r.path.clone()))
@@ -3171,7 +3158,7 @@ fn apply_tags_to_paths(
     if tags.is_empty() || paths.is_empty() {
         return;
     }
-    let detail_path = ctx.detail.lock().unwrap().as_ref().map(|d| d.path.clone());
+    let detail_path = ctx.detail.lock().as_ref().map(|d| d.path.clone());
     let backend = backend.clone();
     let weak = weak.clone();
     std::thread::spawn(move || {
@@ -3272,7 +3259,7 @@ fn spawn_detail_image(
                         // worth keeping), but only paint it if the panel still
                         // shows this image.
                         detail_cache::insert(path.clone(), img.clone());
-                        if detail_shows(&detail.lock().unwrap(), &path) {
+                        if detail_shows(&detail.lock(), &path) {
                             w.set_detail_image(img);
                         }
                     }
@@ -3299,7 +3286,7 @@ fn spawn_detail_meta(
         slint::invoke_from_event_loop(move || {
             let Some(w) = weak.upgrade() else { return };
             // Skip the paint if a faster nav has already moved the panel on.
-            if !detail_shows(&detail.lock().unwrap(), &path) {
+            if !detail_shows(&detail.lock(), &path) {
                 return;
             }
             match meta_result {

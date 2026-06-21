@@ -20,20 +20,6 @@ _(none)_
 
 ## High
 
-### B3. Pervasive `.lock().unwrap()` in GUI event loop (poison-on-panic cascade): `Mutex locks across main.rs` (imgfind-gui/src/main.rs:121)
-- Category: api-surface
-- Impact: 15 (severity 3 × blast-radius 5)
-- Effort: M
-- Risk: medium
-- Evidence: ~149 `.lock().unwrap()` with no poison recovery; a panic in any thread holding a Mutex poisons it and every later caller panics with an opaque error, crashing the app and masking the original panic.
-- Blast radius: imgfind-gui/src/main.rs:121, imgfind-gui/src/main.rs:461, imgfind-gui/src/main.rs:485-487, imgfind-gui/src/main.rs:737
-- Proposed fix: Adopt `parking_lot::Mutex` (non-poisoning) or a small lock helper with `unwrap_or_else(|p| p.into_inner())`; add `catch_unwind`+log in spawned threads.
-- [x] execute   [ ] skip
-
-> **decision-needed (architectural):** B3 is a cross-cutting Mutex-strategy
-> change touching ~149 call sites — pick the approach (parking_lot vs. a
-> poison-recovering helper) before executing; not a drop-in surgical patch.
-
 ### B5. GUI startup `size_bounds()`/`extensions()` failures silently default the filter UI with no log: `size_bounds/extensions startup` (imgfind-gui/src/main.rs:1740)
 - Category: observability
 - Impact: 12 (severity 4 × blast-radius 3)
