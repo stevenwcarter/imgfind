@@ -2776,10 +2776,7 @@ fn loader_tick(t: LoaderTick<'_>) {
             .map(|slice| slice.iter().map(|r| r.path.clone()).collect())
             .unwrap_or_default()
     };
-    for path in paths {
-        if t.cache.contains(&path) || t.in_flight.contains(&path) {
-            continue;
-        }
+    for path in loader::select_to_request(&paths, t.cache, t.in_flight) {
         t.in_flight.insert(&path);
         // A send error means the worker has gone away (shutdown); ignore it.
         if t.req_tx.send((current_gen, path)).is_err() {

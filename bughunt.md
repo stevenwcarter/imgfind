@@ -42,15 +42,6 @@ _(none)_
 - Proposed fix: Propagate a writer-thread panic/join error as `Err`, or make the writer return a `Result` communicated via a shared channel.
 - [ ] execute   [ ] skip
 
-### B13. Thumbnail requests not deduped within a loader tick (fast-scroll herd): `loader tick/in_flight` (imgfind-gui/src/loader.rs:98)
-- Category: caching
-- Impact: 6 (severity 2 × blast-radius 3)
-- Effort: M
-- Risk: low
-- Evidence: `in_flight` HashSet dedups across ticks, but on a fast fling the 100ms tick can request the same uncached tiles repeatedly before responses arrive, queueing redundant decode requests to the worker.
-- Blast radius: imgfind-gui/src/loader.rs:98, imgfind-gui/src/main.rs:2771
-- Proposed fix: Within each tick, diff visible paths against cache+`in_flight` and send only newly-needed paths once.
-- [x] execute   [ ] skip
 
 ## Low
 

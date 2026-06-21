@@ -122,6 +122,37 @@ impl InFlight {
     }
 }
 
+/// Select which paths from `needed` should be requested from the thumbnail
+/// worker this tick: those not already in the cache or in-flight, deduped
+/// within `needed` (first occurrence of each path wins).
+pub fn select_to_request(
+    needed: &[String],
+    cache: &ThumbCache,
+    in_flight: &InFlight,
+) -> Vec<String> {
+    select_to_request_inner(needed, |p| cache.contains(p), in_flight)
+}
+
+/// Pure inner implementation that accepts an arbitrary "is cached?" predicate,
+/// making it testable without a live `slint::Image`.
+fn select_to_request_inner(
+    needed: &[String],
+    is_cached: impl Fn(&str) -> bool,
+    in_flight: &InFlight,
+) -> Vec<String> {
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut result = Vec::new();
+    for path in needed {
+        let key = path.as_str();
+        if seen.contains(key) || is_cached(key) || in_flight.contains(key) {
+            continue;
+        }
+        seen.insert(key);
+        result.push(path.clone());
+    }
+    result
+}
+
 /// Read the current grid generation.
 pub fn current_generation(counter: &Arc<AtomicU64>) -> u64 {
     counter.load(Ordering::SeqCst)
@@ -167,5 +198,26 @@ mod tests {
         // Sanity check the LRU honors capacity (uses a 1×1 image surrogate).
         let cache = new_cache();
         assert_eq!(cache.cap().get(), CACHE_CAPACITY);
+    }
+
+    #[test]
+    fn select_to_request_excludes_cached_and_in_flight() {
+        // "a" is cached, "b" is in-flight; only "c" should be returned.
+        let cached: HashSet<String> = ["a".to_string()].into();
+        let mut in_flight = InFlight::default();
+        in_flight.insert("b");
+        let needed = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let result = select_to_request_inner(&needed, |p| cached.contains(p), &in_flight);
+        assert_eq!(result, vec!["c".to_string()]);
+    }
+
+    #[test]
+    fn select_to_request_deduplicates_within_needed() {
+        // "a" appears twice; the second occurrence must be dropped.
+        let cached: HashSet<String> = HashSet::new();
+        let in_flight = InFlight::default();
+        let needed = vec!["a".to_string(), "a".to_string(), "b".to_string()];
+        let result = select_to_request_inner(&needed, |p| cached.contains(p), &in_flight);
+        assert_eq!(result, vec!["a".to_string(), "b".to_string()]);
     }
 }
