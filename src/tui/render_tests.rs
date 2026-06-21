@@ -16,8 +16,8 @@ use tui_input::Input;
 
 use super::app::{App, InputMode};
 use super::event::EventHandler;
-use crate::{block_on, database::Database};
 use crate::tui::app::{ImageEntry, SearchResult};
+use crate::{block_on, database::Database};
 
 /// Fixed terminal size for all render tests.
 const W: u16 = 80;

@@ -163,9 +163,8 @@ impl Backend {
     /// path. Falls back to decoding the file only when no stored row exists
     /// (e.g. metadata not yet backfilled).
     pub fn metadata(&self, rel_path: &str) -> Result<ImageMetadata> {
-        if let Some(meta) =
-            imgfind::block_on(self.db.get_image_metadata(&Self::rel(rel_path)))
-                .with_context(|| format!("Failed to read stored metadata for {rel_path}"))?
+        if let Some(meta) = imgfind::block_on(self.db.get_image_metadata(&Self::rel(rel_path)))
+            .with_context(|| format!("Failed to read stored metadata for {rel_path}"))?
         {
             return Ok(meta);
         }
@@ -349,14 +348,10 @@ mod tests {
         .expect("insert images");
 
         // Retrieve auto-assigned IDs so we can attach metadata.
-        let id_a = imgfind::block_on(
-            db.get_image_id(&AbsolutePath(db.parent_dir.join("a.jpg"))),
-        )
-        .expect("id for a.jpg");
-        let id_b = imgfind::block_on(
-            db.get_image_id(&AbsolutePath(db.parent_dir.join("b.png"))),
-        )
-        .expect("id for b.png");
+        let id_a = imgfind::block_on(db.get_image_id(&AbsolutePath(db.parent_dir.join("a.jpg"))))
+            .expect("id for a.jpg");
+        let id_b = imgfind::block_on(db.get_image_id(&AbsolutePath(db.parent_dir.join("b.png"))))
+            .expect("id for b.png");
 
         imgfind::block_on(db.insert_or_update_metadata(
             id_a,
@@ -430,10 +425,8 @@ mod tests {
         )]))
         .expect("insert image");
 
-        let id = imgfind::block_on(
-            db.get_image_id(&AbsolutePath(db.parent_dir.join("ghost.jpg"))),
-        )
-        .expect("id for ghost.jpg");
+        let id = imgfind::block_on(db.get_image_id(&AbsolutePath(db.parent_dir.join("ghost.jpg"))))
+            .expect("id for ghost.jpg");
 
         imgfind::block_on(db.insert_or_update_metadata(
             id,
