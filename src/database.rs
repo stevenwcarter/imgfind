@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose};
 use hashbrown::HashMap;
 use image::GenericImageView;
-use r2d2::Pool;
+use r2d2::{CustomizeConnection, Pool};
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::types::Value;
 use rusqlite::{
@@ -15,6 +15,7 @@ use sqlite_vec::sqlite3_vec_init;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tracing::info;
 use zerocopy::IntoBytes;
 
@@ -25,6 +26,25 @@ pub struct Database {
 }
 
 const MAX_JITTER: f64 = 0.000001;
+
+/// Duration used for `busy_timeout` on every pooled connection. Mirrors the
+/// value the thumbnail batch writer sets manually so all DB callers share the
+/// same contention budget.
+const POOL_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// r2d2 connection customizer that sets `busy_timeout` on every new pooled
+/// connection. Without this, a query that hits a locked page waits forever
+/// under concurrent load (grid queries, thumbnail worker, detail-panel lookups
+/// all contend on the same WAL file).
+#[derive(Debug)]
+struct BusyTimeoutCustomizer;
+
+impl CustomizeConnection<Connection, rusqlite::Error> for BusyTimeoutCustomizer {
+    fn on_acquire(&self, conn: &mut Connection) -> Result<(), rusqlite::Error> {
+        conn.busy_timeout(POOL_BUSY_TIMEOUT)?;
+        Ok(())
+    }
+}
 
 pub type ImageSearchResult = Result<Vec<(String, f32, Option<Vec<u8>>)>>;
 
@@ -63,6 +83,7 @@ impl Database {
             .min(32) as u32;
         let pool = r2d2::Pool::builder()
             .max_size(max_size)
+            .connection_customizer(Box::new(BusyTimeoutCustomizer))
             .build(manager)
             .with_context(|| format!("Failed to open database at {:?}", db_path))?;
 
@@ -1749,6 +1770,29 @@ mod tests {
         assert_eq!(fk_on, 1, "foreign_keys should be ON for pooled connections");
 
         // Remove the unique temp dir (grandparent of the .imgfind/imgfind.db path).
+        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+    }
+
+    /// `busy_timeout` must be set on every pooled connection, not just the one
+    /// opened by the thumbnail batch writer. `PRAGMA busy_timeout` returns the
+    /// current value in milliseconds so we can assert the customizer fired.
+    #[test]
+    fn busy_timeout_set_on_fresh_pool_connection() {
+        let db_path = temp_db_path();
+        let db = Database::new(&db_path).expect("create db");
+
+        // Hold the first connection so the pool must build a second, fresh one.
+        let _held = db.pool.get().expect("get first conn");
+        let conn = db.pool.get().expect("get second conn");
+        let timeout_ms: i64 = conn
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .expect("read pragma");
+        // POOL_BUSY_TIMEOUT is 5 s; SQLite reports it as 5000 ms.
+        assert_eq!(
+            timeout_ms, 5000,
+            "busy_timeout should be 5000 ms on every pooled connection"
+        );
+
         let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
     }
 

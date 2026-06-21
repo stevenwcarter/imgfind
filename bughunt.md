@@ -22,16 +22,6 @@ _(none)_
 
 ## Medium
 
-### B7. No `busy_timeout` on main r2d2 pool; possible stall under concurrent load: `Database::new pool` (src/database.rs:60)
-- Category: caching
-- Impact: 9 (severity 3 × blast-radius 3)
-- Effort: S
-- Risk: medium
-- Evidence: r2d2 pool `max_size = parallelism().min(32)`. The thumbnail worker holds one connection in a loop; concurrent grid/detail/metadata queries can exhaust the pool. No `busy_timeout` on the main pool (only the thumbnail batch writer at 89), so a contended query can hang indefinitely.
-- Blast radius: src/database.rs:64, imgfind-gui/src/loader.rs:36, imgfind-gui/src/preload.rs
-- Proposed fix: Add a `connection_customizer` to the pool builder in `Database::new` setting `conn.busy_timeout(2-5s)`.
-- [x] execute   [ ] skip
-
 ### B8. Pagination clamp re-caps `k` below `offset+limit` in `search_similar_images_meta`: `search_similar_images_meta` (src/database.rs:845)
 - Category: correctness
 - Impact: 8 (severity 4 × blast-radius 2)
