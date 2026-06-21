@@ -27,6 +27,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 
+use imgfind::ThumbnailSize;
 use lru::LruCache;
 use slint::Image;
 
@@ -82,7 +83,7 @@ pub fn spawn_thumb_worker(
         .name("thumb-worker".into())
         .spawn(move || {
             while let Ok((generation, path)) = requests.recv() {
-                let result = backend.thumbnail(&path, 300);
+                let result = backend.thumbnail(&path, ThumbnailSize(300));
                 // A send error means the UI dropped the receiver (shutdown); stop.
                 if responses.send((generation, path, result)).is_err() {
                     break;

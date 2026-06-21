@@ -37,7 +37,7 @@ use imgfind::filters::{Filters, GpsFilter, TagMatch};
 use imgfind::ids::ImageId;
 use imgfind::sort::{RowMeta, Sort, SortDir, SortKey};
 use imgfind::ui_state::{PersistedMode, UiState};
-use imgfind::units::FileSize;
+use imgfind::units::{FileSize, ThumbnailSize};
 use state::{SearchState, ViewState};
 
 /// Whether the current tile grid was populated by a text search or a
@@ -3252,7 +3252,7 @@ fn neighbor_paths(results: &[RowMeta], center: usize, n: usize) -> Vec<String> {
 fn spawn_preload(
     backend: Backend,
     paths: Vec<String>,
-    size: u32,
+    size: ThumbnailSize,
     preload_generation: Arc<AtomicU64>,
     my_gen: u64,
 ) {
@@ -3272,7 +3272,7 @@ fn spawn_preload(
 }
 
 /// 512px is the detail-panel preview size (matches `GUI_THUMBNAIL_SIZES`).
-const DETAIL_SIZE: u32 = 512;
+const DETAIL_SIZE: ThumbnailSize = ThumbnailSize(512);
 
 /// Load the detail-panel preview image for `path`, setting ONLY `detail_image`
 /// (never blocked on metadata).

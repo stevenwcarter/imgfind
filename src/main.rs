@@ -14,6 +14,7 @@ use walkdir::WalkDir;
 
 use imgfind::AbsolutePath;
 use imgfind::MaxK;
+use imgfind::ThumbnailSize;
 use imgfind::abs_to_relative_path;
 use imgfind::database::{Database, ImageMetadata, extract_image_metadata};
 use imgfind::indexing::chunk_pending;
@@ -694,16 +695,17 @@ fn index_directory(
     // the bind fails. Instead, count the images actually missing a thumbnail and
     // pass that exact number, which covers every one of them.
     if !no_thumbnails {
-        let missing =
-            imgfind::block_on(db.count_images_without_thumbnails(300)).unwrap_or_else(|e| {
+        let missing = imgfind::block_on(db.count_images_without_thumbnails(ThumbnailSize(300)))
+            .unwrap_or_else(|e| {
                 warn!("counting images without thumbnails failed (non-fatal): {e:#}");
                 0
             });
         if missing > 0 {
-            let made = generate_missing_thumbnails_batch(db, 300, missing).unwrap_or_else(|e| {
-                warn!("thumbnail generation failed (non-fatal): {e:#}");
-                0
-            });
+            let made = generate_missing_thumbnails_batch(db, ThumbnailSize(300), missing)
+                .unwrap_or_else(|e| {
+                    warn!("thumbnail generation failed (non-fatal): {e:#}");
+                    0
+                });
             if !quiet {
                 info!("Generated {made} thumbnails");
             }
@@ -1030,35 +1032,36 @@ fn handle_config_command(config_command: ConfigCommands) -> Result<()> {
 /// Duplicates are removed while preserving the first-occurrence order.
 ///
 /// Returns `Err` if any size is 0, since `image::resize(0, 0, …)` panics.
-fn resolve_thumbnail_sizes(sizes: &[u32], gui_sizes: bool) -> anyhow::Result<Vec<u32>> {
+fn resolve_thumbnail_sizes(sizes: &[u32], gui_sizes: bool) -> anyhow::Result<Vec<ThumbnailSize>> {
     if let Some(&bad) = sizes.iter().find(|&&s| s == 0) {
         anyhow::bail!("thumbnail size must be ≥ 1, got {bad}");
     }
-    let raw: Vec<u32> = if gui_sizes {
+    let raw: Vec<ThumbnailSize> = if gui_sizes {
         imgfind::thumbnail::GUI_THUMBNAIL_SIZES.to_vec()
     } else if sizes.is_empty() {
-        vec![300]
+        vec![ThumbnailSize(300)]
     } else {
-        sizes.to_vec()
+        sizes.iter().copied().map(ThumbnailSize).collect()
     };
     let mut seen = std::collections::HashSet::new();
     Ok(raw.into_iter().filter(|s| seen.insert(*s)).collect())
 }
 
 /// Generate thumbnails in batches for images that don't have cached thumbnails
-fn generate_thumbnails_batch(db: &mut Database, size: u32, count: usize) -> Result<()> {
+fn generate_thumbnails_batch(db: &mut Database, size: ThumbnailSize, count: usize) -> Result<()> {
+    let px = size.get();
     info!(
         "Starting thumbnail generation: size={}px, batch_count={}",
-        size, count
+        px, count
     );
 
     let generated = generate_missing_thumbnails_batch(db, size, count)
         .context("Failed to generate thumbnails")?;
 
     if generated == 0 {
-        println!("No images found that need thumbnails of size {}px", size);
+        println!("No images found that need thumbnails of size {}px", px);
     } else {
-        println!("Generated {} thumbnails of size {}px", generated, size);
+        println!("Generated {} thumbnails of size {}px", generated, px);
 
         // Check if there are more images that need thumbnails
         let remaining = imgfind::block_on(db.count_images_without_thumbnails(size))?;
@@ -1067,7 +1070,7 @@ fn generate_thumbnails_batch(db: &mut Database, size: u32, count: usize) -> Resu
                 "There are more images without thumbnails ({remaining}). Run the command again to generate more.",
             );
         } else {
-            println!("All images now have thumbnails of size {}px", size);
+            println!("All images now have thumbnails of size {}px", px);
         }
     }
 
@@ -1117,14 +1120,17 @@ mod gui_cli_tests {
 
     #[test]
     fn resolve_sizes_default_is_300() {
-        assert_eq!(resolve_thumbnail_sizes(&[], false).unwrap(), vec![300]);
+        assert_eq!(
+            resolve_thumbnail_sizes(&[], false).unwrap(),
+            vec![ThumbnailSize(300)]
+        );
     }
 
     #[test]
     fn resolve_sizes_gui_flag_expands() {
         assert_eq!(
             resolve_thumbnail_sizes(&[], true).unwrap(),
-            vec![300, 512, 2048]
+            vec![ThumbnailSize(300), ThumbnailSize(512), ThumbnailSize(2048)]
         );
     }
 
@@ -1132,7 +1138,7 @@ mod gui_cli_tests {
     fn resolve_sizes_explicit_dedup_preserves_order() {
         assert_eq!(
             resolve_thumbnail_sizes(&[512, 300, 512], false).unwrap(),
-            vec![512, 300]
+            vec![ThumbnailSize(512), ThumbnailSize(300)]
         );
     }
 

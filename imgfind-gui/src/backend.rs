@@ -15,7 +15,9 @@ use imgfind::search::SearchEngine;
 use imgfind::sort::{RowMeta, Sort};
 use imgfind::thumbnail::get_or_generate_thumbnail;
 use imgfind::ui_state::UiState;
-use imgfind::{AbsolutePath, FileSize, RelativePath, get_db_path, relative_to_abs_path};
+use imgfind::{
+    AbsolutePath, FileSize, RelativePath, ThumbnailSize, get_db_path, relative_to_abs_path,
+};
 
 /// Maximum number of ranked results fetched per search/similar query. The
 /// full ordered set lives in `SearchState`, but ranked vector search is
@@ -144,7 +146,7 @@ impl Backend {
         imgfind::block_on(self.db.file_size_bounds()).context("Failed to read size bounds")
     }
 
-    pub fn thumbnail(&self, rel_path: &str, size: u32) -> Result<Vec<u8>> {
+    pub fn thumbnail(&self, rel_path: &str, size: ThumbnailSize) -> Result<Vec<u8>> {
         let hash = imgfind::block_on(self.db.get_image_hash(&Self::rel(rel_path)))
             .with_context(|| format!("No hash for {rel_path}"))?;
         let abs = self.abs_path(rel_path);
@@ -286,10 +288,13 @@ mod tests {
             vec![0.0f32; 512],
         )]))
         .expect("insert image");
-        imgfind::block_on(db.insert_thumbnail("h", 300, &[1, 2, 3, 4])).expect("insert thumb");
+        imgfind::block_on(db.insert_thumbnail("h", ThumbnailSize(300), &[1, 2, 3, 4]))
+            .expect("insert thumb");
 
         let backend = backend_with(db);
-        let bytes = backend.thumbnail("a.jpg", 300).expect("thumb");
+        let bytes = backend
+            .thumbnail("a.jpg", ThumbnailSize(300))
+            .expect("thumb");
         assert_eq!(bytes, vec![1, 2, 3, 4]);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -504,7 +509,7 @@ mod tests {
 
         let backend = backend_with(db);
         let bytes = backend
-            .thumbnail("pic.png", 64)
+            .thumbnail("pic.png", ThumbnailSize(64))
             .expect("thumbnail from abs path");
         assert!(
             !bytes.is_empty(),

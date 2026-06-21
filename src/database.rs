@@ -1,7 +1,9 @@
 use crate::filters::{Filters, build_filter_clause_turso};
 use crate::ids::{CollectionId, ImageId, TagId};
 use crate::ui_state::UiState;
-use crate::{AbsolutePath, EmbeddingDim, MaxK, RelativePath, db_pool, get_db_parent_dir};
+use crate::{
+    AbsolutePath, EmbeddingDim, MaxK, RelativePath, ThumbnailSize, db_pool, get_db_parent_dir,
+};
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose};
 use hashbrown::HashMap;
@@ -1042,7 +1044,7 @@ impl Database {
     pub async fn insert_thumbnail(
         &self,
         image_hash: &str,
-        size: u32,
+        size: ThumbnailSize,
         thumbnail_data: &[u8],
     ) -> Result<()> {
         let conn = self
@@ -1053,7 +1055,11 @@ impl Database {
         conn.execute(
             "INSERT OR REPLACE INTO thumbnails (image_hash, size, thumbnail_data) \
              VALUES (?1, ?2, ?3)",
-            (image_hash.to_string(), size as i64, thumbnail_data.to_vec()),
+            (
+                image_hash.to_string(),
+                i64::from(size.get()),
+                thumbnail_data.to_vec(),
+            ),
         )
         .await
         .context("failed to insert or replace")?;
@@ -1061,7 +1067,7 @@ impl Database {
     }
 
     /// Get a thumbnail from the database cache.
-    pub async fn get_thumbnail(&self, image_hash: &str, size: u32) -> Result<Vec<u8>> {
+    pub async fn get_thumbnail(&self, image_hash: &str, size: ThumbnailSize) -> Result<Vec<u8>> {
         let conn = self
             .pool
             .get()
@@ -1070,7 +1076,7 @@ impl Database {
         let mut rows = conn
             .query(
                 "SELECT thumbnail_data FROM thumbnails WHERE image_hash = ?1 AND size = ?2",
-                (image_hash.to_string(), size as i64),
+                (image_hash.to_string(), i64::from(size.get())),
             )
             .await?;
         let row = rows.next().await?.context("no thumbnail row")?;
@@ -1101,7 +1107,7 @@ impl Database {
     /// Returns a list of `(path, hash)` tuples for images missing thumbnails.
     pub async fn get_images_without_thumbnails(
         &self,
-        size: u32,
+        size: ThumbnailSize,
         limit: usize,
     ) -> Result<Vec<(AbsolutePath, String)>> {
         let limit = i64::try_from(limit).context("thumbnail LIMIT exceeds i64 range")?;
@@ -1117,7 +1123,7 @@ impl Database {
                  LEFT JOIN thumbnails t ON i.hash = t.image_hash AND t.size = ?1 \
                  WHERE t.id IS NULL \
                  LIMIT ?2",
-                (size as i64, limit),
+                (i64::from(size.get()), limit),
             )
             .await?;
         let mut out = Vec::new();
@@ -1131,7 +1137,7 @@ impl Database {
     }
 
     /// Count images that don't have thumbnails of a specific size.
-    pub async fn count_images_without_thumbnails(&self, size: u32) -> Result<usize> {
+    pub async fn count_images_without_thumbnails(&self, size: ThumbnailSize) -> Result<usize> {
         let conn = self
             .pool
             .get()
@@ -1143,7 +1149,7 @@ impl Database {
                  FROM images i \
                  LEFT JOIN thumbnails t ON i.hash = t.image_hash AND t.size = ?1 \
                  WHERE t.id IS NULL",
-                (size as i64,),
+                (i64::from(size.get()),),
             )
             .await?;
         let row = rows.next().await?.context("COUNT returned no row")?;
@@ -2159,20 +2165,20 @@ mod tests {
 
         // usize::MAX overflows the i64 LIMIT bind and is rejected.
         assert!(
-            db.get_images_without_thumbnails(300, usize::MAX)
+            db.get_images_without_thumbnails(ThumbnailSize(300), usize::MAX)
                 .await
                 .is_err(),
             "usize::MAX must overflow the i64 LIMIT bind"
         );
 
         let missing = db
-            .count_images_without_thumbnails(300)
+            .count_images_without_thumbnails(ThumbnailSize(300))
             .await
             .expect("count missing thumbnails must succeed");
         assert_eq!(missing, 3, "all three images are missing a 300px thumbnail");
 
         let rows = db
-            .get_images_without_thumbnails(300, missing)
+            .get_images_without_thumbnails(ThumbnailSize(300), missing)
             .await
             .expect("real-count LIMIT bind must succeed");
         assert_eq!(rows.len(), 3, "the count value covers all missing images");

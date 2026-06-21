@@ -45,7 +45,7 @@ pub mod units;
 pub mod vector_sql;
 
 pub use ids::{CollectionId, ImageId, TagId};
-pub use units::{EmbeddingDim, FileSize, MaxK};
+pub use units::{EmbeddingDim, FileSize, MaxK, ThumbnailSize};
 
 pub fn get_db_path(dir: Option<&str>) -> Result<PathBuf> {
     // First, try to find existing database by walking up directory tree

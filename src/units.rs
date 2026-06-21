@@ -40,6 +40,20 @@ impl EmbeddingDim {
     }
 }
 
+/// A thumbnail's long-edge target in pixels (e.g. the GUI grid/detail/lightbox
+/// sizes 300/512/2048). A newtype so a pixel size can't be transposed with the
+/// batch `count`/`limit` or any other bare `u32` threaded through the thumbnail
+/// cache and the `thumbnails (image_hash, size)` table. Plain (no serde): sizes
+/// are compile-time constants and bound `i64` columns, never serialized structs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ThumbnailSize(pub u32);
+
+impl ThumbnailSize {
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,5 +73,11 @@ mod tests {
             "config.toml stores a bare integer"
         );
         assert_eq!(MaxK(100).get(), 100);
+    }
+
+    #[test]
+    fn thumbnail_size_exposes_pixel_value() {
+        assert_eq!(ThumbnailSize(512).get(), 512);
+        assert_eq!(ThumbnailSize(300), ThumbnailSize(300));
     }
 }
