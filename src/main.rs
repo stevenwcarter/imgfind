@@ -729,8 +729,7 @@ fn filter_results(
             // Paths from the DB are relative to parent_dir — make them absolute
             // before comparing against current_dir. Using canonicalize() on the
             // raw relative path would resolve against cwd, not parent_dir.
-            let abs_path =
-                imgfind::relative_to_abs_path(std::path::Path::new(path), parent_dir);
+            let abs_path = imgfind::relative_to_abs_path(std::path::Path::new(path), parent_dir);
             let abs_path = abs_path.canonicalize().unwrap_or(abs_path);
 
             if all {
@@ -798,8 +797,14 @@ fn search_images(
 
     // Filter results to those under current_dir, resolving DB-relative paths
     // against the DB parent directory (not cwd).
-    let filtered_results =
-        filter_results(all_results, &db.parent_dir, &current_dir, all, recursive, limit);
+    let filtered_results = filter_results(
+        all_results,
+        &db.parent_dir,
+        &current_dir,
+        all,
+        recursive,
+        limit,
+    );
 
     if filtered_results.is_empty() {
         if !short {
@@ -826,8 +831,7 @@ fn search_images(
         for (path, _score) in filtered_results.iter() {
             println!("{}", path);
             if display {
-                let abs =
-                    imgfind::relative_to_abs_path(std::path::Path::new(path), &db.parent_dir);
+                let abs = imgfind::relative_to_abs_path(std::path::Path::new(path), &db.parent_dir);
                 print_image(&abs.to_string_lossy()).context("Failed to display image")?;
             }
         }
@@ -849,8 +853,7 @@ fn search_images(
         for (i, (path, score)) in filtered_results.iter().enumerate() {
             println!("{:3}. {:<60} (similarity: {:.4})", i + 1, path, score);
             if display {
-                let abs =
-                    imgfind::relative_to_abs_path(std::path::Path::new(path), &db.parent_dir);
+                let abs = imgfind::relative_to_abs_path(std::path::Path::new(path), &db.parent_dir);
                 print_image(&abs.to_string_lossy()).context("Failed to display image")?;
             }
         }
