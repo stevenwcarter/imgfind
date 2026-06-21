@@ -2715,13 +2715,12 @@ fn loader_tick(t: LoaderTick<'_>) {
         }
         t.in_flight.remove(&path);
         match result {
-            Ok(bytes) => match loader::decode_thumb_bytes(&bytes) {
-                Some(img) => {
+            Ok(bytes) => {
+                if let Some(img) = loader::decode_thumb_bytes(&bytes, &path) {
                     t.cache.put(path, img);
                     cached_new = true;
                 }
-                None => tracing::warn!("thumb decode failed for {path}"),
-            },
+            }
             Err(e) => tracing::warn!("thumbnail fetch failed for {path}: {e}"),
         }
     }

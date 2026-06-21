@@ -54,9 +54,16 @@ pub fn new_cache() -> ThumbCache {
 }
 
 /// Decode raw JPEG bytes into a `slint::Image` (UI thread only — `Image` is
-/// `!Send`). Returns `None` on a decode failure (logged by the caller).
-pub fn decode_thumb_bytes(bytes: &[u8]) -> Option<Image> {
-    crate::image_util::jpeg_to_slint_image(bytes).ok()
+/// `!Send`). Returns `None` on a decode failure, logging the error with
+/// `tracing::warn!` so corrupt blobs are visible in the operator log.
+pub fn decode_thumb_bytes(bytes: &[u8], key: &str) -> Option<Image> {
+    match crate::image_util::jpeg_to_slint_image(bytes) {
+        Ok(img) => Some(img),
+        Err(e) => {
+            tracing::warn!(path = %key, "thumbnail decode failed: {e:#}");
+            None
+        }
+    }
 }
 
 /// Spawn the single background thumbnail worker.
@@ -130,6 +137,12 @@ pub fn bump_generation(counter: &Arc<AtomicU64>) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decode_thumb_bytes_returns_none_on_corrupt_input() {
+        // Truncated JPEG header — should fail gracefully and return None, not panic.
+        assert!(decode_thumb_bytes(&[0xFF, 0xD8, 0x00], "test-key").is_none());
+    }
 
     #[test]
     fn in_flight_insert_is_idempotent() {

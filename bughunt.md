@@ -20,16 +20,6 @@ _(none)_
 
 ## High
 
-### B1. Thumbnail decode errors silently dropped with `.ok()` in loader worker: `loader worker decode` (imgfind-gui/src/loader.rs:59)
-- Category: observability
-- Impact: 16 (severity 4 × blast-radius 4)
-- Effort: S
-- Risk: low
-- Evidence: `decode_thumb_bytes()` result is `.ok()`'d, so a corrupt JPEG blob yields no thumbnail AND no log — a failing/stalled worker path is invisible to the operator, presenting only as silently-missing tiles.
-- Blast radius: imgfind-gui/src/loader.rs:59
-- Proposed fix: Match the result and `tracing::warn!` (including the path) on `Err` before returning `None`.
-- [x] execute   [ ] skip
-
 ### B2. CLI search: relative DB paths passed to `canonicalize()`, resolved against cwd: `search command path handling` (src/main.rs:765)
 - Category: correctness
 - Impact: 15 (severity 5 × blast-radius 3)
