@@ -3807,12 +3807,10 @@ dependencies = [
  "lru",
  "open",
  "parking_lot",
- "rusqlite",
  "slint",
  "slint-build",
  "tracing",
  "tracing-subscriber",
- "zerocopy",
 ]
 
 [[package]]
