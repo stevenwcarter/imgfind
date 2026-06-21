@@ -51,13 +51,13 @@ imgfind search "sunset over mountains" --limit 5
 Search options:
 - `--threshold <f>` — max cosine distance to include (lower = stricter); overrides `[search].distance_threshold`
 - `--short` — print bare image paths, one per line (useful for piping)
-- `--recursive` — include images in subdirectories of the current directory
+- (search is recursive from the current directory by default; `--recursive`/`-r` is accepted but a no-op)
 - `--display` — render result images inline in supporting terminals
-- `--all` — return matches from anywhere in the database
+- `--all` — search the entire indexed database (including directories above the cwd)
 - `--model <name>` — embedding model to use for this run
 
 ```bash
-imgfind search "beach" --threshold 1.0 --recursive
+imgfind search "beach" --threshold 1.0
 imgfind search "beach" --short | xargs -I{} cp {} ~/selected/
 ```
 

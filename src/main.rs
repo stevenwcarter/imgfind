@@ -90,8 +90,8 @@ enum Commands {
         /// Output only image paths, one per line (useful for piping to other tools)
         #[arg(short, long)]
         short: bool,
-        /// Search recursively in subdirectories
-        #[arg(short, long)]
+        /// Deprecated: recursive search is now the default; this flag is a no-op.
+        #[arg(short, long, hide = true)]
         recursive: bool,
 
         /// Display image results
@@ -263,7 +263,7 @@ fn main() -> Result<()> {
             limit,
             threshold,
             short,
-            recursive,
+            recursive: _,
             all,
             display,
             model,
@@ -284,7 +284,6 @@ fn main() -> Result<()> {
                 distance_threshold,
                 max_k,
                 short,
-                recursive,
                 all,
                 display,
             )?;
@@ -778,7 +777,6 @@ fn filter_results(
     parent_dir: &std::path::Path,
     current_dir: &std::path::Path,
     all: bool,
-    recursive: bool,
     limit: usize,
 ) -> Vec<(String, f32)> {
     let current_dir_canonical = current_dir
@@ -796,12 +794,8 @@ fn filter_results(
 
             if all {
                 true
-            } else if recursive {
-                abs_path.starts_with(&current_dir_canonical)
             } else {
-                abs_path
-                    .parent()
-                    .is_some_and(|p| p == current_dir_canonical)
+                abs_path.starts_with(&current_dir_canonical)
             }
         })
         .take(limit)
@@ -817,7 +811,6 @@ fn search_images(
     distance_threshold: f32,
     max_k: usize,
     short: bool,
-    recursive: bool,
     all: bool,
     display: bool,
 ) -> Result<()> {
@@ -863,31 +856,20 @@ fn search_images(
 
     // Filter results to those under current_dir, resolving DB-relative paths
     // against the DB parent directory (not cwd).
-    let filtered_results = filter_results(
-        all_results,
-        &db.parent_dir,
-        &current_dir,
-        all,
-        recursive,
-        limit,
-    );
+    let filtered_results =
+        filter_results(all_results, &db.parent_dir, &current_dir, all, limit);
 
     if filtered_results.is_empty() {
         if !short {
-            if recursive {
-                println!(
-                    "No images found matching the query \"{}\" in current directory or subdirectories.",
-                    prompt
-                );
+            if all {
+                println!("No images found matching the query \"{}\".", prompt);
             } else {
                 println!(
-                    "No images found matching the query \"{}\" in current directory.",
+                    "No images found matching the query \"{}\" in the current directory or subdirectories.",
                     prompt
                 );
             }
-            println!(
-                "Try using --recursive to search subdirectories, or run 'imgfind index' to index current directory."
-            );
+            println!("Try running 'imgfind index' to index the current directory.");
         }
         return Ok(());
     }
@@ -903,10 +885,10 @@ fn search_images(
         }
     } else {
         // Standard format: detailed output with scores
-        let search_scope = if recursive {
-            "current directory and subdirectories"
+        let search_scope = if all {
+            "the database"
         } else {
-            "current directory"
+            "the current directory and subdirectories"
         };
         println!(
             "\nFound {} result{} for \"{}\" in {}:\n",
@@ -917,7 +899,10 @@ fn search_images(
         );
 
         for (i, (path, score)) in filtered_results.iter().enumerate() {
-            println!("{:3}. {:<60} (similarity: {:.4})", i + 1, path, score);
+            // `score` is cosine *distance* (lower = more similar). Results are
+            // already ordered best-first (distance ascending); convert to the
+            // familiar cosine similarity (1 - distance) for display.
+            println!("{:3}. {:<60} (similarity: {:.4})", i + 1, path, 1.0 - score);
             if display {
                 let abs = imgfind::relative_to_abs_path(std::path::Path::new(path), &db.parent_dir);
                 print_image(&abs.to_string_lossy()).context("Failed to display image")?;
@@ -1256,69 +1241,57 @@ mod tests {
         // which is the workspace root when cargo test runs).
         let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let parent_dir = manifest.join("src");
-        // "main.rs" exists under parent_dir/src, not directly under cwd.
+        // "main.rs" exists under parent_dir/src. With recursive search (now the
+        // default), it resolves to <manifest>/src/main.rs, which is under
+        // current_dir (== parent_dir) and so passes the filter.
         let results = vec![("main.rs".to_string(), 0.9_f32)];
         let out = filter_results(
             results,
             &parent_dir,
-            &parent_dir, // current_dir == parent_dir: non-recursive match expected
+            &parent_dir, // current_dir == parent_dir: recursive match expected
             false,       // not --all
-            false,       // non-recursive
             10,
         );
         assert_eq!(
             out.len(),
             1,
-            "main.rs under src/ must pass the non-recursive filter when cwd=src/"
+            "main.rs under src/ must pass the recursive filter when cwd=src/"
         );
     }
 
-    /// Discriminates `parent_dir` vs `current_dir` as the join base.
+    /// Proves search descends into subdirectories (the recursive default).
     ///
-    /// `parent_dir` is `CARGO_MANIFEST_DIR/src`, `current_dir` is `CARGO_MANIFEST_DIR`
-    /// (the workspace root, which is the real cwd when `cargo test` runs).  The
-    /// relative path `"main.rs"` exists only under `src/`, not under the workspace
-    /// root.
-    ///
-    /// With the **correct** base (`parent_dir`):
-    ///   abs = `CARGO_MANIFEST_DIR/src/main.rs`; parent = `.../src` ≠ `current_dir`
-    ///   → non-recursive filter **excludes** it (len == 0). ✓
-    ///
-    /// With the **wrong** base (`current_dir` used instead):
-    ///   abs = `CARGO_MANIFEST_DIR/main.rs`; canonicalize fails (file absent) → raw
-    ///   path kept; parent = `CARGO_MANIFEST_DIR` == `current_dir`
-    ///   → non-recursive filter **includes** it (len == 1). ✗
-    ///
-    /// A future regression substituting `current_dir` for `parent_dir` would flip
-    /// this assertion from 0 → 1 and be caught immediately.
+    /// `parent_dir` and `current_dir` are both `CARGO_MANIFEST_DIR`. The relative
+    /// path `"src/main.rs"` resolves to `<manifest>/src/main.rs`, a *nested*
+    /// subdirectory of cwd, and must pass the filter.
     #[test]
-    fn filter_results_join_base_is_parent_dir_not_current_dir() {
+    fn filter_results_includes_nested_subdirectory() {
         let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        // parent_dir is src/ (a real subdir); current_dir is the workspace root.
-        let parent_dir = manifest.join("src");
+        let parent_dir = manifest;
         let current_dir = manifest;
-        // "main.rs" lives at parent_dir/main.rs, not at current_dir/main.rs.
-        let results = vec![("main.rs".to_string(), 0.9_f32)];
+        // "src/main.rs" lives in a subdirectory of cwd.
+        let results = vec![("src/main.rs".to_string(), 0.9_f32)];
         let out = filter_results(
             results,
-            &parent_dir,
+            parent_dir,
             current_dir,
             false, // not --all
-            false, // non-recursive: checks abs_path.parent() == current_dir
             10,
         );
-        // Correct base (src/): abs parent is src/ ≠ workspace root → excluded.
-        // Wrong base (workspace root): abs parent is workspace root == current_dir → included.
         assert_eq!(
             out.len(),
-            0,
-            "main.rs under src/ must be EXCLUDED when cwd=workspace-root (non-recursive): \
-             parent of resolved path is src/, not the workspace root"
+            1,
+            "src/main.rs must be INCLUDED: recursive search descends into subdirectories"
         );
     }
 
-    /// With a different `current_dir`, the same result must be excluded in
-    /// non-recursive mode (boundary test).
+    /// With a different `current_dir`, a result under `parent_dir` must be
+    /// excluded (boundary test).
+    ///
+    /// This also guards that paths resolve against `parent_dir`, not cwd: the
+    /// relative `"Cargo.toml"` correctly resolves to `<manifest>/Cargo.toml`,
+    /// which is NOT under `/tmp` → excluded. A wrong cwd-based join would land it
+    /// under `/tmp` and wrongly include it.
     #[test]
     fn filter_results_excludes_when_current_dir_differs() {
         let parent_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1330,13 +1303,33 @@ mod tests {
             parent_dir,
             current_dir,
             false, // not --all
-            false, // non-recursive
             10,
         );
         assert_eq!(
             out.len(),
             0,
             "image under parent_dir must not appear when cwd=/tmp"
+        );
+    }
+
+    /// The `--all` flag ignores the directory filter entirely.
+    #[test]
+    fn filter_results_all_bypasses_directory_filter() {
+        let parent_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        // current_dir is /tmp (unrelated), but --all must include the row anyway.
+        let current_dir = std::path::Path::new("/tmp");
+        let results = vec![("Cargo.toml".to_string(), 0.9_f32)];
+        let out = filter_results(
+            results,
+            parent_dir,
+            current_dir,
+            true, // --all
+            10,
+        );
+        assert_eq!(
+            out.len(),
+            1,
+            "--all must include results regardless of the current directory"
         );
     }
 }
