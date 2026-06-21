@@ -55,16 +55,6 @@ _(none)_
 - Proposed fix: On `Err`, surface a transient UI error (toast/status field).
 - [ ] execute   [ ] skip
 
-### B17. Redundant Vec allocation in search result collection: `search_similar_images` (src/database.rs:771)
-- Category: caching
-- Impact: 3 (severity 1 × blast-radius 3)
-- Effort: S
-- Risk: low
-- Evidence: `search_similar_images` allocates an empty Vec then loops to push from `query_map` instead of `collect()`. Same at 818 and 881. Idiomatic but slightly less efficient than `collect` with a capacity hint.
-- Blast radius: src/database.rs:771, src/database.rs:818, src/database.rs:881
-- Proposed fix: Replace the `Vec::new()` loop with `.collect::<Result<Vec<_>,_>>()` at 771-774, 818-821, 881-884.
-- [x] execute   [ ] skip
-
 ### B18. Malformed GUI `config.toml` silently ignored, defaults applied: `GuiConfig load` (imgfind-gui/src/main.rs:267)
 - Category: api-surface
 - Impact: 2 (severity 1 × blast-radius 2)
