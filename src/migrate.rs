@@ -25,8 +25,9 @@ use crate::schema;
 use anyhow::{Context, Result};
 use rusqlite::ffi::sqlite3_auto_extension;
 use sqlite_vec::sqlite3_vec_init;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use tracing::info;
+use tracing::{info, warn};
 
 /// Outcome of a [`migrate_db`] run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,10 +140,13 @@ pub async fn migrate_db(canonical_path: &Path, force: bool) -> Result<MigrateOut
         force || !bak.exists(),
         "backup {bak:?} already exists; pass --force to overwrite"
     );
-    // A leftover temp from a previous aborted run must not pollute the new DB.
+    // A leftover temp (and its `-wal`/`-shm` sidecars) from a previous aborted
+    // run must not pollute the new DB — `TursoPool::open` would otherwise reopen
+    // the stale file and re-insert already-present ids on retry.
     if tmp.exists() {
         std::fs::remove_file(&tmp).with_context(|| format!("remove stale temp {tmp:?}"))?;
     }
+    remove_sqlite_sidecars(&tmp).context("remove stale temp sidecars")?;
 
     let legacy = LegacyData::read(canonical_path).context("read legacy database")?;
     let counts = legacy.counts();
@@ -241,16 +245,47 @@ impl LegacyData {
         }
 
         let thumbnails = read_thumbnails(&conn)?;
-        let metadata = read_metadata(&conn)?;
-        let favorites = read_favorites(&conn)?;
+        let mut metadata = read_metadata(&conn)?;
+        let mut favorites = read_favorites(&conn)?;
         let tags = read_id_name(&conn, "SELECT id, name FROM tags")?;
-        let image_tags = read_id_pairs(&conn, "SELECT image_id, tag_id FROM image_tags")?;
+        let mut image_tags = read_id_pairs(&conn, "SELECT image_id, tag_id FROM image_tags")?;
         let collections = read_id_name(&conn, "SELECT id, name FROM collections")?;
-        let collection_images = read_id_pairs(
+        let mut collection_images = read_id_pairs(
             &conn,
             "SELECT collection_id, image_id FROM collection_images",
         )?;
         let ui_state = read_ui_state(&conn)?;
+
+        // The legacy `vec0` embedding table carried no foreign key, so a real
+        // library accumulates orphaned rows whose image was deleted (e.g. an
+        // interrupted cleanup left the vector behind). The new Turso schema
+        // enforces foreign keys from every child table to `images(id)` (and the
+        // junctions to `tags`/`collections`), so any orphan would abort the
+        // migration on insert. Drop orphaned child rows here — they reference
+        // images that no longer exist and are dead data — logging the counts so
+        // the drop is never silent.
+        let valid_images: HashSet<i64> = images.iter().map(|(id, ..)| *id).collect();
+        let valid_tags: HashSet<i64> = tags.iter().map(|(id, _)| *id).collect();
+        let valid_collections: HashSet<i64> = collections.iter().map(|(id, _)| *id).collect();
+        for (table, rows) in &mut embeddings {
+            drop_orphans(rows, table, |(image_id, _)| valid_images.contains(image_id));
+        }
+        drop_orphans(&mut metadata, "image_metadata", |m| {
+            valid_images.contains(&m.image_id)
+        });
+        drop_orphans(&mut favorites, "favorites", |(image_id, _)| {
+            valid_images.contains(image_id)
+        });
+        drop_orphans(&mut image_tags, "image_tags", |(image_id, tag_id)| {
+            valid_images.contains(image_id) && valid_tags.contains(tag_id)
+        });
+        drop_orphans(
+            &mut collection_images,
+            "collection_images",
+            |(collection_id, image_id)| {
+                valid_collections.contains(collection_id) && valid_images.contains(image_id)
+            },
+        );
 
         Ok(Self {
             models,
@@ -290,6 +325,21 @@ fn remove_sqlite_sidecars(db_path: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Retain only the rows for which `keep` holds, warning (with the dropped
+/// count) when any orphaned rows are removed. Used to strip legacy rows that
+/// reference a now-missing parent and would otherwise violate the Turso
+/// schema's foreign keys.
+fn drop_orphans<T>(rows: &mut Vec<T>, table: &str, keep: impl Fn(&T) -> bool) {
+    let before = rows.len();
+    rows.retain(|r| keep(r));
+    let dropped = before - rows.len();
+    if dropped > 0 {
+        warn!(
+            "migrate: dropped {dropped} orphaned row(s) from {table} referencing missing parent rows"
+        );
+    }
 }
 
 fn read_models(conn: &rusqlite::Connection) -> Result<Vec<LegacyModel>> {
@@ -888,6 +938,12 @@ mod tests {
         Some(row.get_value(0).unwrap().as_blob().unwrap().clone())
     }
 
+    async fn turso_count(conn: &turso::Connection, sql: &str) -> i64 {
+        let mut rows = conn.query(sql, ()).await.unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        row.get_value(0).unwrap().as_integer().copied().unwrap()
+    }
+
     #[tokio::test]
     async fn migrates_images_embeddings_thumbnails_with_stable_ids() {
         let dir = temp_dir();
@@ -1084,6 +1140,119 @@ mod tests {
         assert_eq!(outcome, MigrateOutcome::AlreadyMigrated);
         // No backup created for an already-migrated DB.
         assert!(!backup_path(&canonical).exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A real legacy library can hold orphaned rows referencing a deleted image
+    /// (the `vec0` table had no foreign key). The new Turso schema enforces
+    /// those FKs, so the migrator must drop the orphans rather than abort with a
+    /// `FOREIGN KEY constraint failed` — the bug a real `imgfind migrate` hit.
+    #[tokio::test]
+    async fn migrate_skips_orphaned_child_rows() {
+        let dir = temp_dir();
+        let canonical = dir.join("imgfind.db");
+        let (legacy_conn, source_blobs) = build_legacy_db(&canonical);
+
+        // Inject orphans referencing a non-existent image id (99). The realistic
+        // case is the `vec0` embedding (that table has no foreign key, so a
+        // deleted image can leave its vector behind — exactly the row that
+        // aborted a real `imgfind migrate`). The child-table orphans need
+        // `foreign_keys = OFF` to insert; we strip them defensively regardless,
+        // so exercise every filter here.
+        legacy_conn
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+        legacy_conn
+            .execute(
+                "INSERT INTO image_vectors (rowid, embedding) VALUES (99, ?1)",
+                rusqlite::params![to_le_bytes(&unit_vec(9.0))],
+            )
+            .unwrap();
+        legacy_conn
+            .execute(
+                "INSERT INTO image_metadata (image_id, file_size) VALUES (99, 7)",
+                [],
+            )
+            .unwrap();
+        legacy_conn
+            .execute(
+                "INSERT INTO favorites (image_id, created_at) VALUES (99, '2024-09-01 00:00:00')",
+                [],
+            )
+            .unwrap();
+        legacy_conn
+            .execute(
+                "INSERT INTO image_tags (image_id, tag_id) VALUES (99, 1)",
+                [],
+            )
+            .unwrap();
+        legacy_conn
+            .execute(
+                "INSERT INTO collection_images (collection_id, image_id) VALUES (1, 99)",
+                [],
+            )
+            .unwrap();
+        drop(legacy_conn);
+
+        // Before the orphan filter this aborted with a FOREIGN KEY failure; now
+        // it succeeds, and the counts reflect only the valid (non-orphan) rows.
+        let outcome = migrate_db(&canonical, false).await.unwrap();
+        assert_eq!(
+            outcome,
+            MigrateOutcome::Migrated {
+                images: 3,
+                embeddings: 4, // orphan 99 dropped; 3 default + 1 non-default remain
+                thumbnails: 2,
+            }
+        );
+
+        let pool = TursoPool::open(&canonical, 1).await.unwrap();
+        let conn = pool.get().await.unwrap();
+
+        // Every orphaned row for image 99 was dropped.
+        assert!(
+            turso_blob(
+                &conn,
+                "SELECT embedding FROM image_vectors WHERE image_id = 99"
+            )
+            .await
+            .is_none(),
+            "orphaned embedding must be dropped"
+        );
+        for table in ["image_metadata", "favorites", "image_tags"] {
+            assert_eq!(
+                turso_count(
+                    &conn,
+                    &format!("SELECT COUNT(*) FROM {table} WHERE image_id = 99")
+                )
+                .await,
+                0,
+                "orphaned {table} row must be dropped"
+            );
+        }
+        assert_eq!(
+            turso_count(
+                &conn,
+                "SELECT COUNT(*) FROM collection_images WHERE image_id = 99"
+            )
+            .await,
+            0,
+            "orphaned collection_images row must be dropped"
+        );
+
+        // Valid data survived intact.
+        assert_eq!(turso_count(&conn, "SELECT COUNT(*) FROM images").await, 3);
+        let got = turso_blob(
+            &conn,
+            "SELECT embedding FROM image_vectors WHERE image_id = 1",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            &got, &source_blobs[0].1,
+            "valid embedding must be byte-identical"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
