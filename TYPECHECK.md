@@ -44,19 +44,6 @@ Last triage: 2026-06-21 against `main` @ 20d80f38. Toolchain: cargo build/check 
 - **Proposed migration:** introduce `DistanceThreshold(f32)`; thread from config; fix to green.
 - [ ] execute   [ ] skip
 
-### T10. Grid nav indices share `usize` (test-covered, documentation-grade): `cursor / cols / len` (imgfind-gui/src/nav.rs:36)
-- **Lens:** newtype
-- **Impact:** 2 (bug-prevention med × blast 1)
-- **Effort:** M
-- **Risk:** med
-- **Current type:** three `usize` (cursor, cols, len).
-- **Proposed type:** `CursorIndex` / `GridCols` / `ItemCount` newtypes.
-- **Evidence:** multiple same-typed `usize`; swapping `cols` and `len` breaks grid math. Mitigated: `move_selection` is covered by nav.rs/window.rs unit tests that would catch a swap, so value is mostly clarity.
-- **Blast radius:** imgfind-gui/src/nav.rs:36; imgfind-gui/src/main.rs:580-588; imgfind-gui/src/window.rs:38.
-- **Invariants/caveats:** Ephemeral grid state (not persisted) — no serde concern.
-- **Proposed migration:** introduce the three index newtypes; change `move_selection` + window signatures; fix to green; existing tests guard correctness.
-- [x] execute   [ ] skip
-
 ### T11. Thumbnail size is a bare `u32` (documentation-grade): `thumbnail size (px)` (src/thumbnail.rs:44)
 - **Lens:** newtype
 - **Impact:** 1 (bug-prevention low × blast 1)

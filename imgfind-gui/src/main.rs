@@ -4,6 +4,7 @@ mod backend;
 mod chords;
 mod detail;
 mod detail_cache;
+mod grid_index;
 mod image_util;
 mod loader;
 mod meta_cache;
@@ -1083,7 +1084,12 @@ fn main() -> Result<()> {
             };
             let len = state_ref.lock().results.len();
             let cur = *selected_ref.lock();
-            let new = nav::move_selection(cur, dir, cols_i.max(0) as usize, len);
+            let new = nav::move_selection(
+                cur.map(grid_index::CursorIndex),
+                dir,
+                grid_index::GridCols(cols_i.max(0) as usize),
+                grid_index::ItemCount(len),
+            );
             *selected_ref.lock() = new;
             // Move the multi-selection cursor so a Range selection grows/shrinks
             // live as the cursor moves (a no-op in Normal mode). Drop the guard
@@ -2758,7 +2764,12 @@ fn loader_tick(t: LoaderTick<'_>) {
     let scroll_px = (-t.window.get_grid_viewport_y()).max(0.0);
     let total = t.state_ref.lock().results.len();
     let (first_row, last_row) = window::visible_rows(scroll_px, viewport_h, window::TILE_PITCH_Y);
-    let range = window::window_range(first_row, last_row, cols, total);
+    let range = window::window_range(
+        first_row,
+        last_row,
+        grid_index::GridCols(cols),
+        grid_index::ItemCount(total),
+    );
 
     // 3. Rebuild only when the window/generation changed, or when a freshly
     // decoded thumbnail in the current window needs to appear. Otherwise the
