@@ -421,4 +421,37 @@ mod tests {
         let (sql_ts, _) = build_filter_clause_turso(&f);
         assert_eq!(sql_rq, sql_ts);
     }
+
+    #[test]
+    fn turso_clause_matches_rusqlite_clause_tags_all_of() {
+        // Tag branches are the most complex SQL; assert parity explicitly.
+        let f = Filters {
+            tags: vec!["a".into(), "b".into()],
+            tag_match: TagMatch::AllOf,
+            tags_enabled: true,
+            ..Default::default()
+        };
+        let (sql_rq, _) = build_filter_clause(&f);
+        let (sql_ts, _) = build_filter_clause_turso(&f);
+        assert_eq!(
+            sql_rq, sql_ts,
+            "AllOf tag clause must be identical between rusqlite and turso variants"
+        );
+    }
+
+    #[test]
+    fn turso_clause_matches_rusqlite_clause_tags_any_of() {
+        let f = Filters {
+            tags: vec!["a".into(), "b".into()],
+            tag_match: TagMatch::AnyOf,
+            tags_enabled: true,
+            ..Default::default()
+        };
+        let (sql_rq, _) = build_filter_clause(&f);
+        let (sql_ts, _) = build_filter_clause_turso(&f);
+        assert_eq!(
+            sql_rq, sql_ts,
+            "AnyOf tag clause must be identical between rusqlite and turso variants"
+        );
+    }
 }

@@ -105,69 +105,40 @@ mod tests {
         // Plan A: bind embeddings as raw Blob values.
         //
         // Turso's F32_BLOB column type accepts raw little-endian float bytes when
-        // bound as a BLOB.  If this INSERT fails at runtime we would fall back to
-        // the vector32('[f1,f2,...]') text form (Plan B), but Plan A has worked in
-        // testing with turso 0.7.0-pre.10 local driver.
-        let insert_result = conn
-            .execute(
-                "INSERT INTO image_vectors (image_id, embedding) VALUES (?1, ?2)",
-                (turso::Value::Integer(1), turso::Value::Blob(b1.clone())),
-            )
-            .await;
+        // bound as a BLOB.  Confirmed working with turso 0.7.0-pre.10 local driver.
+        // Plan B (vector32('[f1,f2,...]') text form) exists as a fallback for
+        // driver/backend combinations that reject raw blob binding, but is not used here.
+        conn.execute(
+            "INSERT INTO image_vectors (image_id, embedding) VALUES (?1, ?2)",
+            (turso::Value::Integer(1), turso::Value::Blob(b1.clone())),
+        )
+        .await
+        .expect("Plan A blob binding must succeed: F32_BLOB insert via turso::Value::Blob");
 
-        match insert_result {
-            Ok(_) => {
-                // Plan A succeeded — verify round-trip for the second row too.
-                conn.execute(
-                    "INSERT INTO image_vectors (image_id, embedding) VALUES (?1, ?2)",
-                    (turso::Value::Integer(2), turso::Value::Blob(b2.clone())),
-                )
-                .await
-                .expect("insert second embedding (Plan A)");
+        conn.execute(
+            "INSERT INTO image_vectors (image_id, embedding) VALUES (?1, ?2)",
+            (turso::Value::Integer(2), turso::Value::Blob(b2.clone())),
+        )
+        .await
+        .expect("insert second embedding (Plan A)");
 
-                // Read back row 1 and assert byte-exact equality.
-                let mut rows = conn
-                    .query(
-                        "SELECT embedding FROM image_vectors WHERE image_id = 1",
-                        (),
-                    )
-                    .await
-                    .expect("query embedding row 1");
-                let row = rows
-                    .next()
-                    .await
-                    .expect("advance row")
-                    .expect("embedding row 1 present");
-                let got = row
-                    .get_value(0)
-                    .expect("get embedding value")
-                    .as_blob()
-                    .expect("embedding is a blob")
-                    .clone();
-                assert_eq!(got, b1, "round-tripped embedding bytes must be identical");
-            }
-            Err(_) => {
-                // Plan B: fall back to vector32() text format.
-                //
-                // Some driver/backend combinations reject raw blob binding for
-                // F32_BLOB columns; vector32('[f1,f2,...]') is always accepted.
-                let fmt_vec = |v: &[f32]| -> String {
-                    let inner: Vec<String> = v.iter().map(|x| x.to_string()).collect();
-                    format!("[{}]", inner.join(","))
-                };
-                conn.execute(
-                    &format!(
-                        "INSERT INTO image_vectors (image_id, embedding) \
-                         VALUES (1, vector32('{}')), (2, vector32('{}'))",
-                        fmt_vec(&v1),
-                        fmt_vec(&v2)
-                    ),
-                    (),
-                )
-                .await
-                .expect("insert embeddings via vector32() text (Plan B)");
-            }
-        }
+        // Read back row 1 and assert byte-exact equality.
+        let mut rows = conn
+            .query("SELECT embedding FROM image_vectors WHERE image_id = 1", ())
+            .await
+            .expect("query embedding row 1");
+        let row = rows
+            .next()
+            .await
+            .expect("advance row")
+            .expect("embedding row 1 present");
+        let got = row
+            .get_value(0)
+            .expect("get embedding value")
+            .as_blob()
+            .expect("embedding is a blob")
+            .clone();
+        assert_eq!(got, b1, "round-tripped embedding bytes must be identical");
 
         // knn_query string shape checks (no actual KNN search — vector_distance_cos
         // requires Turso's vector extension which may not be available in the local
@@ -181,6 +152,18 @@ mod tests {
             q1.contains("image_vectors"),
             "KNN query must reference the vector table"
         );
+        assert!(
+            q1.contains("distance <="),
+            "KNN query must contain threshold predicate 'distance <='"
+        );
+        assert!(
+            q1.contains("WHERE distance"),
+            "KNN query must filter with 'WHERE distance'"
+        );
+        assert!(
+            q1.contains("ORDER BY distance"),
+            "KNN query must order by distance"
+        );
 
         let q2 = knn_query(
             "image_vectors",
@@ -193,8 +176,23 @@ mod tests {
         );
         assert!(q2.contains("JOIN favorites"));
         assert!(q2.contains("file_size"));
-        assert!(q2.contains("LIMIT 5"));
-        assert!(q2.contains("OFFSET 10"));
         assert!(q2.contains("0.3"), "threshold must appear as float literal");
+        assert!(
+            q2.contains("distance <="),
+            "KNN query must contain threshold predicate 'distance <='"
+        );
+        assert!(
+            q2.contains("ORDER BY distance"),
+            "KNN query must order by distance"
+        );
+        // LIMIT must appear before OFFSET in the query string.
+        let limit_pos = q2.find("LIMIT 5").expect("LIMIT 5 must appear in query");
+        let offset_pos = q2
+            .find("OFFSET 10")
+            .expect("OFFSET 10 must appear in query");
+        assert!(
+            limit_pos < offset_pos,
+            "LIMIT must precede OFFSET in KNN query"
+        );
     }
 }
