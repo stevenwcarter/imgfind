@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use walkdir::WalkDir;
 
 use imgfind::AbsolutePath;
+use imgfind::MaxK;
 use imgfind::abs_to_relative_path;
 use imgfind::database::{Database, ImageMetadata, extract_image_metadata};
 use imgfind::indexing::chunk_pending;
@@ -757,7 +758,7 @@ fn search_images(
     prompt: &str,
     limit: usize,
     distance_threshold: f32,
-    max_k: usize,
+    max_k: MaxK,
     short: bool,
     all: bool,
     display: bool,

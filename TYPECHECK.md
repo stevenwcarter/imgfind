@@ -29,19 +29,6 @@ Last triage: 2026-06-21 against `main` @ 20d80f38. Toolchain: cargo build/check 
 
 ## Medium
 
-### T5. `max_k` and `limit` are both `usize` and silently swappable: `max_k` (src/database.rs:759)
-- **Lens:** newtype
-- **Impact:** 4 (bug-prevention med × blast 2)
-- **Effort:** S
-- **Risk:** med
-- **Current type:** `usize`.
-- **Proposed type:** `struct MaxK(usize)`.
-- **Evidence:** `k = limit.clamp(1, max_k)` takes two adjacent `usize` args; transposing `limit` and `max_k` compiles and **silently returns the wrong number of results** (e.g. clamps the cap by the request instead of the request by the cap) with no error.
-- **Blast radius:** src/database.rs:759, :789, :834; src/config.rs:37; imgfind-gui/src/backend.rs:93.
-- **Invariants/caveats:** Crosses config (serde) — `MaxK(usize)` should be `#[serde(transparent)]` to keep config.toml readable.
-- **Proposed migration:** introduce `MaxK(usize)`; thread from config through the search fns; fix the clamp call sites to green.
-- [x] execute   [ ] skip
-
 ### T6. Embedding dimension is a bare `usize` that must equal the model's true dim: `embedding dimension` (src/database.rs:161)
 - **Lens:** newtype
 - **Impact:** 4 (bug-prevention med × blast 2)
