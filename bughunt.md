@@ -32,16 +32,6 @@ _(none)_
 - Proposed fix: Set `.with_ansi(false)` on the file writer (keep color only for a TTY terminal layer if desired).
 - [ ] execute   [ ] skip
 
-### B11. N+1 query: `image_id` lookup per tag operation: `tag_image/untag_image` (src/database.rs:534)
-- Category: caching
-- Impact: 6 (severity 3 × blast-radius 2)
-- Effort: M
-- Risk: low
-- Evidence: `tag_image` and `untag_image` both call `image_id_for` (515), a separate query. Tagging a GUI multi-selection fires one id-lookup query per image instead of batching.
-- Blast radius: src/database.rs:534, src/database.rs:546, imgfind-gui/src/main.rs:2400
-- Proposed fix: Add `batch_tag_images(rel_paths, &tag)` fetching all ids in one `WHERE path IN (...)` query then insert in a transaction; same for untag. Wire into the GUI chord handler.
-- [x] execute   [ ] skip
-
 ### B12. Thumbnail writer-thread panic reported to CLI as `Ok(0)`: `generate_missing_thumbnails_batch` (src/thumbnail.rs:165)
 - Category: api-surface
 - Impact: 6 (severity 3 × blast-radius 2)

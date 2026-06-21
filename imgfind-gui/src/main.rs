@@ -3179,11 +3179,10 @@ fn apply_tags_to_paths(
     let backend = backend.clone();
     let weak = weak.clone();
     std::thread::spawn(move || {
-        for path in &paths {
-            for t in &tags {
-                if let Err(e) = backend.add_tag(path, t) {
-                    tracing::warn!("failed to add tag {t} to {path}: {e}");
-                }
+        let path_refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+        for t in &tags {
+            if let Err(e) = backend.batch_add_tags(&path_refs, t) {
+                tracing::warn!("failed to batch add tag {t}: {e}");
             }
         }
         if let Some(dp) = detail_path

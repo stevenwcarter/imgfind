@@ -198,6 +198,22 @@ impl Backend {
             .with_context(|| format!("remove tag {tag} from {rel_path}"))
     }
 
+    /// Attach `tag` to every image in `rel_paths` (batch; single round-trip).
+    pub fn batch_add_tags(&self, rel_paths: &[&str], tag: &str) -> Result<()> {
+        self.db
+            .batch_tag_images(rel_paths, tag)
+            .with_context(|| format!("batch add tag {tag}"))
+    }
+
+    /// Remove `tag` from every image in `rel_paths` (batch; single round-trip).
+    /// Sibling to `batch_add_tags`; wired into the untag chord path when added.
+    #[allow(dead_code)]
+    pub fn batch_remove_tags(&self, rel_paths: &[&str], tag: &str) -> Result<()> {
+        self.db
+            .batch_untag_images(rel_paths, tag)
+            .with_context(|| format!("batch remove tag {tag}"))
+    }
+
     /// Tags currently assigned to the image at `rel_path`.
     pub fn tags_for(&self, rel_path: &str) -> Result<Vec<String>> {
         self.db

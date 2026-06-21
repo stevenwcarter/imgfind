@@ -574,6 +574,74 @@ impl Database {
         Ok(())
     }
 
+    /// Attach `tag` to every image whose relative path is in `rel_paths`,
+    /// resolving all ids in a single query and writing in one transaction.
+    /// Paths absent from the DB are silently skipped (not an error).
+    pub fn batch_tag_images(&self, rel_paths: &[&str], tag: &str) -> Result<()> {
+        if rel_paths.is_empty() {
+            return Ok(());
+        }
+        let tag_id = self.create_tag(tag)?;
+        let mut conn = self.pool.get().context("get connection")?;
+        let placeholders = rel_paths
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!("SELECT id FROM images WHERE path IN ({placeholders})");
+        // Collect ids before starting the transaction so the shared `conn`
+        // borrow from `stmt` is released before the mutable borrow for `tx`.
+        let ids: Vec<i64> = {
+            let mut stmt = conn.prepare(&sql)?;
+            stmt.query_map(rusqlite::params_from_iter(rel_paths.iter()), |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        let tx = conn.transaction()?;
+        for image_id in ids {
+            tx.execute(
+                "INSERT OR IGNORE INTO image_tags (image_id, tag_id) VALUES (?1, ?2)",
+                params![image_id, tag_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Remove `tag` from every image whose relative path is in `rel_paths`,
+    /// resolving all ids in a single query and deleting in one transaction.
+    /// Paths absent from the DB are silently skipped (not an error).
+    pub fn batch_untag_images(&self, rel_paths: &[&str], tag: &str) -> Result<()> {
+        if rel_paths.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.pool.get().context("get connection")?;
+        let placeholders = rel_paths
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!("SELECT id FROM images WHERE path IN ({placeholders})");
+        // Collect ids before starting the transaction so the shared `conn`
+        // borrow from `stmt` is released before the mutable borrow for `tx`.
+        let ids: Vec<i64> = {
+            let mut stmt = conn.prepare(&sql)?;
+            stmt.query_map(rusqlite::params_from_iter(rel_paths.iter()), |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let tx = conn.transaction()?;
+        for image_id in ids {
+            tx.execute(
+                "DELETE FROM image_tags WHERE image_id = ?1 AND tag_id = (SELECT id FROM tags WHERE name = ?2)",
+                params![image_id, tag],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// List the tags attached to the image at `relative_path`, alphabetically.
     /// Unknown paths simply have no tags.
     pub fn tags_for_image(&self, relative_path: &RelativePath) -> Result<Vec<String>> {
@@ -2753,6 +2821,60 @@ mod tests {
         };
         let got = db.browse_all(&disabled, &Sort::default()).unwrap();
         assert_eq!(got.len(), 3);
+
+        let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn batch_tag_and_untag_images() {
+        let (db, _tmp) = test_db_with_images(&["p1.jpg", "p2.jpg", "p3.jpg"]);
+
+        // batch_tag_images: all three carry the tag.
+        db.batch_tag_images(&["p1.jpg", "p2.jpg", "p3.jpg"], "beach")
+            .unwrap();
+        assert_eq!(
+            db.tags_for_image(&rel("p1.jpg")).unwrap(),
+            vec!["beach"]
+        );
+        assert_eq!(
+            db.tags_for_image(&rel("p2.jpg")).unwrap(),
+            vec!["beach"]
+        );
+        assert_eq!(
+            db.tags_for_image(&rel("p3.jpg")).unwrap(),
+            vec!["beach"]
+        );
+
+        // batch_untag_images: remove from p1 and p3; only p2 keeps the tag.
+        db.batch_untag_images(&["p1.jpg", "p3.jpg"], "beach")
+            .unwrap();
+        assert_eq!(
+            db.tags_for_image(&rel("p1.jpg")).unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            db.tags_for_image(&rel("p2.jpg")).unwrap(),
+            vec!["beach"]
+        );
+        assert_eq!(
+            db.tags_for_image(&rel("p3.jpg")).unwrap(),
+            Vec::<String>::new()
+        );
+
+        // Idempotent: applying again should not error.
+        db.batch_tag_images(&["p2.jpg"], "beach").unwrap();
+        assert_eq!(
+            db.tags_for_image(&rel("p2.jpg")).unwrap(),
+            vec!["beach"]
+        );
+
+        // Missing path is silently skipped.
+        db.batch_tag_images(&["p1.jpg", "nonexistent.jpg"], "beach")
+            .unwrap();
+        assert_eq!(
+            db.tags_for_image(&rel("p1.jpg")).unwrap(),
+            vec!["beach"]
+        );
 
         let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
     }
