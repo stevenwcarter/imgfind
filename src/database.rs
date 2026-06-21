@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose};
 use hashbrown::HashMap;
 use image::GenericImageView;
-use r2d2::Pool;
+use r2d2::{CustomizeConnection, Pool};
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::types::Value;
 use rusqlite::{
@@ -15,6 +15,7 @@ use sqlite_vec::sqlite3_vec_init;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tracing::info;
 use zerocopy::IntoBytes;
 
@@ -25,6 +26,25 @@ pub struct Database {
 }
 
 const MAX_JITTER: f64 = 0.000001;
+
+/// Duration used for `busy_timeout` on every pooled connection. Mirrors the
+/// value the thumbnail batch writer sets manually so all DB callers share the
+/// same contention budget.
+const POOL_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// r2d2 connection customizer that sets `busy_timeout` on every new pooled
+/// connection. Without this, a query that hits a locked page waits forever
+/// under concurrent load (grid queries, thumbnail worker, detail-panel lookups
+/// all contend on the same WAL file).
+#[derive(Debug)]
+struct BusyTimeoutCustomizer;
+
+impl CustomizeConnection<Connection, rusqlite::Error> for BusyTimeoutCustomizer {
+    fn on_acquire(&self, conn: &mut Connection) -> Result<(), rusqlite::Error> {
+        conn.busy_timeout(POOL_BUSY_TIMEOUT)?;
+        Ok(())
+    }
+}
 
 pub type ImageSearchResult = Result<Vec<(String, f32, Option<Vec<u8>>)>>;
 
@@ -63,6 +83,7 @@ impl Database {
             .min(32) as u32;
         let pool = r2d2::Pool::builder()
             .max_size(max_size)
+            .connection_customizer(Box::new(BusyTimeoutCustomizer))
             .build(manager)
             .with_context(|| format!("Failed to open database at {:?}", db_path))?;
 
@@ -553,6 +574,66 @@ impl Database {
         Ok(())
     }
 
+    /// Attach `tag` to every image whose relative path is in `rel_paths`,
+    /// resolving all ids in a single query and writing in one transaction.
+    /// Paths absent from the DB are silently skipped (not an error).
+    pub fn batch_tag_images(&self, rel_paths: &[&str], tag: &str) -> Result<()> {
+        if rel_paths.is_empty() {
+            return Ok(());
+        }
+        let tag_id = self.create_tag(tag)?;
+        let mut conn = self.pool.get().context("get connection")?;
+        let placeholders = rel_paths.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!("SELECT id FROM images WHERE path IN ({placeholders})");
+        // Collect ids before starting the transaction so the shared `conn`
+        // borrow from `stmt` is released before the mutable borrow for `tx`.
+        let ids: Vec<i64> = {
+            let mut stmt = conn.prepare(&sql)?;
+            stmt.query_map(rusqlite::params_from_iter(rel_paths.iter()), |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        let tx = conn.transaction()?;
+        for image_id in ids {
+            tx.execute(
+                "INSERT OR IGNORE INTO image_tags (image_id, tag_id) VALUES (?1, ?2)",
+                params![image_id, tag_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Remove `tag` from every image whose relative path is in `rel_paths`,
+    /// resolving all ids in a single query and deleting in one transaction.
+    /// Paths absent from the DB are silently skipped (not an error).
+    pub fn batch_untag_images(&self, rel_paths: &[&str], tag: &str) -> Result<()> {
+        if rel_paths.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.pool.get().context("get connection")?;
+        let placeholders = rel_paths.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!("SELECT id FROM images WHERE path IN ({placeholders})");
+        // Collect ids before starting the transaction so the shared `conn`
+        // borrow from `stmt` is released before the mutable borrow for `tx`.
+        let ids: Vec<i64> = {
+            let mut stmt = conn.prepare(&sql)?;
+            stmt.query_map(rusqlite::params_from_iter(rel_paths.iter()), |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let tx = conn.transaction()?;
+        for image_id in ids {
+            tx.execute(
+                "DELETE FROM image_tags WHERE image_id = ?1 AND tag_id = (SELECT id FROM tags WHERE name = ?2)",
+                params![image_id, tag],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// List the tags attached to the image at `relative_path`, alphabetically.
     /// Unknown paths simply have no tags.
     pub fn tags_for_image(&self, relative_path: &RelativePath) -> Result<Vec<String>> {
@@ -837,12 +918,12 @@ impl Database {
         max_k: usize,
         filters: &Filters,
     ) -> Result<Vec<RankedMetaRow>> {
-        // k must cover offset+limit AFTER filtering; raise to max_k so a full
-        // page can survive post-MATCH filtering. `k` and the distance threshold
-        // are interpolated as the vec0 MATCH/k syntax requires literal values
-        // (not bound params). Both are trusted numeric config values, never
-        // user free-text.
-        let k = max_k.max(offset + limit).clamp(1, max_k);
+        // k must cover offset+limit AFTER filtering. We also apply max_k as a
+        // floor so a full page survives post-MATCH filtering even on page 1.
+        // `k` and the distance threshold are interpolated as the vec0 MATCH/k
+        // syntax requires literal values (not bound params). Both are trusted
+        // numeric config values, never user free-text.
+        let k = (offset + limit).max(1).max(max_k);
         let vt = self.vectors_table()?;
         let (clause, fvalues) = build_filter_clause(filters);
 
@@ -1752,6 +1833,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
     }
 
+    /// `busy_timeout` must be set on every pooled connection, not just the one
+    /// opened by the thumbnail batch writer. `PRAGMA busy_timeout` returns the
+    /// current value in milliseconds so we can assert the customizer fired.
+    #[test]
+    fn busy_timeout_set_on_fresh_pool_connection() {
+        let db_path = temp_db_path();
+        let db = Database::new(&db_path).expect("create db");
+
+        // Hold the first connection so the pool must build a second, fresh one.
+        let _held = db.pool.get().expect("get first conn");
+        let conn = db.pool.get().expect("get second conn");
+        let timeout_ms: i64 = conn
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .expect("read pragma");
+        // POOL_BUSY_TIMEOUT is 5 s; SQLite reports it as 5000 ms.
+        assert_eq!(
+            timeout_ms, 5000,
+            "busy_timeout should be 5000 ms on every pooled connection"
+        );
+
+        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+    }
+
     #[test]
     fn get_image_metadata_reads_stored_row_without_decoding() {
         let db_path = temp_db_path();
@@ -1989,6 +2093,59 @@ mod tests {
         let p2_paths: Vec<&str> = page2.iter().map(|(_, p, ..)| p.as_str()).collect();
         assert_eq!(p1_paths, ["img1.jpg", "img2.jpg", "img3.jpg", "img4.jpg"]);
         assert_eq!(p2_paths, ["img5.jpg", "img6.jpg", "img7.jpg", "img8.jpg"]);
+
+        let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+    }
+
+    /// Regression test: when `offset + limit > max_k`, the clamped `k` was
+    /// re-capped to `max_k`, leaving sqlite-vec too few candidates to fill the
+    /// requested page. With the fix, `k` is set to `(offset + limit).max(max_k)`
+    /// so the KNN scan always covers the full window.
+    #[test]
+    fn search_meta_paginates_past_max_k() {
+        let db_path = temp_db_path();
+        let db = Database::new(&db_path).expect("create db");
+        let conn = db.pool.get().expect("get conn");
+
+        // Insert 60 images. First axis-0 component decreases with id so the
+        // query vector (unit along axis 0) sees monotonically increasing distance.
+        for id in 1..=60i64 {
+            conn.execute(
+                "INSERT INTO images (id, path, hash) VALUES (?1, ?2, ?3)",
+                params![id, format!("img{id}.jpg"), format!("h{id}")],
+            )
+            .expect("insert image");
+
+            let mut emb = vec![0.0f32; 512];
+            emb[0] = 1.0 - (id as f32) * 0.01;
+            emb[1] = (id as f32) * 0.01;
+            conn.execute(
+                "INSERT INTO image_vectors (rowid, embedding) VALUES (?1, ?2)",
+                params![id, emb.as_slice().as_bytes()],
+            )
+            .expect("insert vector");
+        }
+        drop(conn);
+
+        let mut query = vec![0.0f32; 512];
+        query[0] = 1.0;
+
+        // offset=35, limit=20 => offset+limit=55 > max_k=40.
+        // Pre-fix: k was clamped back to 40, so sqlite-vec had no candidates
+        // beyond rank 40; with OFFSET 35 only 5 rows were returned.
+        // Post-fix: k = max(55, 40) = 55, so the scan covers all needed rows.
+        let result = db
+            .search_similar_images_meta(
+                &query,
+                20,
+                35,
+                2.0,
+                40,
+                &crate::filters::Filters::default(),
+            )
+            .expect("paginated search");
+
+        assert_eq!(result.len(), 20, "page must be full (offset+limit > max_k)");
 
         let _ = std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
     }
@@ -2569,6 +2726,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
     }
 
+    /// Characterization test: `rehydrate_rows` uses a single `IN` query with a
+    /// metadata LEFT JOIN. Asserts that: (a) rows are returned in input-id order
+    /// even when the request order differs from insert order, (b) ids with no row
+    /// are silently dropped, and (c) the `size` field (from `image_metadata`) is
+    /// populated (i.e. the LEFT JOIN lands).
+    #[test]
+    fn rehydrate_rows_ordered_with_metadata_populated() {
+        // Insert three images with distinct sizes. Insert order → ids 1, 2, 3.
+        let (db, _tmp) = test_db_with_rows(&[
+            ("img1.jpg", Some(100)),
+            ("img2.jpg", Some(200)),
+            ("img3.jpg", Some(300)),
+        ]);
+        // Request in reverse order (3, 1, 2) with a bogus id (999) interspersed.
+        let ids = vec![3i64, 999, 1, 2];
+        let rows = db.rehydrate_rows(&ids).unwrap();
+
+        // 999 is dropped; remaining rows follow the *input* order [3, 1, 2].
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].id, 3);
+        assert_eq!(rows[1].id, 1);
+        assert_eq!(rows[2].id, 2);
+
+        // Paths match.
+        assert_eq!(rows[0].path, "img3.jpg");
+        assert_eq!(rows[1].path, "img1.jpg");
+        assert_eq!(rows[2].path, "img2.jpg");
+
+        // Metadata (file_size) must be populated via the LEFT JOIN — not None.
+        assert_eq!(rows[0].size, Some(300));
+        assert_eq!(rows[1].size, Some(100));
+        assert_eq!(rows[2].size, Some(200));
+
+        let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
+    }
+
     #[test]
     fn ui_state_round_trips_through_db() {
         let (db, _tmp) = test_db_with_rows(&[("a.jpg", Some(1))]);
@@ -2656,6 +2849,42 @@ mod tests {
         };
         let got = db.browse_all(&disabled, &Sort::default()).unwrap();
         assert_eq!(got.len(), 3);
+
+        let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn batch_tag_and_untag_images() {
+        let (db, _tmp) = test_db_with_images(&["p1.jpg", "p2.jpg", "p3.jpg"]);
+
+        // batch_tag_images: all three carry the tag.
+        db.batch_tag_images(&["p1.jpg", "p2.jpg", "p3.jpg"], "beach")
+            .unwrap();
+        assert_eq!(db.tags_for_image(&rel("p1.jpg")).unwrap(), vec!["beach"]);
+        assert_eq!(db.tags_for_image(&rel("p2.jpg")).unwrap(), vec!["beach"]);
+        assert_eq!(db.tags_for_image(&rel("p3.jpg")).unwrap(), vec!["beach"]);
+
+        // batch_untag_images: remove from p1 and p3; only p2 keeps the tag.
+        db.batch_untag_images(&["p1.jpg", "p3.jpg"], "beach")
+            .unwrap();
+        assert_eq!(
+            db.tags_for_image(&rel("p1.jpg")).unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(db.tags_for_image(&rel("p2.jpg")).unwrap(), vec!["beach"]);
+        assert_eq!(
+            db.tags_for_image(&rel("p3.jpg")).unwrap(),
+            Vec::<String>::new()
+        );
+
+        // Idempotent: applying again should not error.
+        db.batch_tag_images(&["p2.jpg"], "beach").unwrap();
+        assert_eq!(db.tags_for_image(&rel("p2.jpg")).unwrap(), vec!["beach"]);
+
+        // Missing path is silently skipped.
+        db.batch_tag_images(&["p1.jpg", "nonexistent.jpg"], "beach")
+            .unwrap();
+        assert_eq!(db.tags_for_image(&rel("p1.jpg")).unwrap(), vec!["beach"]);
 
         let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
     }

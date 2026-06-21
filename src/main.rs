@@ -280,7 +280,7 @@ async fn main() -> Result<()> {
         } => {
             let db_path = get_db_path(None)?;
             let mut db = Database::new(&db_path)?;
-            for s in resolve_thumbnail_sizes(&size, gui_sizes) {
+            for s in resolve_thumbnail_sizes(&size, gui_sizes)? {
                 generate_thumbnails_batch(&mut db, s, count)?;
             }
         }
@@ -707,6 +707,45 @@ fn index_directory(
     Ok(())
 }
 
+/// Filter DB-relative image paths to those under `current_dir` (absolute).
+///
+/// `parent_dir` is `Database::parent_dir`; paths in `results` are relative to it.
+/// Returns items passing the location filter, truncated to `limit`.
+fn filter_results(
+    results: Vec<(String, f32)>,
+    parent_dir: &std::path::Path,
+    current_dir: &std::path::Path,
+    all: bool,
+    recursive: bool,
+    limit: usize,
+) -> Vec<(String, f32)> {
+    let current_dir_canonical = current_dir
+        .canonicalize()
+        .unwrap_or_else(|_| current_dir.to_path_buf());
+
+    results
+        .into_iter()
+        .filter(|(path, _score)| {
+            // Paths from the DB are relative to parent_dir — make them absolute
+            // before comparing against current_dir. Using canonicalize() on the
+            // raw relative path would resolve against cwd, not parent_dir.
+            let abs_path = imgfind::relative_to_abs_path(std::path::Path::new(path), parent_dir);
+            let abs_path = abs_path.canonicalize().unwrap_or(abs_path);
+
+            if all {
+                true
+            } else if recursive {
+                abs_path.starts_with(&current_dir_canonical)
+            } else {
+                abs_path
+                    .parent()
+                    .is_some_and(|p| p == current_dir_canonical)
+            }
+        })
+        .take(limit)
+        .collect()
+}
+
 // CLI dispatch fn; arg list mirrors the clap subcommand flags.
 #[allow(clippy::too_many_arguments)]
 fn search_images(
@@ -756,38 +795,16 @@ fn search_images(
     let all_results =
         search_engine.search(&query_embedding, usize::MAX, distance_threshold, max_k)?; // Get all results first
 
-    // Filter results based on current directory and recursive flag
-    let filtered_results: Vec<_> = all_results
-        .into_iter()
-        .filter(|(path, _score)| {
-            let path_buf = std::path::Path::new(path);
-
-            // The paths returned from the database are already absolute paths
-            let abs_path = path_buf.to_path_buf();
-
-            // Canonicalize paths to handle . and .. components and get absolute paths
-            let abs_path = abs_path.canonicalize().unwrap_or(abs_path);
-            let current_dir_canonical = current_dir
-                .canonicalize()
-                .unwrap_or_else(|_| current_dir.clone());
-
-            if all {
-                // For --all flag, include all results regardless of location
-                true
-            } else if recursive {
-                // For recursive search, check if the image is in current directory or any subdirectory
-                abs_path.starts_with(&current_dir_canonical)
-            } else {
-                // For non-recursive search, check if the image is directly in current directory
-                if let Some(parent) = abs_path.parent() {
-                    parent == current_dir_canonical
-                } else {
-                    false
-                }
-            }
-        })
-        .take(limit)
-        .collect();
+    // Filter results to those under current_dir, resolving DB-relative paths
+    // against the DB parent directory (not cwd).
+    let filtered_results = filter_results(
+        all_results,
+        &db.parent_dir,
+        &current_dir,
+        all,
+        recursive,
+        limit,
+    );
 
     if filtered_results.is_empty() {
         if !short {
@@ -814,7 +831,8 @@ fn search_images(
         for (path, _score) in filtered_results.iter() {
             println!("{}", path);
             if display {
-                print_image(path).context("Failed to display image")?;
+                let abs = imgfind::relative_to_abs_path(std::path::Path::new(path), &db.parent_dir);
+                print_image(&abs.to_string_lossy()).context("Failed to display image")?;
             }
         }
     } else {
@@ -835,7 +853,8 @@ fn search_images(
         for (i, (path, score)) in filtered_results.iter().enumerate() {
             println!("{:3}. {:<60} (similarity: {:.4})", i + 1, path, score);
             if display {
-                print_image(path).context("Failed to display image")?;
+                let abs = imgfind::relative_to_abs_path(std::path::Path::new(path), &db.parent_dir);
+                print_image(&abs.to_string_lossy()).context("Failed to display image")?;
             }
         }
 
@@ -1010,7 +1029,12 @@ fn handle_config_command(config_command: ConfigCommands) -> Result<()> {
 /// - Both empty/false → defaults to `[300]`.
 ///
 /// Duplicates are removed while preserving the first-occurrence order.
-fn resolve_thumbnail_sizes(sizes: &[u32], gui_sizes: bool) -> Vec<u32> {
+///
+/// Returns `Err` if any size is 0, since `image::resize(0, 0, …)` panics.
+fn resolve_thumbnail_sizes(sizes: &[u32], gui_sizes: bool) -> anyhow::Result<Vec<u32>> {
+    if let Some(&bad) = sizes.iter().find(|&&s| s == 0) {
+        anyhow::bail!("thumbnail size must be ≥ 1, got {bad}");
+    }
     let raw: Vec<u32> = if gui_sizes {
         imgfind::thumbnail::GUI_THUMBNAIL_SIZES.to_vec()
     } else if sizes.is_empty() {
@@ -1019,7 +1043,7 @@ fn resolve_thumbnail_sizes(sizes: &[u32], gui_sizes: bool) -> Vec<u32> {
         sizes.to_vec()
     };
     let mut seen = std::collections::HashSet::new();
-    raw.into_iter().filter(|s| seen.insert(*s)).collect()
+    Ok(raw.into_iter().filter(|s| seen.insert(*s)).collect())
 }
 
 /// Generate thumbnails in batches for images that don't have cached thumbnails
@@ -1087,26 +1111,46 @@ mod gui_cli_tests {
 
     #[test]
     fn resolve_sizes_default_is_300() {
-        assert_eq!(resolve_thumbnail_sizes(&[], false), vec![300]);
+        assert_eq!(resolve_thumbnail_sizes(&[], false).unwrap(), vec![300]);
     }
 
     #[test]
     fn resolve_sizes_gui_flag_expands() {
-        assert_eq!(resolve_thumbnail_sizes(&[], true), vec![300, 512, 2048]);
+        assert_eq!(
+            resolve_thumbnail_sizes(&[], true).unwrap(),
+            vec![300, 512, 2048]
+        );
     }
 
     #[test]
     fn resolve_sizes_explicit_dedup_preserves_order() {
         assert_eq!(
-            resolve_thumbnail_sizes(&[512, 300, 512], false),
+            resolve_thumbnail_sizes(&[512, 300, 512], false).unwrap(),
             vec![512, 300]
         );
+    }
+
+    /// Regression: `--size 0` must be rejected before reaching `image::resize`,
+    /// which panics when either dimension is 0.
+    #[test]
+    fn resolve_sizes_rejects_zero() {
+        assert!(resolve_thumbnail_sizes(&[0], false).is_err());
+    }
+
+    #[test]
+    fn resolve_sizes_rejects_zero_mixed_with_valid() {
+        assert!(resolve_thumbnail_sizes(&[300, 0, 512], false).is_err());
+    }
+
+    #[test]
+    fn resolve_sizes_accepts_positive() {
+        assert!(resolve_thumbnail_sizes(&[300], false).is_ok());
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_threshold;
+    use super::{filter_results, parse_threshold};
 
     #[test]
     fn parse_threshold_accepts_valid_values() {
@@ -1121,5 +1165,105 @@ mod tests {
         assert!(parse_threshold("-inf").is_err());
         assert!(parse_threshold("nan").is_err());
         assert!(parse_threshold("abc").is_err());
+    }
+
+    /// `filter_results` must resolve DB-relative paths against `parent_dir`, not cwd.
+    ///
+    /// The key scenario: `parent_dir` is a *subdirectory* of cwd (e.g. `src/`),
+    /// so the relative path `"main.rs"` lives at `parent_dir/main.rs` but NOT
+    /// at `cwd/main.rs`. With the old buggy code, `canonicalize("main.rs")`
+    /// resolved against cwd (workspace root) and failed or found the wrong file,
+    /// so the entry was excluded from results. After the fix, `relative_to_abs_path`
+    /// joins against `parent_dir` and the entry passes the filter.
+    ///
+    /// This test is RED with the old inline code and GREEN after the fix.
+    #[test]
+    fn filter_results_uses_parent_dir_not_cwd() {
+        // parent_dir = workspace-root/src (a real subdirectory, distinct from cwd
+        // which is the workspace root when cargo test runs).
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let parent_dir = manifest.join("src");
+        // "main.rs" exists under parent_dir/src, not directly under cwd.
+        let results = vec![("main.rs".to_string(), 0.9_f32)];
+        let out = filter_results(
+            results,
+            &parent_dir,
+            &parent_dir, // current_dir == parent_dir: non-recursive match expected
+            false,       // not --all
+            false,       // non-recursive
+            10,
+        );
+        assert_eq!(
+            out.len(),
+            1,
+            "main.rs under src/ must pass the non-recursive filter when cwd=src/"
+        );
+    }
+
+    /// Discriminates `parent_dir` vs `current_dir` as the join base.
+    ///
+    /// `parent_dir` is `CARGO_MANIFEST_DIR/src`, `current_dir` is `CARGO_MANIFEST_DIR`
+    /// (the workspace root, which is the real cwd when `cargo test` runs).  The
+    /// relative path `"main.rs"` exists only under `src/`, not under the workspace
+    /// root.
+    ///
+    /// With the **correct** base (`parent_dir`):
+    ///   abs = `CARGO_MANIFEST_DIR/src/main.rs`; parent = `.../src` ≠ `current_dir`
+    ///   → non-recursive filter **excludes** it (len == 0). ✓
+    ///
+    /// With the **wrong** base (`current_dir` used instead):
+    ///   abs = `CARGO_MANIFEST_DIR/main.rs`; canonicalize fails (file absent) → raw
+    ///   path kept; parent = `CARGO_MANIFEST_DIR` == `current_dir`
+    ///   → non-recursive filter **includes** it (len == 1). ✗
+    ///
+    /// A future regression substituting `current_dir` for `parent_dir` would flip
+    /// this assertion from 0 → 1 and be caught immediately.
+    #[test]
+    fn filter_results_join_base_is_parent_dir_not_current_dir() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        // parent_dir is src/ (a real subdir); current_dir is the workspace root.
+        let parent_dir = manifest.join("src");
+        let current_dir = manifest;
+        // "main.rs" lives at parent_dir/main.rs, not at current_dir/main.rs.
+        let results = vec![("main.rs".to_string(), 0.9_f32)];
+        let out = filter_results(
+            results,
+            &parent_dir,
+            current_dir,
+            false, // not --all
+            false, // non-recursive: checks abs_path.parent() == current_dir
+            10,
+        );
+        // Correct base (src/): abs parent is src/ ≠ workspace root → excluded.
+        // Wrong base (workspace root): abs parent is workspace root == current_dir → included.
+        assert_eq!(
+            out.len(),
+            0,
+            "main.rs under src/ must be EXCLUDED when cwd=workspace-root (non-recursive): \
+             parent of resolved path is src/, not the workspace root"
+        );
+    }
+
+    /// With a different `current_dir`, the same result must be excluded in
+    /// non-recursive mode (boundary test).
+    #[test]
+    fn filter_results_excludes_when_current_dir_differs() {
+        let parent_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        // /tmp is distinct from parent_dir; the image should not pass the filter.
+        let current_dir = std::path::Path::new("/tmp");
+        let results = vec![("Cargo.toml".to_string(), 0.9_f32)];
+        let out = filter_results(
+            results,
+            parent_dir,
+            current_dir,
+            false, // not --all
+            false, // non-recursive
+            10,
+        );
+        assert_eq!(
+            out.len(),
+            0,
+            "image under parent_dir must not appear when cwd=/tmp"
+        );
     }
 }
