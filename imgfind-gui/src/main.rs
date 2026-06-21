@@ -276,17 +276,13 @@ fn main() -> Result<()> {
 
     // Fetch size bounds once at startup for the [0,1]↔bytes mapping.
     let size_bounds = backend.size_bounds().unwrap_or_else(|e| {
-        tracing::warn!(
-            "startup: size_bounds query failed, filter slider may be incomplete: {e:#}"
-        );
+        tracing::warn!("startup: size_bounds query failed, filter slider may be incomplete: {e:#}");
         (0, 0)
     });
 
     // All extensions known to the DB, used to drive the type-chips model.
     let all_extensions: Vec<String> = backend.extensions().unwrap_or_else(|e| {
-        tracing::warn!(
-            "startup: extensions query failed, type chips may be incomplete: {e:#}"
-        );
+        tracing::warn!("startup: extensions query failed, type chips may be incomplete: {e:#}");
         Vec::new()
     });
 
@@ -2063,7 +2059,9 @@ fn persist_rail(
         Ok(Some(s)) => s,
         Ok(None) => UiState::default(),
         Err(e) => {
-            tracing::warn!("session restore failed while persisting rail, starting with defaults: {e:#}");
+            tracing::warn!(
+                "session restore failed while persisting rail, starting with defaults: {e:#}"
+            );
             UiState::default()
         }
     };

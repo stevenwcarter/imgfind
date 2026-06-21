@@ -583,11 +583,7 @@ impl Database {
         }
         let tag_id = self.create_tag(tag)?;
         let mut conn = self.pool.get().context("get connection")?;
-        let placeholders = rel_paths
-            .iter()
-            .map(|_| "?")
-            .collect::<Vec<_>>()
-            .join(",");
+        let placeholders = rel_paths.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!("SELECT id FROM images WHERE path IN ({placeholders})");
         // Collect ids before starting the transaction so the shared `conn`
         // borrow from `stmt` is released before the mutable borrow for `tx`.
@@ -615,11 +611,7 @@ impl Database {
             return Ok(());
         }
         let mut conn = self.pool.get().context("get connection")?;
-        let placeholders = rel_paths
-            .iter()
-            .map(|_| "?")
-            .collect::<Vec<_>>()
-            .join(",");
+        let placeholders = rel_paths.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!("SELECT id FROM images WHERE path IN ({placeholders})");
         // Collect ids before starting the transaction so the shared `conn`
         // borrow from `stmt` is released before the mutable borrow for `tx`.
@@ -2868,18 +2860,9 @@ mod tests {
         // batch_tag_images: all three carry the tag.
         db.batch_tag_images(&["p1.jpg", "p2.jpg", "p3.jpg"], "beach")
             .unwrap();
-        assert_eq!(
-            db.tags_for_image(&rel("p1.jpg")).unwrap(),
-            vec!["beach"]
-        );
-        assert_eq!(
-            db.tags_for_image(&rel("p2.jpg")).unwrap(),
-            vec!["beach"]
-        );
-        assert_eq!(
-            db.tags_for_image(&rel("p3.jpg")).unwrap(),
-            vec!["beach"]
-        );
+        assert_eq!(db.tags_for_image(&rel("p1.jpg")).unwrap(), vec!["beach"]);
+        assert_eq!(db.tags_for_image(&rel("p2.jpg")).unwrap(), vec!["beach"]);
+        assert_eq!(db.tags_for_image(&rel("p3.jpg")).unwrap(), vec!["beach"]);
 
         // batch_untag_images: remove from p1 and p3; only p2 keeps the tag.
         db.batch_untag_images(&["p1.jpg", "p3.jpg"], "beach")
@@ -2888,10 +2871,7 @@ mod tests {
             db.tags_for_image(&rel("p1.jpg")).unwrap(),
             Vec::<String>::new()
         );
-        assert_eq!(
-            db.tags_for_image(&rel("p2.jpg")).unwrap(),
-            vec!["beach"]
-        );
+        assert_eq!(db.tags_for_image(&rel("p2.jpg")).unwrap(), vec!["beach"]);
         assert_eq!(
             db.tags_for_image(&rel("p3.jpg")).unwrap(),
             Vec::<String>::new()
@@ -2899,18 +2879,12 @@ mod tests {
 
         // Idempotent: applying again should not error.
         db.batch_tag_images(&["p2.jpg"], "beach").unwrap();
-        assert_eq!(
-            db.tags_for_image(&rel("p2.jpg")).unwrap(),
-            vec!["beach"]
-        );
+        assert_eq!(db.tags_for_image(&rel("p2.jpg")).unwrap(), vec!["beach"]);
 
         // Missing path is silently skipped.
         db.batch_tag_images(&["p1.jpg", "nonexistent.jpg"], "beach")
             .unwrap();
-        assert_eq!(
-            db.tags_for_image(&rel("p1.jpg")).unwrap(),
-            vec!["beach"]
-        );
+        assert_eq!(db.tags_for_image(&rel("p1.jpg")).unwrap(), vec!["beach"]);
 
         let _ = std::fs::remove_dir_all(_tmp.parent().unwrap().parent().unwrap());
     }
