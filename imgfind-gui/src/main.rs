@@ -355,7 +355,7 @@ fn main() -> Result<()> {
     // Current lightbox index. None when the lightbox is closed.
     let lb_index: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
 
-    // Index into `state.results` of the keyboard/mouse-selected tile (mirrors the
+    // Index into `state.results()` of the keyboard/mouse-selected tile (mirrors the
     // Slint `selected-index` property). Shares the index space with `lb_index`.
     let selected: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
 
@@ -599,7 +599,7 @@ fn main() -> Result<()> {
             }
             let path = {
                 let s = state_ref.lock();
-                s.results.get(idx).map(|r| r.path.clone())
+                s.results().get(idx).map(|r| r.path.clone())
             };
             let Some(path) = path else { return };
 
@@ -646,7 +646,7 @@ fn main() -> Result<()> {
                 let my_gen = preload_gen_detail.fetch_add(1, Ordering::SeqCst) + 1;
                 let paths = {
                     let s = state_ref.lock();
-                    neighbor_paths(&s.results, idx, preload_n)
+                    neighbor_paths(s.results(), idx, preload_n)
                 };
                 spawn_detail_preload(
                     weak.clone(),
@@ -726,7 +726,7 @@ fn main() -> Result<()> {
         let preload_gen_ta = Arc::clone(&preload_generation);
         window.on_tile_activated(move |index| {
             let idx = index as usize;
-            let path = state_ref.lock().results.get(idx).map(|r| r.path.clone());
+            let path = state_ref.lock().results().get(idx).map(|r| r.path.clone());
             let Some(rel) = path else { return };
             *lb_ref.lock() = Some(idx);
             // Seed the grid selection so closing the lightbox (Esc) lands on this tile.
@@ -741,7 +741,7 @@ fn main() -> Result<()> {
                 let my_gen = preload_gen_ta.fetch_add(1, Ordering::SeqCst) + 1;
                 let paths = {
                     let s = state_ref.lock();
-                    neighbor_paths(&s.results, idx, preload_n)
+                    neighbor_paths(s.results(), idx, preload_n)
                 };
                 spawn_preload(
                     backend_lb.clone(),
@@ -761,7 +761,7 @@ fn main() -> Result<()> {
         window.on_tile_open_external(move |index| {
             let path = {
                 let s = state_ref.lock();
-                s.results.get(index as usize).map(|r| r.path.clone())
+                s.results().get(index as usize).map(|r| r.path.clone())
             };
             if let Some(rel) = path {
                 let abs = backend_open.abs_path(&rel);
@@ -869,7 +869,7 @@ fn main() -> Result<()> {
             // None and prev/next will start from slot 0 — that is intentional.
             let idx = {
                 let st = state_ref.lock();
-                st.results.iter().position(|r| r.path == rel)
+                st.results().iter().position(|r| r.path == rel)
             };
             *lb_ref.lock() = idx;
 
@@ -880,7 +880,7 @@ fn main() -> Result<()> {
                 let my_gen = preload_gen_vf.fetch_add(1, Ordering::SeqCst) + 1;
                 let paths = {
                     let s = state_ref.lock();
-                    neighbor_paths(&s.results, center, preload_n)
+                    neighbor_paths(s.results(), center, preload_n)
                 };
                 spawn_preload(
                     backend_vf.clone(),
@@ -991,7 +991,7 @@ fn main() -> Result<()> {
             }
             let path = state_ref
                 .lock()
-                .results
+                .results()
                 .get(new_idx)
                 .map(|r| r.path.clone());
             if let Some(rel) = path {
@@ -1003,7 +1003,7 @@ fn main() -> Result<()> {
                 let my_gen = preload_gen_prev.fetch_add(1, Ordering::SeqCst) + 1;
                 let paths = {
                     let s = state_ref.lock();
-                    neighbor_paths(&s.results, new_idx, preload_n)
+                    neighbor_paths(s.results(), new_idx, preload_n)
                 };
                 spawn_preload(
                     backend_lb.clone(),
@@ -1029,7 +1029,7 @@ fn main() -> Result<()> {
             tracing::debug!("lightbox-next invoked");
             let (new_idx, len) = {
                 let s = state_ref.lock();
-                let len = s.results.len();
+                let len = s.results().len();
                 let mut guard = lb_ref.lock();
                 let current = guard.unwrap_or(0);
                 let next = clamp_next(current, len);
@@ -1046,7 +1046,7 @@ fn main() -> Result<()> {
             }
             let path = state_ref
                 .lock()
-                .results
+                .results()
                 .get(new_idx)
                 .map(|r| r.path.clone());
             if let Some(rel) = path {
@@ -1058,7 +1058,7 @@ fn main() -> Result<()> {
                 let my_gen = preload_gen_next.fetch_add(1, Ordering::SeqCst) + 1;
                 let paths = {
                     let s = state_ref.lock();
-                    neighbor_paths(&s.results, new_idx, preload_n)
+                    neighbor_paths(s.results(), new_idx, preload_n)
                 };
                 spawn_preload(
                     backend_lb.clone(),
@@ -1082,7 +1082,7 @@ fn main() -> Result<()> {
             let Some(dir) = nav::NavDir::from_i32(dir_i) else {
                 return;
             };
-            let len = state_ref.lock().results.len();
+            let len = state_ref.lock().results().len();
             let cur = *selected_ref.lock();
             let new = nav::move_selection(
                 cur.map(grid_index::CursorIndex),
@@ -1542,7 +1542,7 @@ fn main() -> Result<()> {
             let prev_id: Option<ImageId> = {
                 let sel = *sel_handles.selected.lock();
                 let s = state_ref.lock();
-                sel.and_then(|i| s.results.get(i)).map(|r| r.id)
+                sel.and_then(|i| s.results().get(i)).map(|r| r.id)
             };
             apply_sort_change(
                 weak.clone(),
@@ -1644,7 +1644,7 @@ fn main() -> Result<()> {
             }
             // Copy state out before any `invoke_*` so no guard is held across a
             // re-entrant UI callback (tile-selected re-locks `selected`).
-            let empty = state_ref.lock().results.is_empty();
+            let empty = state_ref.lock().results().is_empty();
             if empty {
                 return;
             }
@@ -2336,7 +2336,7 @@ fn restore_session(st: UiState, ctx: RestoreCtx<'_>) {
     {
         let path = {
             let s = ctx.state.lock();
-            s.results.get(idx).map(|r| r.path.clone())
+            s.results().get(idx).map(|r| r.path.clone())
         };
         if let Some(path) = path {
             let ds = select(path.clone());
@@ -2418,7 +2418,7 @@ fn persist_session(
     let (result_ids, sort) = {
         let s = state.lock();
         (
-            s.results.iter().map(|r| r.id).collect::<Vec<ImageId>>(),
+            s.results().iter().map(|r| r.id).collect::<Vec<ImageId>>(),
             s.sort,
         )
     };
@@ -2571,7 +2571,7 @@ fn apply_sort_change(
             // The row order changed: drop the multi-selection (its indices point
             // into the old order) and mark dirty so the tick re-statuses.
             selection.clear();
-            let results = state_ref.lock().results.clone();
+            let results = state_ref.lock().results().to_vec();
             apply_selection_after_results(&w, &selection.selected, &results, &after);
         }
     }
@@ -2762,7 +2762,7 @@ fn loader_tick(t: LoaderTick<'_>) {
     let cols = t.window.get_cols().max(0) as usize;
     let viewport_h = t.window.get_grid_viewport_h();
     let scroll_px = (-t.window.get_grid_viewport_y()).max(0.0);
-    let total = t.state_ref.lock().results.len();
+    let total = t.state_ref.lock().results().len();
     let (first_row, last_row) = window::visible_rows(scroll_px, viewport_h, window::TILE_PITCH_Y);
     let range = window::window_range(
         first_row,
@@ -2799,7 +2799,7 @@ fn loader_tick(t: LoaderTick<'_>) {
     // 4. Request missing thumbnails for the visible window.
     let paths: Vec<String> = {
         let s = t.state_ref.lock();
-        s.results
+        s.results()
             .get(range.clone())
             .map(|slice| slice.iter().map(|r| r.path.clone()).collect())
             .unwrap_or_default()
@@ -2825,7 +2825,7 @@ fn rebuild_window(
 ) {
     let slice: Vec<RowMeta> = {
         let s = state_ref.lock();
-        s.results
+        s.results()
             .get(range.clone())
             .map(<[_]>::to_vec)
             .unwrap_or_default()
@@ -2846,7 +2846,7 @@ fn push_statusline(
     let line = {
         let sel = selection.lock();
         let s = state.lock();
-        format_statusline(&sel, &s.results)
+        format_statusline(&sel, s.results())
     };
     w.set_statusline(line.into());
 }
@@ -2897,7 +2897,11 @@ fn apply_fetch_result(
                 }
                 Err(e) => s.apply_error(e.to_string()),
             }
-            (s.view_state(), s.error.clone(), s.results.clone())
+            (
+                s.view_state(),
+                s.error().map(str::to_owned),
+                s.results().to_vec(),
+            )
         };
 
         // A new result set is installed: bump the generation and clear the
@@ -3080,14 +3084,14 @@ fn focused_path(
     // once in an order that could deadlock against another path.
     let lb = *lb_index.lock();
     if let Some(i) = lb {
-        return state.lock().results.get(i).map(|r| r.path.clone());
+        return state.lock().results().get(i).map(|r| r.path.clone());
     }
     let detail_path = detail.lock().as_ref().map(|d| d.path.clone());
     if let Some(p) = detail_path {
         return Some(p);
     }
     let sel = (*selected.lock())?;
-    state.lock().results.get(sel).map(|r| r.path.clone())
+    state.lock().results().get(sel).map(|r| r.path.clone())
 }
 
 /// Holders needed to resolve the focused image and refresh the detail panel
@@ -3180,7 +3184,7 @@ fn selected_paths(
     let s = state.lock();
     sel.set()
         .iter()
-        .filter_map(|&i| s.results.get(i).map(|r| r.path.clone()))
+        .filter_map(|&i| s.results().get(i).map(|r| r.path.clone()))
         .collect()
 }
 
