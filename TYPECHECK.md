@@ -1,0 +1,178 @@
+# TYPECHECK.md — type-system strengthening findings
+
+Last triage: 2026-06-21 against `main` @ 20d80f38. Toolchain: cargo build/check --workspace / cargo test --workspace / cargo clippy --workspace --all-targets.
+
+> When you fix an item here, strip it from this file in the same commit that fixes it (open issues only).
+
+## How to use this file
+- Check `[x] execute` to fix this batch; `[x] skip` to never re-flag; leave unchecked to keep for next run.
+- Ranking is impact = bug-prevention × blast-radius (effort is separate, never folded into rank).
+- Renames are flag-only (decision-needed), never auto-applied. Public-API type changes ARE in scope.
+- When ready, run `/typecheck --execute`.
+
+## Critical
+
+### T1. Raw i64 IDs (image / tag / collection) are interchangeable across the DB ⇄ GUI ⇄ ui_state boundary: `image id` / `tag id` / `collection id` (src/database.rs:351, :392, :561)
+- **Lens:** newtype
+- **Impact:** 9 (bug-prevention high × blast 3)
+- **Effort:** M
+- **Risk:** high
+- **Current type:** three distinct concepts all spelled `i64` (image id, tag id, collection id), plus `Vec<i64>` / `Similar(i64)` in persisted ui_state.
+- **Proposed type:** `struct ImageId(i64)`, `struct TagId(i64)`, `struct CollectionId(i64)` (newtypes; derive `Copy, Clone, Eq, Hash, Serialize, Deserialize`). Best done in ONE compiler-driven pass since they migrate together, but keep the three symbols distinct so a partial pick is possible.
+- **Evidence:** `image_tags` is inserted as `VALUES(?1, ?2)` with `image_id` and `tag_id` adjacent, both `i64`; the same shape repeats for `collection_images` (`collection_id` + `image_id`). A transposition — passing a tag id where an image id is expected, or swapping the two bind params — **compiles and silently writes corrupt join rows** (a tag attached to the wrong/nonexistent image, membership pointing at the wrong collection). There is no type or DB-level guard today; the only feedback is later-observed wrong results.
+- **Blast radius:**
+  - image id: src/database.rs:351, :378, :408-413, :665-676; imgfind-gui/src/state.rs:95-102; imgfind-gui/src/backend.rs:99-104; src/ui_state.rs:49 (`result_ids: Vec<i64>`), src/ui_state.rs:16 (`PersistedMode::Similar(i64)`)
+  - tag id: src/database.rs:392-403, :409-414, :439-449, :516, :546
+  - collection id: src/database.rs:561-576, :581-587, :598-606, :615
+- **Invariants/caveats:** **Crosses the `ui_state` persisted-JSON boundary** (`result_ids`, `PersistedMode::Similar`). A newtype `ImageId(i64)` serializing transparently keeps the JSON byte-identical (serde emits the inner i64), but this MUST be pinned — derive `#[serde(transparent)]` on `ImageId` and add a round-trip test that loads a pre-migration `ui_state` row and asserts the decoded `result_ids` / `Similar(id)` are unchanged. Invariant this depends on: *the on-disk ui_state JSON shape for ids stays a bare integer*. Also crosses the DB extraction seam (turso `col_*` helpers) and the GUI crate.
+- **Proposed migration:** introduce the three newtypes with `#[serde(transparent)]`; change the constructors/getters at the DB extraction source and ui_state fields; let the compiler surface every transposition site and fix to green (the broken call sites ARE the audit).
+- [x] execute   [ ] skip
+
+## High
+
+### T2. UI sort-selector strings sit un-typed above the existing `SortKey` enum: `make_sort_options_model` / `option_str_to_sort_key` (imgfind-gui/src/main.rs:2542, :3467, :3482)
+- **Lens:** stringly-typed
+- **Impact:** 6 (bug-prevention high × blast 2)
+- **Effort:** M
+- **Risk:** low
+- **Current type:** `String`/`SharedString` selector labels. NOTE: the *core* sort is already strongly typed (`SortKey { Name, Size, Type }` + `SortDir` + `Sort` in src/sort.rs); this finding is strictly the **GUI selector-string layer that maps onto `SortKey` plus a `Relevance` special case** — not "sort is stringly-typed" at the core (it isn't).
+- **Proposed type:** `enum SortOption { Relevance, Name, Size, Type }` with `Display` (for the Slint string model) and a total mapping to `Option<SortKey>` (Relevance → None / the relevance-order special case). The selector model and `*_to_selector_index` helpers key off the enum instead of label strings.
+- **Evidence:** option labels are compared with `if option_str == "Relevance"` and `match` on `"Size"`/`"Type"`, while `make_sort_options_model` pushes `"Relevance"`/`"Name"`/`"Size"`/`"Type"` in a fixed order. The model order and the `sort_key_to_browse_index` / `sort_to_selector_index` integer indices are tightly coupled by hand — a label typo or a reorder of the pushes silently mismaps the dropdown selection to the wrong sort, and `"Relevance"` (which has no `SortKey`) is an unguarded string special-case.
+- **Blast radius:** imgfind-gui/src/main.rs:2542 (`if option_str == "Relevance"`), :3470 (push `"Relevance"`), :3472-3474 (push Name/Size/Type), :3484-3485 (`match "Size"/"Type"`).
+- **Invariants/caveats:** Purely UI — no serde/DB boundary crossed (the persisted sort goes through the typed `Sort`). Safe to do independently of T1.
+- **Proposed migration:** introduce `SortOption` with `Display` + `to_sort_key()`; build the Slint model by iterating the enum variants; replace the string compares/matches at source and fix breaks to green.
+- [x] execute   [ ] skip
+
+## Medium
+
+### T3. `Filters` tag-state lets enabled-but-empty and stale-while-disabled states exist: `tags_enabled` + `tags` + `tag_match` (src/filters.rs:8-25)
+- **Lens:** illegal-states
+- **Impact:** 4 (bug-prevention med × blast 2)
+- **Effort:** M
+- **Risk:** low
+- **Current type:** `tags_enabled: bool` + `tags: Vec<String>` + `tag_match: TagMatch`, where `tag_match` is meaningless when disabled or when `tags` is empty.
+- **Proposed type:** `enum TagFilter { Disabled, Active { tags: Vec<String>, match_mode: TagMatch } }` (or `Disabled` + `Active` carrying a non-empty tag set). Removes the illegal `enabled && tags.is_empty()` and "stale `tag_match` while disabled" states.
+- **Evidence:** `build_filter_clause` must hand-guard both conditions today; nothing prevents constructing `Filters { tags_enabled: true, tags: vec![], .. }`. No live bug found (SQL guards), but the truth table is wider than the legal states.
+- **Blast radius:** src/filters.rs:93-116 (`build_filter_clause`), src/filters.rs:51-55 (`carry_tag_filter_from`), imgfind-gui/src/main.rs:1028, src/ui_state.rs:47.
+- **Invariants/caveats:** **Crosses the `ui_state` persisted-JSON boundary** — the enum needs `#[serde]` tagging that stays back-compatible with already-persisted `tags_enabled`/`tags`/`tag_match` fields; a naive `enum` changes the JSON shape. Pin with a round-trip test loading an old ui_state row. Also: `carry_tag_filter_from` *intentionally* preserves the disabled tag set for fast re-activation (per CLAUDE.md) — the `Active`-vs-`Disabled` split must retain the carried tags (e.g. `Disabled` may still hold a remembered set, or carry separately). Invariant this depends on: *disabled state can still round-trip a remembered tag list*.
+- **Proposed migration:** introduce `TagFilter` (serde-tagged to match existing JSON, or with a `From`/migration shim); replace the three fields; fix `build_filter_clause` / `carry_tag_filter_from` / GUI / ui_state at source to green; add the ui_state round-trip test.
+- [x] execute   [ ] skip
+
+### T4. Half-a-coordinate GPS is representable: `ImageMetadata` latitude + longitude (src/database.rs:1513-1524)
+- **Lens:** illegal-states
+- **Impact:** 4 (bug-prevention med × blast 2)
+- **Effort:** M
+- **Risk:** low
+- **Current type:** two independent `Option<f64>` (latitude, longitude).
+- **Proposed type:** `Option<(f64, f64)>` or `enum GpsCoords { Present(f64, f64), Absent }` — makes `lat = Some, lon = None` (and the reverse) unrepresentable.
+- **Evidence:** every read already pairs the two with an `if let (Some, Some)` guard, so no live bug — but the field shape permits a half-present coordinate that callers must keep remembering to reject.
+- **Blast radius:** src/database.rs:1167-1168, :1250-1251, :1469-1470, :1604-1605, :1648, :1674; imgfind-gui/src/detail.rs:42.
+- **Invariants/caveats:** Serde/persistence compat needs care if `ImageMetadata` is ever serialized into ui_state or cached — verify the on-disk shape and add a round-trip test before changing field count. Lens recommended deferring; included as a clean illegal-states removal once the serde shape is confirmed.
+- **Proposed migration:** introduce `GpsCoords`; replace the two fields; collapse every paired `if let` to a single match at source; fix to green.
+- [x] execute   [ ] skip
+
+### T5. `max_k` and `limit` are both `usize` and silently swappable: `max_k` (src/database.rs:759)
+- **Lens:** newtype
+- **Impact:** 4 (bug-prevention med × blast 2)
+- **Effort:** S
+- **Risk:** med
+- **Current type:** `usize`.
+- **Proposed type:** `struct MaxK(usize)`.
+- **Evidence:** `k = limit.clamp(1, max_k)` takes two adjacent `usize` args; transposing `limit` and `max_k` compiles and **silently returns the wrong number of results** (e.g. clamps the cap by the request instead of the request by the cap) with no error.
+- **Blast radius:** src/database.rs:759, :789, :834; src/config.rs:37; imgfind-gui/src/backend.rs:93.
+- **Invariants/caveats:** Crosses config (serde) — `MaxK(usize)` should be `#[serde(transparent)]` to keep config.toml readable.
+- **Proposed migration:** introduce `MaxK(usize)`; thread from config through the search fns; fix the clamp call sites to green.
+- [x] execute   [ ] skip
+
+### T6. Embedding dimension is a bare `usize` that must equal the model's true dim: `embedding dimension` (src/database.rs:161)
+- **Lens:** newtype
+- **Impact:** 4 (bug-prevention med × blast 2)
+- **Effort:** S
+- **Risk:** low
+- **Current type:** `usize` (512 / 768).
+- **Proposed type:** `struct EmbeddingDim(usize)`.
+- **Evidence:** the dim flows from the model registry into `F32_BLOB(dim)` schema creation and vector-table sizing; a wrong dim produces malformed embeddings / mismatched vector tables. Rarely transposed in practice, but it's a load-bearing correctness invariant currently indistinguishable from any other count.
+- **Blast radius:** src/database.rs:161, :179, :196; src/schema.rs:43, :52.
+- **Invariants/caveats:** None serde-facing (derived from the active model at runtime). Pairs conceptually with the per-model `F32_BLOB(dim)` invariant.
+- **Proposed migration:** introduce `EmbeddingDim(usize)`; carry it from `ensure_and_activate_model` through schema/vector-table creation; fix to green.
+- [x] execute   [ ] skip
+
+### T7. File size is a bare `Option<i64>` with implicit byte units: `file size (bytes)` (src/sort.rs:38)
+- **Lens:** newtype
+- **Impact:** 4 (bug-prevention med × blast 2)
+- **Effort:** M
+- **Risk:** low
+- **Current type:** `Option<i64>` (bytes).
+- **Proposed type:** `struct FileSize(i64)` (or `u64` to encode the non-negative invariant).
+- **Evidence:** raw `i64` bytes with units only in field names; could be confused with a count or have min/max filter bounds swapped without a type error. No live bug; clarity + a non-negativity invariant.
+- **Blast radius:** src/sort.rs:38; src/database.rs:1164, :1252; src/filters.rs:67-73; imgfind-gui/src/main.rs:2530, :2558-2567.
+- **Invariants/caveats:** Touches the filter size-range slider in the GUI and sort tie-breaks; if `FileSize` ever lands in ui_state, make it `#[serde(transparent)]`.
+- **Proposed migration:** introduce `FileSize`; change the column extraction + sort/filter signatures at source; fix to green.
+- [x] execute   [ ] skip
+
+### T8. Four adjacent `f64` bounds invite N/S/E/W swaps: `geographic bounds` (src/database.rs:1211)
+- **Lens:** newtype
+- **Impact:** 3 (bug-prevention med × blast 1, but a real silent-wrong-result class)
+- **Effort:** S
+- **Risk:** med
+- **Current type:** four adjacent `f64` params (north, south, east, west).
+- **Proposed type:** `struct GeoRect { north: f64, south: f64, east: f64, west: f64 }` (consider a constructor that validates `south <= north`, `west <= east`).
+- **Evidence:** four same-typed adjacent params; swapping N/S or E/W compiles and **silently queries the wrong rectangle**. `get_images_by_bounds` is a library fn with **no current GUI caller** (no map view yet), so user-facing risk is low today — but it's the highest-smell signature in the DB layer and will be wired up when the map view lands.
+- **Blast radius:** src/database.rs:1211-1221, :1235-1238.
+- **Invariants/caveats:** None serde-facing. Low blast precisely because there's no caller yet — cheap to fix before one exists.
+- **Proposed migration:** introduce `GeoRect`; change the fn signature; (no caller to fix); add a constructor invariant + unit test.
+- [ ] execute   [ ] skip
+
+## Low
+
+### T9. `distance threshold` is a bare `f32` (documentation-grade): src/database.rs:758
+- **Lens:** newtype
+- **Impact:** 2 (bug-prevention med × blast 1)
+- **Effort:** S
+- **Risk:** low
+- **Current type:** `f32`.
+- **Proposed type:** `struct DistanceThreshold(f32)`.
+- **Evidence:** sits adjacent to `max_k` but is a different primitive type, so transposition is already prevented by the compiler. Value is semantic clarity (it's a cosine distance in [0, 2], threshold ≤ 1.3), not bug prevention.
+- **Blast radius:** src/database.rs:754-760, :783-789, :828-834, :878-881; src/config.rs:34; imgfind-gui/src/backend.rs:86.
+- **Invariants/caveats:** Crosses config (serde) — `#[serde(transparent)]` to keep config.toml readable. Could encode the `0.0..=2.0` range as a constructor invariant.
+- **Proposed migration:** introduce `DistanceThreshold(f32)`; thread from config; fix to green.
+- [ ] execute   [ ] skip
+
+### T10. Grid nav indices share `usize` (test-covered, documentation-grade): `cursor / cols / len` (imgfind-gui/src/nav.rs:36)
+- **Lens:** newtype
+- **Impact:** 2 (bug-prevention med × blast 1)
+- **Effort:** M
+- **Risk:** med
+- **Current type:** three `usize` (cursor, cols, len).
+- **Proposed type:** `CursorIndex` / `GridCols` / `ItemCount` newtypes.
+- **Evidence:** multiple same-typed `usize`; swapping `cols` and `len` breaks grid math. Mitigated: `move_selection` is covered by nav.rs/window.rs unit tests that would catch a swap, so value is mostly clarity.
+- **Blast radius:** imgfind-gui/src/nav.rs:36; imgfind-gui/src/main.rs:580-588; imgfind-gui/src/window.rs:38.
+- **Invariants/caveats:** Ephemeral grid state (not persisted) — no serde concern.
+- **Proposed migration:** introduce the three index newtypes; change `move_selection` + window signatures; fix to green; existing tests guard correctness.
+- [x] execute   [ ] skip
+
+### T11. Thumbnail size is a bare `u32` (documentation-grade): `thumbnail size (px)` (src/thumbnail.rs:44)
+- **Lens:** newtype
+- **Impact:** 1 (bug-prevention low × blast 1)
+- **Effort:** S
+- **Risk:** low
+- **Current type:** `u32` (px).
+- **Proposed type:** `struct ThumbnailSize(u32)`.
+- **Evidence:** distinct type from the `i64` file size, so transposition risk is low; sizes are mostly the const `GUI_THUMBNAIL_SIZES`. Documentation value.
+- **Blast radius:** src/thumbnail.rs:10, :44, :124, :141; src/database.rs:701, :1057, :1095-1098.
+- **Invariants/caveats:** Keyed into the `thumbnails` table `(image_hash, size)` — a newtype is fine as long as the bind value stays the inner `u32`.
+- **Proposed migration:** introduce `ThumbnailSize(u32)`; change the thumbnail/DB signatures; fix to green.
+- [x] execute   [ ] skip
+
+### T12. `SearchState` 4-field truth table allows illegal combos (well-guarded today): (imgfind-gui/src/state.rs:17-29)
+- **Lens:** illegal-states
+- **Impact:** 1 (bug-prevention low × blast 1)
+- **Effort:** M
+- **Risk:** low
+- **Current type:** `loading: bool` + `error: Option<String>` + `results: Vec<…>` + `has_searched: bool` (a 5-state truth table with illegal combos like `loading && error`, `loading && results`, `has_searched == false` with results).
+- **Proposed type:** `enum Phase { Idle, Loading, Complete { results, error } }`.
+- **Evidence:** illegal combinations are *constructible* by direct field mutation, but in practice all transitions go through 3 well-guarded methods and `view_state`, so no live bug. Lens recommended deferring.
+- **Blast radius:** imgfind-gui/src/state.rs:37-42, :49-53, :56-60, :74-86 (`view_state`).
+- **Invariants/caveats:** Ephemeral GUI state — not persisted, no serde concern.
+- **Proposed migration:** introduce `Phase`; replace the four fields; route the 3 transition methods + `view_state` through the enum; fix to green.
+- [x] execute   [ ] skip
