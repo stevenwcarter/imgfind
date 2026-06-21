@@ -2,7 +2,6 @@
 //! non-vector `browse` query and the filtered vector search so both apply
 //! identical predicates. Designed to extend: add a field + a clause arm.
 
-use rusqlite::types::Value;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -56,27 +55,28 @@ impl Filters {
     }
 }
 
-/// Build the SQL predicate fragment + ordered bound params for `f`.
+/// Build the SQL predicate fragment + ordered [`turso::Value`] bound params for `f`.
+///
 /// The fragment is either empty or starts with " AND " so it can be appended
 /// after an existing `WHERE <something>`. Column aliases assumed: `i` = images,
 /// `m` = image_metadata.
-pub fn build_filter_clause(f: &Filters) -> (String, Vec<Value>) {
+pub fn build_filter_clause_turso(f: &Filters) -> (String, Vec<turso::Value>) {
     let mut clauses: Vec<String> = Vec::new();
-    let mut params: Vec<Value> = Vec::new();
+    let mut params: Vec<turso::Value> = Vec::new();
 
     if let Some(min) = f.size_min {
         clauses.push("m.file_size >= ?".into());
-        params.push(Value::Integer(min));
+        params.push(turso::Value::Integer(min));
     }
     if let Some(max) = f.size_max {
         clauses.push("m.file_size <= ?".into());
-        params.push(Value::Integer(max));
+        params.push(turso::Value::Integer(max));
     }
     if !f.extensions.is_empty() {
         let mut ors = Vec::new();
         for ext in &f.extensions {
             ors.push("lower(i.path) LIKE ?".to_string());
-            params.push(Value::Text(format!("%.{}", ext.to_lowercase())));
+            params.push(turso::Value::Text(format!("%.{}", ext.to_lowercase())));
         }
         clauses.push(format!("({})", ors.join(" OR ")));
     }
@@ -99,7 +99,7 @@ pub fn build_filter_clause(f: &Filters) -> (String, Vec<Value>) {
                          WHERE it.image_id = i.id AND t.name = ?)"
                             .into(),
                     );
-                    params.push(Value::Text(tag.clone()));
+                    params.push(turso::Value::Text(tag.clone()));
                 }
             }
             TagMatch::AnyOf => {
@@ -109,7 +109,7 @@ pub fn build_filter_clause(f: &Filters) -> (String, Vec<Value>) {
                      WHERE it.image_id = i.id AND t.name IN ({placeholders}))"
                 ));
                 for tag in &f.tags {
-                    params.push(Value::Text(tag.clone()));
+                    params.push(turso::Value::Text(tag.clone()));
                 }
             }
         }
@@ -150,7 +150,7 @@ mod tests {
 
     #[test]
     fn empty_filters_yield_no_clause() {
-        let (sql, params) = build_filter_clause(&Filters::default());
+        let (sql, params) = build_filter_clause_turso(&Filters::default());
         assert_eq!(sql, "");
         assert!(params.is_empty());
     }
@@ -162,9 +162,12 @@ mod tests {
             size_max: Some(5000),
             ..Default::default()
         };
-        let (sql, params) = build_filter_clause(&f);
+        let (sql, params) = build_filter_clause_turso(&f);
         assert_eq!(sql, " AND m.file_size >= ? AND m.file_size <= ?");
-        assert_eq!(params, vec![Value::Integer(100), Value::Integer(5000)]);
+        assert_eq!(
+            params,
+            vec![turso::Value::Integer(100), turso::Value::Integer(5000)]
+        );
     }
 
     #[test]
@@ -173,9 +176,9 @@ mod tests {
             size_min: Some(100),
             ..Default::default()
         };
-        let (sql, params) = build_filter_clause(&f);
+        let (sql, params) = build_filter_clause_turso(&f);
         assert_eq!(sql, " AND m.file_size >= ?");
-        assert_eq!(params, vec![Value::Integer(100)]);
+        assert_eq!(params, vec![turso::Value::Integer(100)]);
     }
 
     #[test]
@@ -184,17 +187,20 @@ mod tests {
             extensions: vec!["JPG".into(), "png".into()],
             ..Default::default()
         };
-        let (sql, params) = build_filter_clause(&f);
+        let (sql, params) = build_filter_clause_turso(&f);
         assert_eq!(sql, " AND (lower(i.path) LIKE ? OR lower(i.path) LIKE ?)");
         assert_eq!(
             params,
-            vec![Value::Text("%.jpg".into()), Value::Text("%.png".into())]
+            vec![
+                turso::Value::Text("%.jpg".into()),
+                turso::Value::Text("%.png".into())
+            ]
         );
     }
 
     #[test]
     fn gps_has_and_no() {
-        let has = build_filter_clause(&Filters {
+        let has = build_filter_clause_turso(&Filters {
             gps: GpsFilter::HasGps,
             ..Default::default()
         })
@@ -203,7 +209,7 @@ mod tests {
             has,
             " AND (m.latitude IS NOT NULL AND m.longitude IS NOT NULL)"
         );
-        let no = build_filter_clause(&Filters {
+        let no = build_filter_clause_turso(&Filters {
             gps: GpsFilter::NoGps,
             ..Default::default()
         })
@@ -220,14 +226,17 @@ mod tests {
             gps: GpsFilter::HasGps,
             ..Default::default()
         };
-        let (sql, params) = build_filter_clause(&f);
+        let (sql, params) = build_filter_clause_turso(&f);
         assert_eq!(
             sql,
             " AND m.file_size >= ? AND (lower(i.path) LIKE ?) AND (m.latitude IS NOT NULL AND m.longitude IS NOT NULL)"
         );
         assert_eq!(
             params,
-            vec![Value::Integer(10), Value::Text("%.nef".into())]
+            vec![
+                turso::Value::Integer(10),
+                turso::Value::Text("%.nef".into())
+            ]
         );
     }
 
@@ -238,7 +247,7 @@ mod tests {
             tags_enabled: false,
             ..Default::default()
         };
-        assert_eq!(build_filter_clause(&f).0, "");
+        assert_eq!(build_filter_clause_turso(&f).0, "");
     }
 
     #[test]
@@ -249,14 +258,17 @@ mod tests {
             tags_enabled: true,
             ..Default::default()
         };
-        let (sql, params) = build_filter_clause(&f);
+        let (sql, params) = build_filter_clause_turso(&f);
         assert_eq!(
             sql,
             " AND EXISTS (SELECT 1 FROM image_tags it JOIN tags t ON t.id = it.tag_id WHERE it.image_id = i.id AND t.name = ?) AND EXISTS (SELECT 1 FROM image_tags it JOIN tags t ON t.id = it.tag_id WHERE it.image_id = i.id AND t.name = ?)"
         );
         assert_eq!(
             params,
-            vec![Value::Text("a".into()), Value::Text("b".into())]
+            vec![
+                turso::Value::Text("a".into()),
+                turso::Value::Text("b".into())
+            ]
         );
     }
 
@@ -268,14 +280,17 @@ mod tests {
             tags_enabled: true,
             ..Default::default()
         };
-        let (sql, params) = build_filter_clause(&f);
+        let (sql, params) = build_filter_clause_turso(&f);
         assert_eq!(
             sql,
             " AND EXISTS (SELECT 1 FROM image_tags it JOIN tags t ON t.id = it.tag_id WHERE it.image_id = i.id AND t.name IN (?, ?))"
         );
         assert_eq!(
             params,
-            vec![Value::Text("a".into()), Value::Text("b".into())]
+            vec![
+                turso::Value::Text("a".into()),
+                turso::Value::Text("b".into())
+            ]
         );
     }
 
@@ -287,11 +302,14 @@ mod tests {
             tags_enabled: true,
             ..Default::default()
         };
-        let (sql, params) = build_filter_clause(&f);
+        let (sql, params) = build_filter_clause_turso(&f);
         assert_eq!(
             sql,
             " AND m.file_size >= ? AND EXISTS (SELECT 1 FROM image_tags it JOIN tags t ON t.id = it.tag_id WHERE it.image_id = i.id AND t.name = ?)"
         );
-        assert_eq!(params, vec![Value::Integer(5), Value::Text("x".into())]);
+        assert_eq!(
+            params,
+            vec![turso::Value::Integer(5), turso::Value::Text("x".into())]
+        );
     }
 }

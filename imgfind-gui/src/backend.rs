@@ -39,7 +39,13 @@ pub struct Backend {
 impl Backend {
     pub fn open(dir: Option<&str>) -> Result<Backend> {
         let db_path = get_db_path(dir).context("Failed to resolve image database")?;
-        let db = Database::new(&db_path).context("Failed to open database")?;
+        if imgfind::block_on(imgfind::migrate::is_legacy_db(&db_path)) {
+            anyhow::bail!(
+                "legacy database detected at {}; run `imgfind migrate` to upgrade it to the new engine",
+                db_path.display()
+            );
+        }
+        let db = imgfind::block_on(Database::new(&db_path)).context("Failed to open database")?;
         let parent_dir = db.parent_dir.clone();
         Ok(Backend {
             db,
@@ -55,8 +61,7 @@ impl Backend {
         let db = self.db.clone();
         std::thread::spawn(move || {
             let result = (|| -> Result<ClipEmbedder> {
-                let model_name = db
-                    .active_model()
+                let model_name = imgfind::block_on(db.active_model())
                     .context("Failed to resolve active model")?
                     .name;
                 ClipEmbedder::from_model(&model_name, false).context("Failed to load CLIP model")
@@ -86,16 +91,15 @@ impl Backend {
             .context("Failed to embed query")?;
         let sc = SearchConfig::default();
         let engine = SearchEngine::new(&self.db);
-        let rows = engine
-            .search_meta(
-                embedding,
-                SEARCH_LIMIT,
-                0,
-                sc.distance_threshold,
-                sc.max_k,
-                filters,
-            )
-            .context("Search failed")?;
+        let rows = imgfind::block_on(engine.search_meta(
+            embedding,
+            SEARCH_LIMIT,
+            0,
+            sc.distance_threshold,
+            sc.max_k,
+            filters,
+        ))
+        .context("Search failed")?;
         Ok(rows
             .into_iter()
             .map(|(id, path, _distance, size)| RowMeta {
@@ -109,51 +113,44 @@ impl Backend {
 
     /// Browse the full filtered set in `sort` order (no paging).
     pub fn browse(&self, filters: &Filters, sort: &Sort) -> Result<Vec<RowMeta>> {
-        self.db.browse_all(filters, sort).context("Browse failed")
+        imgfind::block_on(self.db.browse_all(filters, sort)).context("Browse failed")
     }
 
     /// Fetch [`RowMeta`] for an explicit ordered id list (session restore).
     pub fn rehydrate(&self, ids: &[i64]) -> Result<Vec<RowMeta>> {
-        self.db.rehydrate_rows(ids).context("Rehydrate failed")
+        imgfind::block_on(self.db.rehydrate_rows(ids)).context("Rehydrate failed")
     }
 
     /// Load the persisted GUI session, if any. Returns `Ok(None)` when no row
     /// exists or the stored blob is malformed (callers fall back to a default
     /// browse rather than failing startup).
     pub fn get_ui_state(&self) -> Result<Option<UiState>> {
-        self.db.get_ui_state().context("Failed to read UI state")
+        imgfind::block_on(self.db.get_ui_state()).context("Failed to read UI state")
     }
 
     /// Persist the GUI session state (single-row upsert).
     pub fn set_ui_state(&self, st: &UiState) -> Result<()> {
-        self.db.set_ui_state(st).context("Failed to write UI state")
+        imgfind::block_on(self.db.set_ui_state(st)).context("Failed to write UI state")
     }
 
     /// Resolve a stored relative image path back to its DB row id (used to
     /// persist/restore a similarity-search seed by id rather than by path).
     pub fn id_for_rel_path(&self, rel_path: &str) -> Result<i64> {
         let abs = AbsolutePath(self.abs_path(rel_path));
-        self.db
-            .get_image_id(&abs)
+        imgfind::block_on(self.db.get_image_id(&abs))
             .with_context(|| format!("No image id for {rel_path}"))
     }
 
     pub fn extensions(&self) -> Result<Vec<String>> {
-        self.db
-            .distinct_extensions()
-            .context("Failed to list extensions")
+        imgfind::block_on(self.db.distinct_extensions()).context("Failed to list extensions")
     }
 
     pub fn size_bounds(&self) -> Result<(i64, i64)> {
-        self.db
-            .file_size_bounds()
-            .context("Failed to read size bounds")
+        imgfind::block_on(self.db.file_size_bounds()).context("Failed to read size bounds")
     }
 
     pub fn thumbnail(&self, rel_path: &str, size: u32) -> Result<Vec<u8>> {
-        let hash = self
-            .db
-            .get_image_hash(&Self::rel(rel_path))
+        let hash = imgfind::block_on(self.db.get_image_hash(&Self::rel(rel_path)))
             .with_context(|| format!("No hash for {rel_path}"))?;
         let abs = self.abs_path(rel_path);
         let abs_str = abs.to_string_lossy();
@@ -172,9 +169,7 @@ impl Backend {
     /// path. Falls back to decoding the file only when no stored row exists
     /// (e.g. metadata not yet backfilled).
     pub fn metadata(&self, rel_path: &str) -> Result<ImageMetadata> {
-        if let Some(meta) = self
-            .db
-            .get_image_metadata(&Self::rel(rel_path))
+        if let Some(meta) = imgfind::block_on(self.db.get_image_metadata(&Self::rel(rel_path)))
             .with_context(|| format!("Failed to read stored metadata for {rel_path}"))?
         {
             return Ok(meta);
@@ -186,22 +181,19 @@ impl Backend {
 
     /// Assign `tag` to the image at `rel_path` (creates the tag if new).
     pub fn add_tag(&self, rel_path: &str, tag: &str) -> Result<()> {
-        self.db
-            .tag_image(&Self::rel(rel_path), tag)
+        imgfind::block_on(self.db.tag_image(&Self::rel(rel_path), tag))
             .with_context(|| format!("add tag {tag} to {rel_path}"))
     }
 
     /// Remove `tag` from the image at `rel_path`.
     pub fn remove_tag(&self, rel_path: &str, tag: &str) -> Result<()> {
-        self.db
-            .untag_image(&Self::rel(rel_path), tag)
+        imgfind::block_on(self.db.untag_image(&Self::rel(rel_path), tag))
             .with_context(|| format!("remove tag {tag} from {rel_path}"))
     }
 
     /// Attach `tag` to every image in `rel_paths` (batch; single round-trip).
     pub fn batch_add_tags(&self, rel_paths: &[&str], tag: &str) -> Result<()> {
-        self.db
-            .batch_tag_images(rel_paths, tag)
+        imgfind::block_on(self.db.batch_tag_images(rel_paths, tag))
             .with_context(|| format!("batch add tag {tag}"))
     }
 
@@ -209,22 +201,20 @@ impl Backend {
     /// Sibling to `batch_add_tags`; wired into the untag chord path when added.
     #[allow(dead_code)]
     pub fn batch_remove_tags(&self, rel_paths: &[&str], tag: &str) -> Result<()> {
-        self.db
-            .batch_untag_images(rel_paths, tag)
+        imgfind::block_on(self.db.batch_untag_images(rel_paths, tag))
             .with_context(|| format!("batch remove tag {tag}"))
     }
 
     /// Tags currently assigned to the image at `rel_path`.
     pub fn tags_for(&self, rel_path: &str) -> Result<Vec<String>> {
-        self.db
-            .tags_for_image(&Self::rel(rel_path))
+        imgfind::block_on(self.db.tags_for_image(&Self::rel(rel_path)))
             .with_context(|| format!("tags for {rel_path}"))
     }
 
     /// All tag names in the database (alphabetical).
     #[allow(dead_code)] // consumed by upcoming tag-panel task; not yet wired into main.rs
     pub fn all_tags(&self) -> Result<Vec<String>> {
-        self.db.list_tags().context("list all tags")
+        imgfind::block_on(self.db.list_tags()).context("list all tags")
     }
 
     fn rel(p: &str) -> RelativePath {
@@ -235,17 +225,15 @@ impl Backend {
     /// is filtered out of the results.
     pub fn search_similar(&self, rel_path: &str, filters: &Filters) -> Result<Vec<RowMeta>> {
         let sc = SearchConfig::default();
-        let rows = self
-            .db
-            .find_similar_to_path(
-                &Self::rel(rel_path),
-                SEARCH_LIMIT,
-                0,
-                sc.distance_threshold,
-                sc.max_k,
-                filters,
-            )
-            .with_context(|| format!("Similar search failed for {rel_path}"))?;
+        let rows = imgfind::block_on(self.db.find_similar_to_path(
+            &Self::rel(rel_path),
+            SEARCH_LIMIT,
+            0,
+            sc.distance_threshold,
+            sc.max_k,
+            filters,
+        ))
+        .with_context(|| format!("Similar search failed for {rel_path}"))?;
         Ok(rows
             .into_iter()
             .filter(|(_, path, _, _)| path != rel_path)
@@ -270,7 +258,7 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("imgfind_gui_test_{}_{n}", std::process::id()));
         let db_path = root.join(".imgfind").join("imgfind.db");
-        let db = Database::new(&db_path).expect("create db");
+        let db = imgfind::block_on(Database::new(&db_path)).expect("create db");
         (db, root)
     }
 
@@ -296,16 +284,13 @@ mod tests {
     fn thumbnail_round_trips_through_relative_path() {
         let (db, root) = temp_db();
         // Insert an image row + a cached 300px thumbnail blob (cache hit, no file I/O).
-        {
-            let conn = db.pool.get().expect("conn");
-            conn.execute(
-                "INSERT INTO images (id, path, hash) VALUES (1, 'a.jpg', 'h')",
-                [],
-            )
-            .expect("insert image");
-        }
-        db.insert_thumbnail("h", 300, &[1, 2, 3, 4])
-            .expect("insert thumb");
+        imgfind::block_on(db.insert_images_batch(&[(
+            "a.jpg".to_string(),
+            "h".to_string(),
+            vec![0.0f32; 512],
+        )]))
+        .expect("insert image");
+        imgfind::block_on(db.insert_thumbnail("h", 300, &[1, 2, 3, 4])).expect("insert thumb");
 
         let backend = backend_with(db);
         let bytes = backend.thumbnail("a.jpg", 300).expect("thumb");
@@ -323,42 +308,25 @@ mod tests {
 
     #[test]
     fn search_similar_filters_out_the_seed() {
-        use zerocopy::IntoBytes;
-
         let (db, root) = temp_db();
-        {
-            let conn = db.pool.get().expect("conn");
-            conn.execute(
-                "INSERT INTO images (id, path, hash) VALUES (1, 'a.jpg', 'ha')",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO images (id, path, hash) VALUES (2, 'b.jpg', 'hb')",
-                [],
-            )
-            .unwrap();
-            // Use close vectors (not orthogonal) so both fall within the default
-            // distance_threshold of 1.3. a is unit vector along dim 0; b is
-            // normalized [1.0, 0.1, 0, ...] giving L2(a,b) ≈ 0.1 << 1.3.
-            let mut a = vec![0.0f32; 512];
-            a[0] = 1.0;
-            let mut b = vec![0.0f32; 512];
-            b[0] = 1.0;
-            b[1] = 0.1;
-            let norm: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-            b.iter_mut().for_each(|x| *x /= norm);
-            conn.execute(
-                "INSERT INTO image_vectors (rowid, embedding) VALUES (1, ?1)",
-                rusqlite::params![a.as_bytes()],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO image_vectors (rowid, embedding) VALUES (2, ?1)",
-                rusqlite::params![b.as_bytes()],
-            )
-            .unwrap();
-        }
+
+        // Use close vectors (not orthogonal) so both fall within the default
+        // distance_threshold of 1.3. a is unit vector along dim 0; b is
+        // normalized [1.0, 0.1, 0, ...] giving L2(a,b) ≈ 0.1 << 1.3.
+        let mut a = vec![0.0f32; 512];
+        a[0] = 1.0;
+        let mut b = vec![0.0f32; 512];
+        b[0] = 1.0;
+        b[1] = 0.1;
+        let norm: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+        b.iter_mut().for_each(|x| *x /= norm);
+
+        imgfind::block_on(db.insert_images_batch(&[
+            ("a.jpg".to_string(), "ha".to_string(), a),
+            ("b.jpg".to_string(), "hb".to_string(), b),
+        ]))
+        .expect("insert images");
+
         let backend = backend_with(db);
 
         let results = backend
@@ -378,24 +346,48 @@ mod tests {
         use imgfind::filters::{Filters, GpsFilter};
 
         let (db, root) = temp_db();
-        {
-            let conn = db.pool.get().unwrap();
-            for (id, path, size, lat) in [
-                (1i64, "a.jpg", 1000i64, Some(1.0f64)),
-                (2i64, "b.png", 50i64, None::<f64>),
-            ] {
-                conn.execute(
-                    "INSERT INTO images (id,path,hash) VALUES (?1,?2,?3)",
-                    rusqlite::params![id, path, format!("h{id}")],
-                )
-                .unwrap();
-                conn.execute(
-                    "INSERT INTO image_metadata (image_id,file_size,latitude,longitude) VALUES (?1,?2,?3,?3)",
-                    rusqlite::params![id, size, lat],
-                )
-                .unwrap();
-            }
-        }
+
+        imgfind::block_on(db.insert_images_batch(&[
+            ("a.jpg".to_string(), "h1".to_string(), vec![0.0f32; 512]),
+            ("b.png".to_string(), "h2".to_string(), vec![0.0f32; 512]),
+        ]))
+        .expect("insert images");
+
+        // Retrieve auto-assigned IDs so we can attach metadata.
+        let id_a = imgfind::block_on(db.get_image_id(&AbsolutePath(db.parent_dir.join("a.jpg"))))
+            .expect("id for a.jpg");
+        let id_b = imgfind::block_on(db.get_image_id(&AbsolutePath(db.parent_dir.join("b.png"))))
+            .expect("id for b.png");
+
+        imgfind::block_on(db.insert_or_update_metadata(
+            id_a,
+            &ImageMetadata {
+                file_size: Some(1000),
+                width: None,
+                height: None,
+                latitude: Some(1.0),
+                longitude: Some(1.0),
+                camera_make: None,
+                camera_model: None,
+                datetime_taken: None,
+            },
+        ))
+        .expect("insert metadata a");
+        imgfind::block_on(db.insert_or_update_metadata(
+            id_b,
+            &ImageMetadata {
+                file_size: Some(50),
+                width: None,
+                height: None,
+                latitude: None,
+                longitude: None,
+                camera_make: None,
+                camera_model: None,
+                datetime_taken: None,
+            },
+        ))
+        .expect("insert metadata b");
+
         let backend = backend_with(db);
 
         let jpg = backend
@@ -431,21 +423,32 @@ mod tests {
     #[test]
     fn metadata_reads_stored_row_without_touching_disk() {
         let (db, root) = temp_db();
-        {
-            let conn = db.pool.get().expect("conn");
-            conn.execute(
-                "INSERT INTO images (id, path, hash) VALUES (1, 'ghost.jpg', 'h')",
-                [],
-            )
-            .expect("insert image");
-            conn.execute(
-                "INSERT INTO image_metadata
-                 (image_id, file_size, width, height, latitude, longitude)
-                 VALUES (1, 2048, 1024, 768, 5.5, 6.5)",
-                [],
-            )
-            .expect("insert metadata");
-        }
+
+        imgfind::block_on(db.insert_images_batch(&[(
+            "ghost.jpg".to_string(),
+            "h".to_string(),
+            vec![0.0f32; 512],
+        )]))
+        .expect("insert image");
+
+        let id = imgfind::block_on(db.get_image_id(&AbsolutePath(db.parent_dir.join("ghost.jpg"))))
+            .expect("id for ghost.jpg");
+
+        imgfind::block_on(db.insert_or_update_metadata(
+            id,
+            &ImageMetadata {
+                file_size: Some(2048),
+                width: Some(1024),
+                height: Some(768),
+                latitude: Some(5.5),
+                longitude: Some(6.5),
+                camera_make: None,
+                camera_model: None,
+                datetime_taken: None,
+            },
+        ))
+        .expect("insert metadata");
+
         let backend = backend_with(db);
         // No file at <parent_dir>/ghost.jpg exists; the decode fallback would fail.
         let meta = backend.metadata("ghost.jpg").expect("stored metadata");
@@ -460,14 +463,13 @@ mod tests {
     #[test]
     fn add_list_remove_tag_roundtrip() {
         let (db, root) = temp_db();
-        {
-            let conn = db.pool.get().expect("conn");
-            conn.execute(
-                "INSERT INTO images (id, path, hash) VALUES (1, 'a.jpg', 'h')",
-                [],
-            )
-            .expect("insert image");
-        }
+        imgfind::block_on(db.insert_images_batch(&[(
+            "a.jpg".to_string(),
+            "h".to_string(),
+            vec![0.0f32; 512],
+        )]))
+        .expect("insert image");
+
         let backend = backend_with(db);
         backend.add_tag("a.jpg", "beach").unwrap();
         backend.add_tag("a.jpg", "sunset").unwrap();
@@ -501,14 +503,12 @@ mod tests {
         img.save(&img_path).expect("save test image");
 
         // Insert the image row (no cached thumbnail → cache miss guaranteed).
-        {
-            let conn = db.pool.get().expect("conn");
-            conn.execute(
-                "INSERT INTO images (id, path, hash) VALUES (1, 'pic.png', 'h2')",
-                [],
-            )
-            .expect("insert image");
-        }
+        imgfind::block_on(db.insert_images_batch(&[(
+            "pic.png".to_string(),
+            "h2".to_string(),
+            vec![0.0f32; 512],
+        )]))
+        .expect("insert image");
 
         let backend = backend_with(db);
         let bytes = backend

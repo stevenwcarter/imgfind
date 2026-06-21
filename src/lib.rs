@@ -2,10 +2,29 @@ use anyhow::{Context, Result};
 use dirs::home_dir;
 use std::{
     fs,
+    future::Future,
     path::{Path, PathBuf},
+    sync::LazyLock,
 };
 
 pub mod colors;
+pub mod db_pool;
+
+static DB_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("build shared DB tokio runtime")
+});
+
+/// Run `fut` to completion on the shared multi-thread runtime.
+///
+/// For **sync callers only** (CLI, GUI worker threads, the thumbnail writer).
+/// Panics if called from inside an existing tokio runtime — async callers must
+/// `.await` directly instead of going through this bridge.
+pub fn block_on<F: Future>(fut: F) -> F::Output {
+    DB_RUNTIME.block_on(fut)
+}
 pub mod config;
 pub mod database;
 pub mod decode;
@@ -13,12 +32,16 @@ pub mod filters;
 pub mod indexing;
 pub mod logging;
 pub mod metadata;
+pub mod migrate;
 pub mod models;
+pub mod schema;
 pub mod search;
 pub mod sort;
 pub mod thumbnail;
+#[cfg(feature = "tui")]
 pub mod tui;
 pub mod ui_state;
+pub mod vector_sql;
 
 pub fn get_db_path(dir: Option<&str>) -> Result<PathBuf> {
     // First, try to find existing database by walking up directory tree

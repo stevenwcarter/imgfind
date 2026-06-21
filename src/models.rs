@@ -9,11 +9,15 @@ use std::path::Path;
 /// active one (auto-registering it via [`ensure_and_activate_model`]). Existing
 /// databases are returned untouched — the default only applies to brand-new
 /// databases, so a per-database `models use` choice is never overridden.
-pub fn open_db_seeding_default(db_path: &Path, default_model: Option<&str>) -> Result<Database> {
+pub async fn open_db_seeding_default(
+    db_path: &Path,
+    default_model: Option<&str>,
+) -> Result<Database> {
     let existed = db_path.exists();
-    let db = Database::new(db_path)?;
+    let db = Database::new(db_path).await?;
     if let (false, Some(name)) = (existed, default_model) {
         ensure_and_activate_model(&db, name)
+            .await
             .with_context(|| format!("seeding new database with default model '{name}'"))?;
     }
     Ok(db)
@@ -22,8 +26,8 @@ pub fn open_db_seeding_default(db_path: &Path, default_model: Option<&str>) -> R
 /// Resolve `name` to the active model, auto-registering it if clipper supports
 /// it but the DB has not seen it yet, and validating that an already-registered
 /// model's dimension matches clipper's.
-pub fn ensure_and_activate_model(db: &Database, name: &str) -> Result<()> {
-    let registered = db.list_models()?; // Vec<(name, dim, is_active)>
+pub async fn ensure_and_activate_model(db: &Database, name: &str) -> Result<()> {
+    let registered = db.list_models().await?; // Vec<(name, dim, is_active)>
     let clipper_dim = clipper::supported_models()
         .into_iter()
         .find(|m| m.name == name)
@@ -36,7 +40,7 @@ pub fn ensure_and_activate_model(db: &Database, name: &str) -> Result<()> {
                 "model '{name}' dim mismatch: db={db_dim}, clipper={cd}"
             );
         }
-        db.set_active_model(name)?;
+        db.set_active_model(name).await?;
         return Ok(());
     }
 
@@ -47,8 +51,8 @@ pub fn ensure_and_activate_model(db: &Database, name: &str) -> Result<()> {
             .collect();
         format!("unknown model '{name}'; supported models: {known:?}")
     })?;
-    db.register_model(name, dim)?;
-    db.set_active_model(name)?;
+    db.register_model(name, dim).await?;
+    db.set_active_model(name).await?;
     Ok(())
 }
 
@@ -63,8 +67,8 @@ pub struct ModelRow {
 
 /// Build the rows for `models list`: every registered (indexed) model, plus any
 /// clipper-supported model that isn't registered yet (marked not-indexed).
-pub fn list_rows(db: &Database) -> Result<Vec<ModelRow>> {
-    let registered = db.list_models()?;
+pub async fn list_rows(db: &Database) -> Result<Vec<ModelRow>> {
+    let registered = db.list_models().await?;
     let names: std::collections::HashSet<&str> =
         registered.iter().map(|(n, _, _)| n.as_str()).collect();
     let mut rows: Vec<ModelRow> = registered
@@ -108,70 +112,78 @@ mod tests {
         let _ = std::fs::remove_dir_all(p.parent().unwrap().parent().unwrap());
     }
 
-    #[test]
-    fn auto_registers_clipper_model_and_activates() {
+    #[tokio::test]
+    async fn auto_registers_clipper_model_and_activates() {
         let path = temp_db_path();
-        let db = Database::new(&path).expect("create db");
-        ensure_and_activate_model(&db, "laion/CLIP-ViT-L-14-laion2B-s32B-b82K").unwrap();
-        let active = db.active_model().unwrap();
+        let db = Database::new(&path).await.expect("create db");
+        ensure_and_activate_model(&db, "laion/CLIP-ViT-L-14-laion2B-s32B-b82K")
+            .await
+            .unwrap();
+        let active = db.active_model().await.unwrap();
         assert_eq!(active.name, "laion/CLIP-ViT-L-14-laion2B-s32B-b82K");
         assert_eq!(active.dim, 768);
         cleanup(&path);
     }
 
-    #[test]
-    fn unknown_model_errors() {
+    #[tokio::test]
+    async fn unknown_model_errors() {
         let path = temp_db_path();
-        let db = Database::new(&path).expect("create db");
-        let err = ensure_and_activate_model(&db, "nope/not-a-model").unwrap_err();
+        let db = Database::new(&path).await.expect("create db");
+        let err = ensure_and_activate_model(&db, "nope/not-a-model")
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("unknown model"), "got: {err}");
         cleanup(&path);
     }
 
-    #[test]
-    fn dim_mismatch_errors() {
+    #[tokio::test]
+    async fn dim_mismatch_errors() {
         let path = temp_db_path();
-        let db = Database::new(&path).expect("create db");
+        let db = Database::new(&path).await.expect("create db");
         // Register the LAION name with the WRONG dim, then try to activate it.
         db.register_model("laion/CLIP-ViT-L-14-laion2B-s32B-b82K", 512)
+            .await
             .unwrap();
-        let err =
-            ensure_and_activate_model(&db, "laion/CLIP-ViT-L-14-laion2B-s32B-b82K").unwrap_err();
+        let err = ensure_and_activate_model(&db, "laion/CLIP-ViT-L-14-laion2B-s32B-b82K")
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("dim mismatch"), "got: {err}");
         cleanup(&path);
     }
 
-    #[test]
-    fn open_db_seeds_default_only_on_creation() {
+    #[tokio::test]
+    async fn open_db_seeds_default_only_on_creation() {
         let path = temp_db_path();
 
         // Brand-new DB + a default -> the default becomes active.
         let db = open_db_seeding_default(&path, Some("laion/CLIP-ViT-L-14-laion2B-s32B-b82K"))
+            .await
             .expect("create + seed");
         assert_eq!(
-            db.active_model().unwrap().name,
+            db.active_model().await.unwrap().name,
             "laion/CLIP-ViT-L-14-laion2B-s32B-b82K"
         );
         drop(db);
 
         // Re-opening an EXISTING DB must not reseed, even with a different default.
         let db = open_db_seeding_default(&path, Some("openai/clip-vit-base-patch32"))
+            .await
             .expect("reopen existing");
         assert_eq!(
-            db.active_model().unwrap().name,
+            db.active_model().await.unwrap().name,
             "laion/CLIP-ViT-L-14-laion2B-s32B-b82K",
             "existing DB's active model must be preserved"
         );
         cleanup(&path);
     }
 
-    #[test]
-    fn open_db_without_default_uses_baseline() {
+    #[tokio::test]
+    async fn open_db_without_default_uses_baseline() {
         let path = temp_db_path();
-        let db = open_db_seeding_default(&path, None).expect("create");
+        let db = open_db_seeding_default(&path, None).await.expect("create");
         // Fresh DB with no default keeps the migration-seeded baseline.
         assert_eq!(
-            db.active_model().unwrap().name,
+            db.active_model().await.unwrap().name,
             "openai/clip-vit-base-patch32"
         );
         cleanup(&path);

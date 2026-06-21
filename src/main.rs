@@ -66,6 +66,7 @@ enum Commands {
         #[arg(short, long, default_value = "100")]
         count: usize,
     },
+    #[cfg(feature = "tui")]
     Tui {
         #[arg(short, long)]
         dir: Option<String>,
@@ -136,6 +137,16 @@ enum Commands {
         #[command(subcommand)]
         action: ModelsAction,
     },
+    /// Migrate a legacy (rusqlite/sqlite-vec) database to the Turso engine.
+    ///
+    /// Copies images, embeddings, thumbnails, metadata, tags, and collections
+    /// into a fresh Turso database without re-indexing, keeping the original as
+    /// a `*.db.rusqlite.bak` backup. A no-op if the database is already migrated.
+    Migrate {
+        /// Overwrite an existing `*.db.rusqlite.bak` backup from a prior run.
+        #[arg(long)]
+        force: bool,
+    },
     /// Generate a shell completion script
     Completions { shell: clap_complete::Shell },
 }
@@ -179,22 +190,36 @@ enum ConfigCommands {
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// If `db_path` points at a legacy (pre-Turso) database, print a one-line hint
+/// and exit cleanly (non-zero, no panic/backtrace) so the user knows to run
+/// `imgfind migrate`. Returns normally for fresh or already-migrated databases.
+fn guard_not_legacy(db_path: &std::path::Path) {
+    if imgfind::block_on(imgfind::migrate::is_legacy_db(db_path)) {
+        eprintln!(
+            "legacy database detected; run `imgfind migrate` to upgrade it to the new engine"
+        );
+        std::process::exit(1);
+    }
+}
+
+fn main() -> Result<()> {
     init_tracing().context("Failed to initialize logging")?;
 
     let cli = Cli::parse();
 
     match cli.command {
+        #[cfg(feature = "tui")]
         Commands::Tui { dir } => {
             let db_path = get_db_path(dir.as_deref())?;
-            let db = Database::new(&db_path)?;
-            imgfind::tui::tui(db).await?;
+            guard_not_legacy(&db_path);
+            let db = imgfind::block_on(Database::new(&db_path))?;
+            imgfind::block_on(imgfind::tui::tui(db))?;
         }
         Commands::Gui { args } => launch_gui(&args)?,
         Commands::Metadata { dir, quiet, count } => {
             let db_path = get_db_path(dir.as_deref())?;
-            let mut db = Database::new(&db_path)?;
+            guard_not_legacy(&db_path);
+            let mut db = imgfind::block_on(Database::new(&db_path))?;
             metadata(&mut db, quiet, count)?;
         }
         Commands::Index {
@@ -212,13 +237,16 @@ async fn main() -> Result<()> {
             } else {
                 get_db_path(None)?
             };
+            guard_not_legacy(&db_path);
             // A brand-new database is seeded with the configured default model;
             // an explicit --model (applied below) still wins over it.
             let default_model = config::Config::load()?.default_model;
-            let mut db =
-                imgfind::models::open_db_seeding_default(&db_path, default_model.as_deref())?;
+            let mut db = imgfind::block_on(imgfind::models::open_db_seeding_default(
+                &db_path,
+                default_model.as_deref(),
+            ))?;
             if let Some(m) = model {
-                imgfind::models::ensure_and_activate_model(&db, &m)?;
+                imgfind::block_on(imgfind::models::ensure_and_activate_model(&db, &m))?;
             }
             index_directory(
                 &mut db,
@@ -241,9 +269,10 @@ async fn main() -> Result<()> {
             model,
         } => {
             let db_path = get_db_path(None)?;
-            let db = Database::new(&db_path)?;
+            guard_not_legacy(&db_path);
+            let db = imgfind::block_on(Database::new(&db_path))?;
             if let Some(m) = model {
-                imgfind::models::ensure_and_activate_model(&db, &m)?;
+                imgfind::block_on(imgfind::models::ensure_and_activate_model(&db, &m))?;
             }
             let config = config::Config::load()?;
             let distance_threshold = threshold.unwrap_or(config.search.distance_threshold);
@@ -262,12 +291,14 @@ async fn main() -> Result<()> {
         }
         Commands::Clean => {
             let db_path = get_db_path(None)?;
-            let mut db = Database::new(&db_path)?;
+            guard_not_legacy(&db_path);
+            let mut db = imgfind::block_on(Database::new(&db_path))?;
             clean_database(&mut db)?;
         }
         Commands::Status => {
             let db_path = get_db_path(None)?;
-            let db = Database::new(&db_path)?;
+            guard_not_legacy(&db_path);
+            let db = imgfind::block_on(Database::new(&db_path))?;
             show_status(&db, &db_path)?;
         }
         Commands::Config { config_command } => {
@@ -279,17 +310,19 @@ async fn main() -> Result<()> {
             gui_sizes,
         } => {
             let db_path = get_db_path(None)?;
-            let mut db = Database::new(&db_path)?;
+            guard_not_legacy(&db_path);
+            let mut db = imgfind::block_on(Database::new(&db_path))?;
             for s in resolve_thumbnail_sizes(&size, gui_sizes)? {
                 generate_thumbnails_batch(&mut db, s, count)?;
             }
         }
         Commands::Models { action } => {
             let db_path = get_db_path(None)?;
-            let db = Database::new(&db_path)?;
+            guard_not_legacy(&db_path);
+            let db = imgfind::block_on(Database::new(&db_path))?;
             match action {
                 ModelsAction::List => {
-                    for row in imgfind::models::list_rows(&db)? {
+                    for row in imgfind::block_on(imgfind::models::list_rows(&db))? {
                         let mark = if row.active { "*" } else { " " };
                         let tag = if row.indexed {
                             ""
@@ -300,7 +333,7 @@ async fn main() -> Result<()> {
                     }
                 }
                 ModelsAction::Use { name, default } => {
-                    imgfind::models::ensure_and_activate_model(&db, &name)?;
+                    imgfind::block_on(imgfind::models::ensure_and_activate_model(&db, &name))?;
                     println!("Active model: {name}");
                     if default {
                         let mut cfg = config::Config::load()?;
@@ -308,6 +341,28 @@ async fn main() -> Result<()> {
                         cfg.save()?;
                         println!("Saved {name} as the global default model.");
                     }
+                }
+            }
+        }
+        Commands::Migrate { force } => {
+            let db_path = get_db_path(None)?;
+            match imgfind::block_on(imgfind::migrate::migrate_db(&db_path, force))? {
+                imgfind::migrate::MigrateOutcome::AlreadyMigrated => {
+                    println!("Database at {db_path:?} is already migrated; nothing to do.");
+                }
+                imgfind::migrate::MigrateOutcome::Migrated {
+                    images,
+                    embeddings,
+                    thumbnails,
+                } => {
+                    println!(
+                        "Migrated {images} images, {embeddings} embeddings, \
+                         {thumbnails} thumbnails to the Turso engine."
+                    );
+                    println!(
+                        "The original database was kept at {:?}.",
+                        imgfind::migrate::backup_path(&db_path)
+                    );
                 }
             }
         }
@@ -411,7 +466,7 @@ fn index_directory(
         pb.enable_steady_tick(std::time::Duration::from_millis(120));
         pb
     };
-    let model_name = db.active_model()?.name;
+    let model_name = imgfind::block_on(db.active_model())?.name;
     let model =
         ClipEmbedder::from_model(&model_name, false).context("Failed to create ClipEmbedder")?;
     spinner.finish_and_clear();
@@ -525,7 +580,9 @@ fn index_directory(
 
         // Check if already indexed with same hash for the active model.
         // `--reindex` forces re-embedding even when a vector already exists.
-        if !reindex && db.is_image_indexed(&AbsolutePath(abs_path.clone()), &hash)? {
+        if !reindex
+            && imgfind::block_on(db.is_image_indexed(&AbsolutePath(abs_path.clone()), &hash))?
+        {
             debug!("Skipping already indexed: {}", path_str);
             skipped_count += 1;
             progress_bar.inc(1);
@@ -605,7 +662,7 @@ fn index_directory(
             })
             .collect();
 
-        if let Err(e) = db.insert_images_batch(&rows) {
+        if let Err(e) = imgfind::block_on(db.insert_images_batch(&rows)) {
             warn!("Failed to insert image batch into database: {}", e);
             error_count += rows.len();
             progress_bar.inc(survivors.len() as u64);
@@ -626,9 +683,13 @@ fn index_directory(
         for (abs_path_str, res) in extracted {
             match res {
                 Ok(metadata) => {
-                    match db.get_image_id(&AbsolutePath(PathBuf::from(&abs_path_str))) {
+                    match imgfind::block_on(
+                        db.get_image_id(&AbsolutePath(PathBuf::from(&abs_path_str))),
+                    ) {
                         Ok(image_id) => {
-                            if let Err(e) = db.insert_or_update_metadata(image_id, &metadata) {
+                            if let Err(e) =
+                                imgfind::block_on(db.insert_or_update_metadata(image_id, &metadata))
+                            {
                                 warn!("Failed to store metadata for {}: {}", abs_path_str, e);
                             } else {
                                 debug!("Stored metadata for: {}", abs_path_str);
@@ -681,14 +742,15 @@ fn index_directory(
 
     // Generate thumbnails for any images still missing a 300px thumbnail. `count`
     // is bound as a SQL `LIMIT ?` parameter (see get_images_without_thumbnails),
-    // and rusqlite binds usize via i64::try_from — so usize::MAX overflows i64 and
+    // and the limit is bound via i64::try_from — so usize::MAX overflows i64 and
     // the bind fails. Instead, count the images actually missing a thumbnail and
     // pass that exact number, which covers every one of them.
     if !no_thumbnails {
-        let missing = db.count_images_without_thumbnails(300).unwrap_or_else(|e| {
-            warn!("counting images without thumbnails failed (non-fatal): {e:#}");
-            0
-        });
+        let missing =
+            imgfind::block_on(db.count_images_without_thumbnails(300)).unwrap_or_else(|e| {
+                warn!("counting images without thumbnails failed (non-fatal): {e:#}");
+                0
+            });
         if missing > 0 {
             let made = generate_missing_thumbnails_batch(db, 300, missing).unwrap_or_else(|e| {
                 warn!("thumbnail generation failed (non-fatal): {e:#}");
@@ -700,7 +762,7 @@ fn index_directory(
         }
     }
 
-    if let Err(e) = db.checkpoint_wal() {
+    if let Err(e) = imgfind::block_on(db.checkpoint_wal()) {
         warn!("WAL checkpoint failed (non-fatal): {e:#}");
     }
 
@@ -765,7 +827,7 @@ fn search_images(
     let current_dir = std::env::current_dir().context("Failed to get current directory")?;
 
     // Check if database has any images
-    let total_images = db.get_image_count()?;
+    let total_images = imgfind::block_on(db.get_image_count())?;
     if total_images == 0 {
         if !short {
             println!("No images found in database. Please index some images first using:");
@@ -778,7 +840,7 @@ fn search_images(
     let spinner = ProgressBar::new_spinner();
     spinner.set_message("Loading CLIP model… (this may take a minute on first use)");
     spinner.enable_steady_tick(std::time::Duration::from_millis(120));
-    let model_name = db.active_model()?.name;
+    let model_name = imgfind::block_on(db.active_model())?.name;
     let model =
         ClipEmbedder::from_model(&model_name, false).context("Failed to create ClipEmbedder")?;
     spinner.finish_and_clear();
@@ -792,8 +854,12 @@ fn search_images(
     // Search database (SearchEngine normalizes the query internally)
     info!("Searching database...");
     let search_engine = SearchEngine::new(db);
-    let all_results =
-        search_engine.search(&query_embedding, usize::MAX, distance_threshold, max_k)?; // Get all results first
+    let all_results = imgfind::block_on(search_engine.search(
+        &query_embedding,
+        usize::MAX,
+        distance_threshold,
+        max_k,
+    ))?; // Get all results first
 
     // Filter results to those under current_dir, resolving DB-relative paths
     // against the DB parent directory (not cwd).
@@ -900,7 +966,7 @@ fn print_image(path: &str) -> Result<()> {
 fn clean_database(db: &mut Database) -> Result<()> {
     info!("Cleaning database of missing files...");
 
-    let removed_count = db.clean_missing_files()?;
+    let removed_count = imgfind::block_on(db.clean_missing_files())?;
 
     if removed_count == 0 {
         println!("Database is clean - no missing files found.");
@@ -917,11 +983,11 @@ fn show_status(db: &Database, db_path: &PathBuf) -> Result<()> {
     println!("imgfind Database Status");
     println!("======================");
 
-    let total_images = db.get_image_count()?;
+    let total_images = imgfind::block_on(db.get_image_count())?;
     println!("Total indexed images: {}", total_images);
 
     if total_images > 0 {
-        let sample_images = db.get_sample_images(5)?;
+        let sample_images = imgfind::block_on(db.get_sample_images(5))?;
         println!("\nSample images:");
         for (i, path) in sample_images.iter().enumerate() {
             println!("  {}. {}", i + 1, path.as_str());
@@ -1062,7 +1128,7 @@ fn generate_thumbnails_batch(db: &mut Database, size: u32, count: usize) -> Resu
         println!("Generated {} thumbnails of size {}px", generated, size);
 
         // Check if there are more images that need thumbnails
-        let remaining = db.count_images_without_thumbnails(size)?;
+        let remaining = imgfind::block_on(db.count_images_without_thumbnails(size))?;
         if remaining != 0 {
             println!(
                 "There are more images without thumbnails ({remaining}). Run the command again to generate more.",
@@ -1103,10 +1169,17 @@ mod gui_cli_tests {
         assert!(matches!(cli.command, Commands::Gui { args } if args.is_empty()));
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn existing_subcommand_still_parses() {
         let cli = Cli::try_parse_from(["imgfind", "tui"]).expect("parse");
         assert!(matches!(cli.command, Commands::Tui { .. }));
+    }
+
+    #[test]
+    fn status_subcommand_still_parses() {
+        let cli = Cli::try_parse_from(["imgfind", "status"]).expect("parse");
+        assert!(matches!(cli.command, Commands::Status));
     }
 
     #[test]

@@ -11,7 +11,7 @@ The project ships as a **2-crate workspace**: a core `imgfind` binary (CLI + rat
 - **Natural Language Search**: Find images using descriptive text like "sunset over mountains" or "a cat sitting on a chair"
 - **Fast Indexing**: Efficient batched image processing and embedding generation using CLIP
 - **Smart Caching**: Avoids re-processing unchanged images using content hashing
-- **SQLite Storage**: Reliable database storage with efficient vector similarity search
+- **SQLite Storage**: Reliable database storage via the async `turso` engine (pure-Rust, no C extension) with native vector similarity search
 - **CLI Interface**: Simple command-line interface with helpful status information
 - **Interactive TUI**: Browse results in a ratatui-based terminal UI with inline image previews
 - **Native GUI**: Slint desktop app — virtualized thumbnail grid, detail panel, lightbox, filter bar (size/type/GPS/tags), keyboard navigation, and a keyboard-driven tagging system with color brushes; map view not yet ported
@@ -76,9 +76,20 @@ The project ships as a **2-crate workspace**: a core `imgfind` binary (CLI + rat
 | `status` | Show database statistics | - |
 | `config` | Manage configuration | `show`, `add-ignore <pat>`, `remove-ignore <pat>`, `reset` |
 | `models` | Manage embedding models | `list`, `use <name>` |
+| `migrate` | Upgrade a legacy (sqlite-vec) database to the Turso engine | `--force` |
 | `completions` | Generate a shell completion script | `<bash\|zsh\|fish>` |
 
 The `imgfind-gui` binary takes an optional `-d`/`--dir DIR` flag to target a specific directory's database. You can also launch it via `imgfind gui [ARGS]`, which forwards `ARGS` (e.g. `-d ~/Pictures`) to `imgfind-gui` and blocks until it exits.
+
+### Migrating from a previous version
+
+If you have a database created by an older version of `imgfind` (using the `rusqlite`/`sqlite-vec` backend), run:
+
+```bash
+imgfind migrate
+```
+
+This upgrades the database to the new Turso engine without re-indexing: embeddings, thumbnails, metadata, tags, and collections are all preserved. The original database file is kept as `imgfind.db.rusqlite.bak`. The command is a no-op if the database is already migrated. Pass `--force` to overwrite an existing backup from a prior run.
 
 ### Index options
 
@@ -120,8 +131,8 @@ imgfind models use <name>  # set the active model
 - **Language**: Rust
 - **Image/Text Embeddings**: Custom `clipper` crate (CLIP-based)
 - **Hashing**: `oshash-rs` (media-optimized hashing)
-- **Database**: SQLite via `rusqlite`
-- **Vector Search**: Cosine similarity on normalized embeddings
+- **Database**: SQLite via `turso` (pure-Rust async engine)
+- **Vector Search**: `vector_distance_cos` on `F32_BLOB` columns (exact KNN, no C extension)
 - **CLI**: `clap` for argument parsing
 - **TUI**: `ratatui` + `ratatui-image`
 - **Native GUI**: `slint`
@@ -185,7 +196,7 @@ batch_size = 32          # images embedded per CLIP batch
 
 [search]
 distance_threshold = 1.3 # max cosine distance to include (lower = stricter)
-max_k = 100              # upper bound on the vec0 `k` result-set ceiling
+max_k = 100              # upper bound on the KNN result-set ceiling
 ```
 
 ## Advanced Usage
@@ -208,8 +219,8 @@ max_k = 100              # upper bound on the vec0 `k` result-set ceiling
 
 - Rust 1.85+
 - CLIP model (downloaded automatically on first use)
-- SQLite (bundled)
 - `clipper` crate (local path dep at `../clipper`, must be present to build)
+- No system SQLite required — `turso` is a pure-Rust engine
 
 ### Building
 

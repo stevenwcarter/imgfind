@@ -20,9 +20,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 lru = "0.18"
 parking_lot = "0.12"
 
-[dev-dependencies]
-rusqlite = { version = "0.37", features = ["bundled"] }
-zerocopy = "0.8"
-
 [build-dependencies]
 slint-build = "1.16"
