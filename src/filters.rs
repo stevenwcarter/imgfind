@@ -5,6 +5,11 @@
 use rusqlite::types::Value;
 use serde::{Deserialize, Serialize};
 
+// turso::Value is a parallel type to rusqlite::types::Value; there is no
+// shared trait bridging them, so `build_filter_clause_turso` duplicates the
+// body with the appropriate variant constructors.  The two functions must stay
+// structurally in sync when new filter arms are added.
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Filters {
     /// Inclusive file-size bounds in bytes; `None` = unbounded on that side.
@@ -110,6 +115,72 @@ pub fn build_filter_clause(f: &Filters) -> (String, Vec<Value>) {
                 ));
                 for tag in &f.tags {
                     params.push(Value::Text(tag.clone()));
+                }
+            }
+        }
+    }
+
+    if clauses.is_empty() {
+        (String::new(), params)
+    } else {
+        (format!(" AND {}", clauses.join(" AND ")), params)
+    }
+}
+
+/// Same SQL fragment as [`build_filter_clause`] but with [`turso::Value`]
+/// params for the async Turso code-path.
+///
+/// Column aliases assumed: `i` = images, `m` = image_metadata.
+pub fn build_filter_clause_turso(f: &Filters) -> (String, Vec<turso::Value>) {
+    let mut clauses: Vec<String> = Vec::new();
+    let mut params: Vec<turso::Value> = Vec::new();
+
+    if let Some(min) = f.size_min {
+        clauses.push("m.file_size >= ?".into());
+        params.push(turso::Value::Integer(min));
+    }
+    if let Some(max) = f.size_max {
+        clauses.push("m.file_size <= ?".into());
+        params.push(turso::Value::Integer(max));
+    }
+    if !f.extensions.is_empty() {
+        let mut ors = Vec::new();
+        for ext in &f.extensions {
+            ors.push("lower(i.path) LIKE ?".to_string());
+            params.push(turso::Value::Text(format!("%.{}", ext.to_lowercase())));
+        }
+        clauses.push(format!("({})", ors.join(" OR ")));
+    }
+    match f.gps {
+        GpsFilter::Any => {}
+        GpsFilter::HasGps => {
+            clauses.push("(m.latitude IS NOT NULL AND m.longitude IS NOT NULL)".into());
+        }
+        GpsFilter::NoGps => {
+            clauses.push("(m.latitude IS NULL OR m.longitude IS NULL)".into());
+        }
+    }
+
+    if f.tags_enabled && !f.tags.is_empty() {
+        match f.tag_match {
+            TagMatch::AllOf => {
+                for tag in &f.tags {
+                    clauses.push(
+                        "EXISTS (SELECT 1 FROM image_tags it JOIN tags t ON t.id = it.tag_id \
+                         WHERE it.image_id = i.id AND t.name = ?)"
+                            .into(),
+                    );
+                    params.push(turso::Value::Text(tag.clone()));
+                }
+            }
+            TagMatch::AnyOf => {
+                let placeholders = vec!["?"; f.tags.len()].join(", ");
+                clauses.push(format!(
+                    "EXISTS (SELECT 1 FROM image_tags it JOIN tags t ON t.id = it.tag_id \
+                     WHERE it.image_id = i.id AND t.name IN ({placeholders}))"
+                ));
+                for tag in &f.tags {
+                    params.push(turso::Value::Text(tag.clone()));
                 }
             }
         }
@@ -293,5 +364,61 @@ mod tests {
             " AND m.file_size >= ? AND EXISTS (SELECT 1 FROM image_tags it JOIN tags t ON t.id = it.tag_id WHERE it.image_id = i.id AND t.name = ?)"
         );
         assert_eq!(params, vec![Value::Integer(5), Value::Text("x".into())]);
+    }
+
+    // --- turso variant tests ---
+
+    #[test]
+    fn turso_empty_filters_yield_no_clause() {
+        let (sql, params) = build_filter_clause_turso(&Filters::default());
+        assert_eq!(sql, "");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn turso_size_bounds_emit_two_integer_params() {
+        let f = Filters {
+            size_min: Some(10),
+            size_max: Some(20),
+            ..Default::default()
+        };
+        let (clause, params) = build_filter_clause_turso(&f);
+        assert!(clause.contains("file_size"));
+        assert!(matches!(
+            params.as_slice(),
+            [turso::Value::Integer(10), turso::Value::Integer(20)]
+        ));
+    }
+
+    #[test]
+    fn turso_extensions_become_lowercased_like_params() {
+        let f = Filters {
+            extensions: vec!["JPG".into(), "png".into()],
+            ..Default::default()
+        };
+        let (sql, params) = build_filter_clause_turso(&f);
+        assert_eq!(sql, " AND (lower(i.path) LIKE ? OR lower(i.path) LIKE ?)");
+        assert_eq!(
+            params,
+            vec![
+                turso::Value::Text("%.jpg".into()),
+                turso::Value::Text("%.png".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn turso_clause_matches_rusqlite_clause() {
+        // The SQL fragment (not the params type) must be identical between both
+        // variants so callers can swap one for the other safely.
+        let f = Filters {
+            size_min: Some(100),
+            extensions: vec!["nef".into()],
+            gps: GpsFilter::HasGps,
+            ..Default::default()
+        };
+        let (sql_rq, _) = build_filter_clause(&f);
+        let (sql_ts, _) = build_filter_clause_turso(&f);
+        assert_eq!(sql_rq, sql_ts);
     }
 }
