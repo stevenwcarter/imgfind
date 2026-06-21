@@ -204,6 +204,13 @@ fn build_filters(
     let (min, max) = size_bounds;
     let size_min = fraction_to_bytes(lo, min, max, true);
     let size_max = fraction_to_bytes(hi, min, max, false);
+    // A malformed slider state could invert lo/hi, producing size_min > size_max,
+    // which Filters/SQL assume never happens. Swap to keep the range well-ordered
+    // (swap, not drop: preserves the user's intended bounds).
+    let (size_min, size_max) = match (size_min, size_max) {
+        (Some(a), Some(b)) if a > b => (Some(b), Some(a)),
+        other => other,
+    };
     let extensions: Vec<String> = {
         let mut v: Vec<String> = selected_exts.iter().cloned().collect();
         v.sort();
@@ -3492,10 +3499,11 @@ mod arg_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        DetailState, build_size_label, clamp_next, clamp_prev, detail_shows, format_bytes,
-        format_statusline, fraction_to_bytes, is_current_generation,
+        DetailState, build_filters, build_size_label, clamp_next, clamp_prev, detail_shows,
+        format_bytes, format_statusline, fraction_to_bytes, is_current_generation,
     };
     use imgfind::sort::RowMeta;
+    use std::collections::HashSet;
 
     #[test]
     fn detail_shows_matches_only_same_path() {
@@ -3713,6 +3721,24 @@ mod tests {
         let s = Selection::default();
         let line = format_statusline(&s, &[]);
         assert!(line.contains("0 images"), "got: {line}");
+    }
+
+    // --- build_filters ---
+
+    #[test]
+    fn build_filters_swaps_inverted_size_range() {
+        // Inverted slider: lo fraction maps to a LARGER byte value than hi.
+        // lo=0.8 -> Some(high bytes); hi=0.2 -> Some(low bytes); both Some, min>max.
+        let f = build_filters(0.8, 0.2, (0, 1000), &HashSet::new(), 0);
+        let (mn, mx) = (f.size_min.unwrap(), f.size_max.unwrap());
+        assert!(mn <= mx, "size_min ({mn}) must be <= size_max ({mx}) after swap");
+    }
+
+    #[test]
+    fn build_filters_leaves_normal_size_range() {
+        let f = build_filters(0.2, 0.8, (0, 1000), &HashSet::new(), 0);
+        assert_eq!(f.size_min, Some(200));
+        assert_eq!(f.size_max, Some(800));
     }
 }
 
