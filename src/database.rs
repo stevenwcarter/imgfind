@@ -2746,7 +2746,7 @@ mod tests {
 
     #[tokio::test]
     async fn browse_all_filters_by_tags_all_and_any() {
-        use crate::filters::{Filters, TagMatch};
+        use crate::filters::{Filters, TagFilter, TagMatch};
         use crate::sort::Sort;
 
         let (db, tmp) = test_db_with_images(&["a.jpg", "b.jpg", "c.jpg"]).await;
@@ -2755,9 +2755,10 @@ mod tests {
         db.tag_image(&rel("b.jpg"), "beach").await.unwrap();
 
         let all_beach_sunset = Filters {
-            tags: vec!["beach".into(), "sunset".into()],
-            tag_match: TagMatch::AllOf,
-            tags_enabled: true,
+            tag_filter: TagFilter::Active {
+                tags: vec!["beach".into(), "sunset".into()],
+                match_mode: TagMatch::AllOf,
+            },
             ..Default::default()
         };
         let got = db
@@ -2768,8 +2769,11 @@ mod tests {
         assert_eq!(paths, vec!["a.jpg"]);
 
         let any_beach_sunset = Filters {
-            tag_match: TagMatch::AnyOf,
-            ..all_beach_sunset.clone()
+            tag_filter: TagFilter::Active {
+                tags: vec!["beach".into(), "sunset".into()],
+                match_mode: TagMatch::AnyOf,
+            },
+            ..Default::default()
         };
         let mut got = db
             .browse_all(&any_beach_sunset, &Sort::default())
@@ -2780,8 +2784,11 @@ mod tests {
         assert_eq!(paths, vec!["a.jpg", "b.jpg"]);
 
         let disabled = Filters {
-            tags_enabled: false,
-            ..all_beach_sunset
+            tag_filter: TagFilter::Inactive {
+                tags: vec!["beach".into(), "sunset".into()],
+                match_mode: TagMatch::AllOf,
+            },
+            ..Default::default()
         };
         let got = db.browse_all(&disabled, &Sort::default()).await.unwrap();
         assert_eq!(got.len(), 3);

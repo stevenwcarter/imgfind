@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::units::FileSize;
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Filters {
     /// Inclusive file-size bounds in bytes; `None` = unbounded on that side.
     pub size_min: Option<FileSize>,
@@ -14,16 +14,169 @@ pub struct Filters {
     /// Lowercased extensions without the dot (e.g. "jpg"); empty = all types.
     pub extensions: Vec<String>,
     pub gps: GpsFilter,
-    /// Tag names to filter by; empty = no tag filtering.
+    /// Tag filter: an `Active`/`Inactive` sum type that makes the old
+    /// "enabled-but-empty" state unrepresentable. The (possibly disabled) tag
+    /// set and match mode are retained either way for fast re-activation.
+    pub tag_filter: TagFilter,
+}
+
+/// Tag-filter state. Replaces the historical `tags`/`tag_match`/`tags_enabled`
+/// triple: `Active` is the master-enabled state, `Inactive` is disabled. Both
+/// carry the tag set and match mode so toggling never loses the user's tags.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TagFilter {
+    Inactive {
+        tags: Vec<String>,
+        match_mode: TagMatch,
+    },
+    Active {
+        tags: Vec<String>,
+        match_mode: TagMatch,
+    },
+}
+
+impl Default for TagFilter {
+    fn default() -> Self {
+        TagFilter::Inactive {
+            tags: Vec::new(),
+            match_mode: TagMatch::default(),
+        }
+    }
+}
+
+impl TagFilter {
+    /// The tags + match mode to apply, or `None` when the filter is inactive or
+    /// has no tags (the only two cases that produce no SQL clause).
+    pub fn active_tags(&self) -> Option<(&[String], TagMatch)> {
+        match self {
+            TagFilter::Active { tags, match_mode } if !tags.is_empty() => Some((tags, *match_mode)),
+            _ => None,
+        }
+    }
+
+    /// Whether the master enable is on (`Active`), regardless of tag count.
+    pub fn is_enabled(&self) -> bool {
+        matches!(self, TagFilter::Active { .. })
+    }
+
+    /// The retained tag set, regardless of enabled state.
+    pub fn tags(&self) -> &[String] {
+        match self {
+            TagFilter::Active { tags, .. } | TagFilter::Inactive { tags, .. } => tags,
+        }
+    }
+
+    /// Mutable access to the retained tag set, regardless of enabled state.
+    pub fn tags_mut(&mut self) -> &mut Vec<String> {
+        match self {
+            TagFilter::Active { tags, .. } | TagFilter::Inactive { tags, .. } => tags,
+        }
+    }
+
+    /// The retained match mode, regardless of enabled state.
+    pub fn match_mode(&self) -> TagMatch {
+        match self {
+            TagFilter::Active { match_mode, .. } | TagFilter::Inactive { match_mode, .. } => {
+                *match_mode
+            }
+        }
+    }
+
+    /// Replace the tag set in place, keeping the enabled state and match mode.
+    pub fn set_tags(&mut self, new_tags: Vec<String>) {
+        *self.tags_mut() = new_tags;
+    }
+
+    /// Toggle AND/OR match mode in place, keeping the enabled state and tags.
+    pub fn toggle_match_mode(&mut self) {
+        let (TagFilter::Active { match_mode, .. } | TagFilter::Inactive { match_mode, .. }) = self;
+        *match_mode = match *match_mode {
+            TagMatch::AllOf => TagMatch::AnyOf,
+            TagMatch::AnyOf => TagMatch::AllOf,
+        };
+    }
+
+    /// Flip between `Active` and `Inactive`, preserving the tag set and mode.
+    pub fn toggle_enabled(&mut self) {
+        *self = match std::mem::take(self) {
+            TagFilter::Active { tags, match_mode } => TagFilter::Inactive { tags, match_mode },
+            TagFilter::Inactive { tags, match_mode } => TagFilter::Active { tags, match_mode },
+        };
+    }
+}
+
+/// On-disk representation of [`Filters`]: the historical fully-flat key set.
+/// Hand-rolling the repr (rather than `#[serde(flatten)]`) keeps `size_min` /
+/// `size_max` serializing as bare integers — a flattened map would coerce them
+/// to floats — and pins the legacy `ui_state` JSON shape so older saved
+/// sessions still load (`tags` / `tag_match` / `tags_enabled` stay top-level).
+#[derive(Serialize, Deserialize)]
+struct FiltersRepr {
+    size_min: Option<FileSize>,
+    size_max: Option<FileSize>,
     #[serde(default)]
-    pub tags: Vec<String>,
-    /// Whether all tags must match (AND) or any (OR).
+    extensions: Vec<String>,
     #[serde(default)]
-    pub tag_match: TagMatch,
-    /// Master enable for the tag filter (`ft`); when false, tags are ignored
-    /// but retained.
+    gps: GpsFilter,
     #[serde(default)]
-    pub tags_enabled: bool,
+    tags: Vec<String>,
+    #[serde(default)]
+    tag_match: TagMatch,
+    #[serde(default)]
+    tags_enabled: bool,
+}
+
+impl From<&Filters> for FiltersRepr {
+    fn from(f: &Filters) -> Self {
+        let (tags, tag_match, tags_enabled) = match &f.tag_filter {
+            TagFilter::Active { tags, match_mode } => (tags.clone(), *match_mode, true),
+            TagFilter::Inactive { tags, match_mode } => (tags.clone(), *match_mode, false),
+        };
+        FiltersRepr {
+            size_min: f.size_min,
+            size_max: f.size_max,
+            extensions: f.extensions.clone(),
+            gps: f.gps,
+            tags,
+            tag_match,
+            tags_enabled,
+        }
+    }
+}
+
+impl From<FiltersRepr> for Filters {
+    fn from(r: FiltersRepr) -> Self {
+        let tag_filter = if r.tags_enabled && !r.tags.is_empty() {
+            TagFilter::Active {
+                tags: r.tags,
+                match_mode: r.tag_match,
+            }
+        } else {
+            TagFilter::Inactive {
+                tags: r.tags,
+                match_mode: r.tag_match,
+            }
+        };
+        Filters {
+            size_min: r.size_min,
+            size_max: r.size_max,
+            extensions: r.extensions,
+            gps: r.gps,
+            tag_filter,
+        }
+    }
+}
+
+impl Serialize for Filters {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        FiltersRepr::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Filters {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        FiltersRepr::deserialize(deserializer).map(Filters::from)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,14 +199,12 @@ pub enum TagMatch {
 }
 
 impl Filters {
-    /// Copy the tag-filter fields (`tags`, `tag_match`, `tags_enabled`) from
-    /// `other` into `self`. Call this after rebuilding size/type/GPS fields
-    /// from UI state so an active tag filter is preserved rather than reset
-    /// to defaults.
+    /// Copy the whole tag filter (the possibly-disabled tag set + match mode)
+    /// from `other` into `self`. Call this after rebuilding size/type/GPS
+    /// fields from UI state so an active tag filter is preserved rather than
+    /// reset to defaults.
     pub fn carry_tag_filter_from(&mut self, other: &Filters) {
-        self.tags = other.tags.clone();
-        self.tag_match = other.tag_match;
-        self.tags_enabled = other.tags_enabled;
+        self.tag_filter = other.tag_filter.clone();
     }
 }
 
@@ -92,10 +243,10 @@ pub fn build_filter_clause_turso(f: &Filters) -> (String, Vec<turso::Value>) {
         }
     }
 
-    if f.tags_enabled && !f.tags.is_empty() {
-        match f.tag_match {
+    if let Some((tags, match_mode)) = f.tag_filter.active_tags() {
+        match match_mode {
             TagMatch::AllOf => {
-                for tag in &f.tags {
+                for tag in tags {
                     clauses.push(
                         "EXISTS (SELECT 1 FROM image_tags it JOIN tags t ON t.id = it.tag_id \
                          WHERE it.image_id = i.id AND t.name = ?)"
@@ -105,12 +256,12 @@ pub fn build_filter_clause_turso(f: &Filters) -> (String, Vec<turso::Value>) {
                 }
             }
             TagMatch::AnyOf => {
-                let placeholders = vec!["?"; f.tags.len()].join(", ");
+                let placeholders = vec!["?"; tags.len()].join(", ");
                 clauses.push(format!(
                     "EXISTS (SELECT 1 FROM image_tags it JOIN tags t ON t.id = it.tag_id \
                      WHERE it.image_id = i.id AND t.name IN ({placeholders}))"
                 ));
-                for tag in &f.tags {
+                for tag in tags {
                     params.push(turso::Value::Text(tag.clone()));
                 }
             }
@@ -129,6 +280,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn old_flat_filters_json_deserializes_into_tag_filter() {
+        // Pre-migration on-disk shape: flat tags/tag_match/tags_enabled.
+        let json = r#"{"size_min":null,"size_max":null,"extensions":[],"gps":"any","tags":["a"],"tag_match":"anyof","tags_enabled":true}"#;
+        let f: Filters = serde_json::from_str(json).unwrap();
+        match &f.tag_filter {
+            TagFilter::Active { tags, match_mode } => {
+                assert_eq!(tags, &vec!["a".to_string()]);
+                assert_eq!(*match_mode, TagMatch::AnyOf);
+            }
+            _ => panic!("expected Active"),
+        }
+    }
+
+    #[test]
+    fn disabled_with_tags_is_inactive_retaining_them() {
+        let json = r#"{"size_min":null,"size_max":null,"extensions":[],"gps":"any","tags":["a","b"],"tag_match":"allof","tags_enabled":false}"#;
+        let f: Filters = serde_json::from_str(json).unwrap();
+        match &f.tag_filter {
+            TagFilter::Inactive { tags, .. } => assert_eq!(tags.len(), 2),
+            _ => panic!("expected Inactive retaining tags"),
+        }
+    }
+
+    #[test]
+    fn filters_serialize_to_flat_on_disk_shape() {
+        // The in-memory sum type must persist as the historical flat triple so
+        // a newer build's saved session is still readable by the same keys.
+        let f = Filters {
+            tag_filter: TagFilter::Active {
+                tags: vec!["a".into()],
+                match_mode: TagMatch::AnyOf,
+            },
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&f).unwrap();
+        assert!(json.contains("\"tags\":[\"a\"]"), "{json}");
+        assert!(json.contains("\"tag_match\":\"anyof\""), "{json}");
+        assert!(json.contains("\"tags_enabled\":true"), "{json}");
+        // Round-trip back to the same value.
+        let back: Filters = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, f);
+    }
+
+    #[test]
     fn carry_tag_filter_preserves_tags_and_size() {
         let mut rebuilt = Filters {
             size_min: Some(FileSize(1024)),
@@ -136,15 +331,20 @@ mod tests {
             ..Default::default()
         };
         let existing = Filters {
-            tags: vec!["a".into(), "b".into()],
-            tag_match: TagMatch::AnyOf,
-            tags_enabled: true,
+            tag_filter: TagFilter::Active {
+                tags: vec!["a".into(), "b".into()],
+                match_mode: TagMatch::AnyOf,
+            },
             ..Default::default()
         };
         rebuilt.carry_tag_filter_from(&existing);
-        assert_eq!(rebuilt.tags, vec!["a".to_string(), "b".to_string()]);
-        assert_eq!(rebuilt.tag_match, TagMatch::AnyOf);
-        assert!(rebuilt.tags_enabled);
+        assert_eq!(
+            rebuilt.tag_filter,
+            TagFilter::Active {
+                tags: vec!["a".to_string(), "b".to_string()],
+                match_mode: TagMatch::AnyOf,
+            }
+        );
         // size fields must be untouched
         assert_eq!(rebuilt.size_min, Some(FileSize(1024)));
         assert_eq!(rebuilt.size_max, Some(FileSize(10 * 1024 * 1024)));
@@ -245,8 +445,10 @@ mod tests {
     #[test]
     fn tags_disabled_yields_no_clause() {
         let f = Filters {
-            tags: vec!["a".into(), "b".into()],
-            tags_enabled: false,
+            tag_filter: TagFilter::Inactive {
+                tags: vec!["a".into(), "b".into()],
+                match_mode: TagMatch::default(),
+            },
             ..Default::default()
         };
         assert_eq!(build_filter_clause_turso(&f).0, "");
@@ -255,9 +457,10 @@ mod tests {
     #[test]
     fn tags_all_of_emits_exists_per_tag() {
         let f = Filters {
-            tags: vec!["a".into(), "b".into()],
-            tag_match: TagMatch::AllOf,
-            tags_enabled: true,
+            tag_filter: TagFilter::Active {
+                tags: vec!["a".into(), "b".into()],
+                match_mode: TagMatch::AllOf,
+            },
             ..Default::default()
         };
         let (sql, params) = build_filter_clause_turso(&f);
@@ -277,9 +480,10 @@ mod tests {
     #[test]
     fn tags_any_of_emits_single_in_clause() {
         let f = Filters {
-            tags: vec!["a".into(), "b".into()],
-            tag_match: TagMatch::AnyOf,
-            tags_enabled: true,
+            tag_filter: TagFilter::Active {
+                tags: vec!["a".into(), "b".into()],
+                match_mode: TagMatch::AnyOf,
+            },
             ..Default::default()
         };
         let (sql, params) = build_filter_clause_turso(&f);
@@ -300,8 +504,10 @@ mod tests {
     fn tags_combine_after_size() {
         let f = Filters {
             size_min: Some(FileSize(5)),
-            tags: vec!["x".into()],
-            tags_enabled: true,
+            tag_filter: TagFilter::Active {
+                tags: vec!["x".into()],
+                match_mode: TagMatch::default(),
+            },
             ..Default::default()
         };
         let (sql, params) = build_filter_clause_turso(&f);

@@ -29,19 +29,6 @@ Last triage: 2026-06-21 against `main` @ 20d80f38. Toolchain: cargo build/check 
 
 ## Medium
 
-### T3. `Filters` tag-state lets enabled-but-empty and stale-while-disabled states exist: `tags_enabled` + `tags` + `tag_match` (src/filters.rs:8-25)
-- **Lens:** illegal-states
-- **Impact:** 4 (bug-prevention med × blast 2)
-- **Effort:** M
-- **Risk:** low
-- **Current type:** `tags_enabled: bool` + `tags: Vec<String>` + `tag_match: TagMatch`, where `tag_match` is meaningless when disabled or when `tags` is empty.
-- **Proposed type:** `enum TagFilter { Disabled, Active { tags: Vec<String>, match_mode: TagMatch } }` (or `Disabled` + `Active` carrying a non-empty tag set). Removes the illegal `enabled && tags.is_empty()` and "stale `tag_match` while disabled" states.
-- **Evidence:** `build_filter_clause` must hand-guard both conditions today; nothing prevents constructing `Filters { tags_enabled: true, tags: vec![], .. }`. No live bug found (SQL guards), but the truth table is wider than the legal states.
-- **Blast radius:** src/filters.rs:93-116 (`build_filter_clause`), src/filters.rs:51-55 (`carry_tag_filter_from`), imgfind-gui/src/main.rs:1028, src/ui_state.rs:47.
-- **Invariants/caveats:** **Crosses the `ui_state` persisted-JSON boundary** — the enum needs `#[serde]` tagging that stays back-compatible with already-persisted `tags_enabled`/`tags`/`tag_match` fields; a naive `enum` changes the JSON shape. Pin with a round-trip test loading an old ui_state row. Also: `carry_tag_filter_from` *intentionally* preserves the disabled tag set for fast re-activation (per CLAUDE.md) — the `Active`-vs-`Disabled` split must retain the carried tags (e.g. `Disabled` may still hold a remembered set, or carry separately). Invariant this depends on: *disabled state can still round-trip a remembered tag list*.
-- **Proposed migration:** introduce `TagFilter` (serde-tagged to match existing JSON, or with a `From`/migration shim); replace the three fields; fix `build_filter_clause` / `carry_tag_filter_from` / GUI / ui_state at source to green; add the ui_state round-trip test.
-- [x] execute   [ ] skip
-
 ### T4. Half-a-coordinate GPS is representable: `ImageMetadata` latitude + longitude (src/database.rs:1513-1524)
 - **Lens:** illegal-states
 - **Impact:** 4 (bug-prevention med × blast 2)

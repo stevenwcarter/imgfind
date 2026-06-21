@@ -1382,7 +1382,7 @@ fn main() -> Result<()> {
             let Some(w) = weak.upgrade() else { return };
             let new_filters = {
                 let mut f = filters_ref.lock();
-                tagset::set_words(&mut f.tags, text.as_str());
+                tagset::set_words(f.tag_filter.tags_mut(), text.as_str());
                 push_filter_tags(&w, &f);
                 f.clone()
             };
@@ -1413,7 +1413,7 @@ fn main() -> Result<()> {
             let Some(w) = weak.upgrade() else { return };
             let new_filters = {
                 let mut f = filters_ref.lock();
-                tagset::remove(&mut f.tags, tag.as_str());
+                tagset::remove(f.tag_filter.tags_mut(), tag.as_str());
                 push_filter_tags(&w, &f);
                 f.clone()
             };
@@ -1445,10 +1445,7 @@ fn main() -> Result<()> {
             let Some(w) = weak.upgrade() else { return };
             let new_filters = {
                 let mut f = filters_ref.lock();
-                f.tag_match = match f.tag_match {
-                    TagMatch::AllOf => TagMatch::AnyOf,
-                    TagMatch::AnyOf => TagMatch::AllOf,
-                };
+                f.tag_filter.toggle_match_mode();
                 push_filter_tags(&w, &f);
                 f.clone()
             };
@@ -1479,7 +1476,7 @@ fn main() -> Result<()> {
             let Some(w) = weak.upgrade() else { return };
             let new_filters = {
                 let mut f = filters_ref.lock();
-                f.tags_enabled = !f.tags_enabled;
+                f.tag_filter.toggle_enabled();
                 push_filter_tags(&w, &f);
                 f.clone()
             };
@@ -1776,7 +1773,7 @@ fn main() -> Result<()> {
                     let new_filters = {
                         let tags = brushes_ref.lock()[c.index()].clone();
                         let mut f = filters_ref.lock();
-                        f.tags = tags;
+                        f.tag_filter.set_tags(tags);
                         push_filter_tags(&w, &f);
                         f.clone()
                     };
@@ -1794,7 +1791,7 @@ fn main() -> Result<()> {
                 chords::Action::ToggleTagFilter => {
                     let new_filters = {
                         let mut f = filters_ref.lock();
-                        f.tags_enabled = !f.tags_enabled;
+                        f.tag_filter.toggle_enabled();
                         push_filter_tags(&w, &f);
                         f.clone()
                     };
@@ -2043,10 +2040,11 @@ fn push_detail_tags(w: &MainWindow, tags: &[String]) {
 /// the joined editor text, the AND/OR mode bool, and the master enable. Called
 /// after every tag-filter edit and during restore/fresh-start setup.
 fn push_filter_tags(w: &MainWindow, f: &Filters) {
-    w.set_filter_tags(string_model(&f.tags));
-    w.set_filter_tags_joined(f.tags.join(" ").into());
-    w.set_tag_match_and(matches!(f.tag_match, TagMatch::AllOf));
-    w.set_tags_enabled(f.tags_enabled);
+    let tags = f.tag_filter.tags();
+    w.set_filter_tags(string_model(tags));
+    w.set_filter_tags_joined(tags.join(" ").into());
+    w.set_tag_match_and(matches!(f.tag_filter.match_mode(), TagMatch::AllOf));
+    w.set_tags_enabled(f.tag_filter.is_enabled());
 }
 
 /// Show the rail with empty contents on a fresh DB (no persisted session). The
