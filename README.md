@@ -67,7 +67,7 @@ The project ships as a **2-crate workspace**: a core `imgfind` binary (CLI + rat
 | Command | Description | Options |
 |---------|-------------|---------|
 | `index` | Index images in a directory | `--dir <path>`, `--recursive`, `--root`, `--quiet`, `--batch-size <N>`, `--no-thumbnails`, `--model <name>` |
-| `search` | Search using natural language | `--limit <N>`, `--threshold <f>`, `--short`, `--recursive`, `--display`, `--all`, `--model <name>` |
+| `search` | Search using natural language (recursive from the cwd by default) | `--limit <N>`, `--threshold <f>`, `--short`, `--display`, `--all`, `--model <name>` |
 | `tui` | Browse results in an interactive terminal UI | `--dir <path>` |
 | `gui` | Launch the native desktop GUI (forwards remaining args to `imgfind-gui`) | passthrough, e.g. `-d`/`--dir <path>` |
 | `thumbnails` | Generate thumbnails in batches | `--size <px>`, `--count <N>` |
@@ -76,20 +76,9 @@ The project ships as a **2-crate workspace**: a core `imgfind` binary (CLI + rat
 | `status` | Show database statistics | - |
 | `config` | Manage configuration | `show`, `add-ignore <pat>`, `remove-ignore <pat>`, `reset` |
 | `models` | Manage embedding models | `list`, `use <name>` |
-| `migrate` | Upgrade a legacy (sqlite-vec) database to the Turso engine | `--force` |
 | `completions` | Generate a shell completion script | `<bash\|zsh\|fish>` |
 
 The `imgfind-gui` binary takes an optional `-d`/`--dir DIR` flag to target a specific directory's database. You can also launch it via `imgfind gui [ARGS]`, which forwards `ARGS` (e.g. `-d ~/Pictures`) to `imgfind-gui` and blocks until it exits.
-
-### Migrating from a previous version
-
-If you have a database created by an older version of `imgfind` (using the `rusqlite`/`sqlite-vec` backend), run:
-
-```bash
-imgfind migrate
-```
-
-This upgrades the database to the new Turso engine without re-indexing: embeddings, thumbnails, metadata, tags, and collections are all preserved. The original database file is kept as `imgfind.db.rusqlite.bak`. The command is a no-op if the database is already migrated. Pass `--force` to overwrite an existing backup from a prior run.
 
 ### Index options
 
