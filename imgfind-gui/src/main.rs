@@ -358,6 +358,7 @@ fn main() -> Result<()> {
     // Lightbox view state (GUI-runtime only; never persisted to ui_state).
     let lb_zoom: Arc<Mutex<f32>> = Arc::new(Mutex::new(1.0));
     let lb_fit: Arc<Mutex<bool>> = Arc::new(Mutex::new(true));
+    let lb_fit_scale: Arc<Mutex<f32>> = Arc::new(Mutex::new(1.0));
 
     // Index into `state.results()` of the keyboard/mouse-selected tile (mirrors the
     // Slint `selected-index` property). Shares the index space with `lb_index`.
@@ -391,6 +392,10 @@ fn main() -> Result<()> {
     // alongside `lb_generation` on every navigation/open so a late full-res decode
     // for a now-stale image is silently dropped without disturbing the current view.
     let lb_fullres_generation: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+
+    // Gate: set to true when full-res pixels are applied; prevents a slow-landing
+    // base 2048px decode from overwriting sharper full-res pixels already shown.
+    let lb_shown_fullres: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
     // Monotonic counter bumped at the start of every preload dispatch.
     // Bumping before spawning ensures stale in-flight preloads stop when the
@@ -735,6 +740,8 @@ fn main() -> Result<()> {
         let backend_lb = backend.clone();
         let gen_ref = Arc::clone(&lb_generation);
         let fullres_gen_ta = Arc::clone(&lb_fullres_generation);
+        let lb_shown_fullres_ta = Arc::clone(&lb_shown_fullres);
+        let lb_fit_scale_ta = Arc::clone(&lb_fit_scale);
         let preload_gen_ta = Arc::clone(&preload_generation);
         window.on_tile_activated(move |index| {
             let idx = index as usize;
@@ -748,6 +755,7 @@ fn main() -> Result<()> {
             *lb_fit_ref.lock() = true;
             // Invalidate any in-flight full-res decode from the previous image.
             fullres_gen_ta.fetch_add(1, Ordering::SeqCst);
+            lb_shown_fullres_ta.store(false, Ordering::SeqCst);
             if let Some(w) = weak.upgrade() {
                 w.set_selected_index(index);
                 apply_lightbox_view(&w, 1.0, true);
@@ -763,7 +771,14 @@ fn main() -> Result<()> {
                 w.set_lightbox_index1((idx as i32) + 1);
                 w.set_lightbox_total(total);
             }
-            load_lightbox_image(weak.clone(), backend_lb.clone(), rel, gen_ref.clone());
+            load_lightbox_image(
+                weak.clone(),
+                backend_lb.clone(),
+                rel,
+                gen_ref.clone(),
+                Arc::clone(&lb_shown_fullres_ta),
+                Arc::clone(&lb_fit_scale_ta),
+            );
 
             // Preload neighbors at LIGHTBOX_SIZE so prev/next navigation is instant.
             {
@@ -886,6 +901,8 @@ fn main() -> Result<()> {
         let backend_vf = backend.clone();
         let gen_ref = Arc::clone(&lb_generation);
         let fullres_gen_vf = Arc::clone(&lb_fullres_generation);
+        let lb_shown_fullres_vf = Arc::clone(&lb_shown_fullres);
+        let lb_fit_scale_vf = Arc::clone(&lb_fit_scale);
         let preload_gen_vf = Arc::clone(&preload_generation);
         window.on_detail_view_full(move || {
             let seed_path = {
@@ -909,6 +926,7 @@ fn main() -> Result<()> {
             *lb_fit_ref.lock() = true;
             // Invalidate any in-flight full-res decode from the previous image.
             fullres_gen_vf.fetch_add(1, Ordering::SeqCst);
+            lb_shown_fullres_vf.store(false, Ordering::SeqCst);
             if let Some(w) = weak.upgrade() {
                 apply_lightbox_view(&w, 1.0, true);
                 let results = state_ref.lock();
@@ -925,7 +943,14 @@ fn main() -> Result<()> {
                 w.set_lightbox_total(total);
             }
 
-            load_lightbox_image(weak.clone(), backend_vf.clone(), rel, gen_ref.clone());
+            load_lightbox_image(
+                weak.clone(),
+                backend_vf.clone(),
+                rel,
+                gen_ref.clone(),
+                Arc::clone(&lb_shown_fullres_vf),
+                Arc::clone(&lb_fit_scale_vf),
+            );
 
             // Preload neighbors when a valid grid position is known.
             if let Some(center) = idx {
@@ -1029,6 +1054,8 @@ fn main() -> Result<()> {
         let backend_lb = backend.clone();
         let gen_ref = Arc::clone(&lb_generation);
         let fullres_gen_prev = Arc::clone(&lb_fullres_generation);
+        let lb_shown_fullres_prev = Arc::clone(&lb_shown_fullres);
+        let lb_fit_scale_prev = Arc::clone(&lb_fit_scale);
         let preload_gen_prev = Arc::clone(&preload_generation);
         window.on_lightbox_prev(move || {
             tracing::debug!("lightbox-prev invoked");
@@ -1046,6 +1073,7 @@ fn main() -> Result<()> {
             *lb_fit_ref.lock() = true;
             // Invalidate any in-flight full-res decode from the previous image.
             fullres_gen_prev.fetch_add(1, Ordering::SeqCst);
+            lb_shown_fullres_prev.store(false, Ordering::SeqCst);
             if let Some(w) = weak.upgrade() {
                 w.set_selected_index(new_idx as i32);
                 apply_lightbox_view(&w, 1.0, true);
@@ -1067,7 +1095,14 @@ fn main() -> Result<()> {
                 .get(new_idx)
                 .map(|r| r.path.clone());
             if let Some(rel) = path {
-                load_lightbox_image(weak.clone(), backend_lb.clone(), rel, gen_ref.clone());
+                load_lightbox_image(
+                    weak.clone(),
+                    backend_lb.clone(),
+                    rel,
+                    gen_ref.clone(),
+                    Arc::clone(&lb_shown_fullres_prev),
+                    Arc::clone(&lb_fit_scale_prev),
+                );
             }
 
             // Preload neighbors in arc order so the next likely images are warm.
@@ -1099,6 +1134,8 @@ fn main() -> Result<()> {
         let backend_lb = backend.clone();
         let gen_ref = Arc::clone(&lb_generation);
         let fullres_gen_next = Arc::clone(&lb_fullres_generation);
+        let lb_shown_fullres_next = Arc::clone(&lb_shown_fullres);
+        let lb_fit_scale_next = Arc::clone(&lb_fit_scale);
         let preload_gen_next = Arc::clone(&preload_generation);
         window.on_lightbox_next(move || {
             tracing::debug!("lightbox-next invoked");
@@ -1121,6 +1158,7 @@ fn main() -> Result<()> {
             *lb_fit_ref.lock() = true;
             // Invalidate any in-flight full-res decode from the previous image.
             fullres_gen_next.fetch_add(1, Ordering::SeqCst);
+            lb_shown_fullres_next.store(false, Ordering::SeqCst);
             if let Some(w) = weak.upgrade() {
                 w.set_selected_index(new_idx as i32);
                 apply_lightbox_view(&w, 1.0, true);
@@ -1142,7 +1180,14 @@ fn main() -> Result<()> {
                 .get(new_idx)
                 .map(|r| r.path.clone());
             if let Some(rel) = path {
-                load_lightbox_image(weak.clone(), backend_lb.clone(), rel, gen_ref.clone());
+                load_lightbox_image(
+                    weak.clone(),
+                    backend_lb.clone(),
+                    rel,
+                    gen_ref.clone(),
+                    Arc::clone(&lb_shown_fullres_next),
+                    Arc::clone(&lb_fit_scale_next),
+                );
             }
 
             // Preload neighbors in arc order so the next likely images are warm.
@@ -1172,21 +1217,18 @@ fn main() -> Result<()> {
         let lb_ref = Arc::clone(&lb_index);
         let backend_zoom = backend.clone();
         let fullres_gen_zoom = Arc::clone(&lb_fullres_generation);
+        let shown_fullres_zoom = Arc::clone(&lb_shown_fullres);
         window.on_lightbox_zoom_changed(move |z| {
-            // Last-write-wins: clamp the absolute incoming value; do not accumulate.
-            let zc = zoompan::clamp_zoom(z);
-            *lb_zoom_ref.lock() = zc;
-            *lb_fit_ref.lock() = false;
             if let Some(w) = weak.upgrade() {
-                apply_lightbox_view(&w, zc, false);
+                lightbox_apply_zoom(&w, &lb_zoom_ref, &lb_fit_ref, z);
             }
             // On entering zoom, upgrade to full-res in the background (cache-first).
-            // The generation guard silently drops a decode that arrives after the
-            // user navigates to another image.
+            // Lock lb_ref before state_ref (matching on_lightbox_prev/next ordering).
+            let lb_idx = *lb_ref.lock();
             let rel = state_ref
                 .lock()
                 .results()
-                .get(lb_ref.lock().unwrap_or(0))
+                .get(lb_idx.unwrap_or(0))
                 .map(|r| r.path.clone());
             if let Some(rel) = rel {
                 load_lightbox_fullres(
@@ -1194,6 +1236,7 @@ fn main() -> Result<()> {
                     backend_zoom.clone(),
                     rel,
                     Arc::clone(&fullres_gen_zoom),
+                    Arc::clone(&shown_fullres_zoom),
                 );
             }
         });
@@ -1209,6 +1252,90 @@ fn main() -> Result<()> {
             *lb_fit_ref.lock() = true;
             if let Some(w) = weak.upgrade() {
                 apply_lightbox_view(&w, 1.0, true);
+            }
+        });
+    }
+
+    // --- lightbox-zoom-wheel callback: wheel/trackpad zoom through tested helper ---
+    {
+        let weak = window.as_weak();
+        let lb_zoom_ref = Arc::clone(&lb_zoom);
+        let lb_fit_ref = Arc::clone(&lb_fit);
+        let lb_fit_scale_ref = Arc::clone(&lb_fit_scale);
+        let state_ref = Arc::clone(&state);
+        let lb_ref = Arc::clone(&lb_index);
+        let backend_wheel = backend.clone();
+        let fullres_gen_wheel = Arc::clone(&lb_fullres_generation);
+        let shown_fullres_wheel = Arc::clone(&lb_shown_fullres);
+        window.on_lightbox_zoom_wheel(move |delta| {
+            let base = if *lb_fit_ref.lock() {
+                *lb_fit_scale_ref.lock()
+            } else {
+                *lb_zoom_ref.lock()
+            };
+            let new_zoom = zoompan::wheel_zoom(base, delta);
+            if let Some(w) = weak.upgrade() {
+                lightbox_apply_zoom(&w, &lb_zoom_ref, &lb_fit_ref, new_zoom);
+            }
+            // Lock lb_ref before state_ref (matching on_lightbox_prev/next ordering).
+            let lb_idx = *lb_ref.lock();
+            let rel = state_ref
+                .lock()
+                .results()
+                .get(lb_idx.unwrap_or(0))
+                .map(|r| r.path.clone());
+            if let Some(rel) = rel {
+                load_lightbox_fullres(
+                    weak.clone(),
+                    backend_wheel.clone(),
+                    rel,
+                    Arc::clone(&fullres_gen_wheel),
+                    Arc::clone(&shown_fullres_wheel),
+                );
+            }
+        });
+    }
+
+    // --- lightbox-zoom-step callback: keyboard +/- zoom through tested helper ---
+    {
+        let weak = window.as_weak();
+        let lb_zoom_ref = Arc::clone(&lb_zoom);
+        let lb_fit_ref = Arc::clone(&lb_fit);
+        let lb_fit_scale_ref = Arc::clone(&lb_fit_scale);
+        let state_ref = Arc::clone(&state);
+        let lb_ref = Arc::clone(&lb_index);
+        let backend_step = backend.clone();
+        let fullres_gen_step = Arc::clone(&lb_fullres_generation);
+        let shown_fullres_step = Arc::clone(&lb_shown_fullres);
+        window.on_lightbox_zoom_step(move |dir| {
+            let base = if *lb_fit_ref.lock() {
+                *lb_fit_scale_ref.lock()
+            } else {
+                *lb_zoom_ref.lock()
+            };
+            let new_zoom = if dir >= 0 {
+                zoompan::zoom_in(base)
+            } else {
+                zoompan::zoom_out(base)
+            };
+            if let Some(w) = weak.upgrade() {
+                lightbox_apply_zoom(&w, &lb_zoom_ref, &lb_fit_ref, new_zoom);
+            }
+            // Lock lb_ref before state_ref (matching on_lightbox_prev/next ordering).
+            let lb_idx = *lb_ref.lock();
+            let rel = state_ref
+                .lock()
+                .results()
+                .get(lb_idx.unwrap_or(0))
+                .map(|r| r.path.clone());
+            if let Some(rel) = rel {
+                load_lightbox_fullres(
+                    weak.clone(),
+                    backend_step.clone(),
+                    rel,
+                    Arc::clone(&fullres_gen_step),
+                    Arc::clone(&shown_fullres_step),
+                );
             }
         });
     }
@@ -3552,6 +3679,20 @@ fn apply_lightbox_view(w: &MainWindow, zoom: f32, fit: bool) {
     w.set_lightbox_fit(fit);
 }
 
+/// Apply an absolute zoom value to the lightbox: clamp, store, set fit=false,
+/// call apply_lightbox_view. Does NOT trigger a full-res load.
+fn lightbox_apply_zoom(
+    w: &MainWindow,
+    lb_zoom: &Mutex<f32>,
+    lb_fit: &Mutex<bool>,
+    new_zoom: f32,
+) {
+    let zc = zoompan::clamp_zoom(new_zoom);
+    *lb_zoom.lock() = zc;
+    *lb_fit.lock() = false;
+    apply_lightbox_view(w, zc, false);
+}
+
 /// Previous lightbox index, clamped at 0 (no wrap).
 fn clamp_prev(current: usize) -> usize {
     current.saturating_sub(1)
@@ -3593,6 +3734,8 @@ fn load_lightbox_image(
     backend: Backend,
     rel_path: String,
     generation: Arc<AtomicU64>,
+    shown_fullres: Arc<AtomicBool>,
+    lb_fit_scale: Arc<Mutex<f32>>,
 ) {
     let my_gen = generation.fetch_add(1, Ordering::SeqCst) + 1;
     std::thread::spawn(move || {
@@ -3619,9 +3762,14 @@ fn load_lightbox_image(
         // Capture image dimensions off the UI thread (DynamicImage is Send).
         let (iw, ih) = (img.width() as f32, img.height() as f32);
 
+        let lb_fit_scale_ref = lb_fit_scale;
         slint::invoke_from_event_loop(move || {
             // Drop this result if a newer lightbox load superseded it while we decoded.
             if !is_current_generation(my_gen, generation.load(Ordering::SeqCst)) {
+                return;
+            }
+            // Drop if full-res pixels are already displayed — don't overwrite sharper pixels.
+            if shown_fullres.load(Ordering::SeqCst) {
                 return;
             }
             let Some(w) = weak.upgrade() else { return };
@@ -3633,6 +3781,7 @@ fn load_lightbox_image(
                 let vw = w.get_lightbox_content_w();
                 let vh = w.get_lightbox_content_h();
                 let fit_scale = (vw / iw).min(vh / ih).max(0.0001);
+                *lb_fit_scale_ref.lock() = fit_scale;
                 w.set_lightbox_fit_scale(fit_scale);
             }
             w.set_lightbox_open(true);
@@ -3655,6 +3804,7 @@ fn load_lightbox_fullres(
     backend: Backend,
     rel_path: String,
     generation: Arc<AtomicU64>,
+    shown_fullres: Arc<AtomicBool>,
 ) {
     let my_gen = generation.load(Ordering::SeqCst);
     std::thread::spawn(move || {
@@ -3678,6 +3828,7 @@ fn load_lightbox_fullres(
                 return;
             }
             let Some(w) = weak.upgrade() else { return };
+            shown_fullres.store(true, Ordering::SeqCst);
             // Swap pixels only — leave zoom/fit/pan state untouched.
             w.set_lightbox_image(image_util::dynamic_to_slint_image(&img));
         })

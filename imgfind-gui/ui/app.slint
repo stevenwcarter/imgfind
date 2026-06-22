@@ -52,6 +52,8 @@ export component MainWindow inherits Window {
     in property <float> lightbox-fit-scale: 1.0;
     callback lightbox-zoom-changed(float);
     callback lightbox-zoom-fit();
+    callback lightbox-zoom-wheel(float);  // raw delta-y in px (unitless float)
+    callback lightbox-zoom-step(int);     // +1 = zoom in, -1 = zoom out
 
     // Detail panel state set from Rust.
     in property <bool> detail-open: false;
@@ -275,11 +277,11 @@ export component MainWindow inherits Window {
                     return accept;
                 }
                 if (event.text == "+" || event.text == "=") {
-                    root.lightbox-zoom-changed(min(root.lightbox-zoom * 1.25, 8.0));
+                    root.lightbox-zoom-step(1);
                     return accept;
                 }
                 if (event.text == "-") {
-                    root.lightbox-zoom-changed(max(root.lightbox-zoom / 1.25, 0.1));
+                    root.lightbox-zoom-step(-1);
                     return accept;
                 }
                 return accept;
@@ -949,13 +951,7 @@ export component MainWindow inherits Window {
                     property <length> start-pan-y;
 
                     scroll-event(e) => {
-                        // Resolve the base zoom (fit-scale when in fit, else the
-                        // current zoom) and apply the wheel factor in ONE expression
-                        // so the first tick out of fit doesn't read a stale
-                        // root.lightbox-zoom across the Rust boundary (no size jump).
-                        root.lightbox-zoom-changed(
-                            clamp((root.lightbox-fit ? root.lightbox-fit-scale : root.lightbox-zoom)
-                                * pow(1.1, e.delta-y / 60px), 0.1, 8.0));
+                        root.lightbox-zoom-wheel(e.delta-y / 1px);
                         return accept;
                     }
                     changed pressed => {
@@ -1072,7 +1068,7 @@ export component MainWindow inherits Window {
                     zoom-slider := Slider {
                         minimum: 0.1;
                         maximum: 8.0;
-                        value: root.lightbox-zoom;
+                        value: root.lightbox-fit ? root.lightbox-fit-scale : root.lightbox-zoom;
                         width: 240px;
                         // `changed` is a named callback on Slider (not property-watch);
                         // its parameter `v` carries the new value.
