@@ -1,4 +1,4 @@
-import { LineEdit, Button, ScrollView, ComboBox } from "std-widgets.slint";
+import { LineEdit, Button, ScrollView, ComboBox, Slider } from "std-widgets.slint";
 import { RangeSlider } from "range_slider.slint";
 // Tag widgets imported here once; do not re-import in other blocks (Slint
 // errors on duplicate imports from the same path).
@@ -44,6 +44,14 @@ export component MainWindow inherits Window {
     // Lightbox state set from Rust.
     in property <bool> lightbox-open: false;
     in property <image> lightbox-image;
+    in property <string> lightbox-filename;
+    in property <int> lightbox-index1;
+    in property <int> lightbox-total;
+    in property <float> lightbox-zoom: 1.0;
+    in property <bool> lightbox-fit: true;
+    in property <float> lightbox-fit-scale: 1.0;
+    callback lightbox-zoom-changed(float);
+    callback lightbox-zoom-fit();
 
     // Detail panel state set from Rust.
     in property <bool> detail-open: false;
@@ -255,6 +263,19 @@ export component MainWindow inherits Window {
                 }
                 if (root.is-chord-key(event.text)) {
                     root.key(event.text);
+                    return accept;
+                }
+                // Zoom controls: 0 = fit, +/= = zoom in, - = zoom out.
+                if (event.text == "0") {
+                    root.lightbox-zoom-fit();
+                    return accept;
+                }
+                if (event.text == "+" || event.text == "=") {
+                    root.lightbox-zoom-changed(min(root.lightbox-zoom * 1.25, 8.0));
+                    return accept;
+                }
+                if (event.text == "-") {
+                    root.lightbox-zoom-changed(max(root.lightbox-zoom / 1.25, 0.1));
                     return accept;
                 }
                 return accept;
@@ -848,75 +869,216 @@ export component MainWindow inherits Window {
             }
         }
 
-        // --- Lightbox overlay ---
+        // --- Lightbox overlay (zoom/pan) ---
         // Pure visuals + TouchAreas, NO FocusScope of its own — app-keys'
-        // capture-key-pressed handles Esc / h / l / arrows while it's open.
-        // Nav uses TouchArea (a Button would steal keyboard focus on click).
-        if root.lightbox-open: Rectangle {
+        // capture-key-pressed handles all keys while it's open.
+        // ASCII < / > for nav arrows (U+2039/203A ‹ › tofu in the default font).
+        if root.lightbox-open: content-root := Rectangle {
             width: root.width;
             height: root.height;
 
+            // Local pan offset (px), reset on navigation / entering fit.
+            property <length> pan-x: 0px;
+            property <length> pan-y: 0px;
+            // Mirror root properties so we can watch them with `changed`.
+            property <int> nav-gen: root.lightbox-index1;
+            property <bool> fit-mirror: root.lightbox-fit;
+
+            changed nav-gen => {
+                content-root.pan-x = 0px;
+                content-root.pan-y = 0px;
+            }
+            changed fit-mirror => {
+                if (root.lightbox-fit) {
+                    content-root.pan-x = 0px;
+                    content-root.pan-y = 0px;
+                }
+            }
+
             Rectangle {
-                background: #000000dd;
+                background: #000000ee;
                 width: 100%;
                 height: 100%;
             }
 
-            // Click anywhere (including the photo) to close. Below the nav arrows
-            // in z-order, so the arrows win their 60px edge strips.
-            TouchArea {
-                width: 100%;
-                height: 100%;
-                clicked => { root.lightbox-close(); }
-            }
-
-            Image {
-                source: root.lightbox-image;
-                image-fit: contain;
-                width: 90%;
-                height: 90%;
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-            }
-
-            // Prev / next arrows as TouchAreas pinned to the left/right edges.
-            prev-touch := TouchArea {
-                width: 60px;
-                height: 100%;
+            // Content area between the 36px top bar and 80px bottom bar.
+            content := Rectangle {
                 x: 0;
-                y: 0;
-                clicked => { root.lightbox-prev(); }
-                Rectangle {
-                    background: prev-touch.has-hover ? #00000080 : transparent;
+                y: 36px;
+                width: parent.width;
+                height: parent.height - 36px - 80px;
+                clip: true;
+
+                // Fit view (default): centered, image-fit contain. Click closes.
+                if root.lightbox-fit: Image {
+                    source: root.lightbox-image;
+                    image-fit: contain;
+                    width: parent.width;
+                    height: parent.height;
+                }
+
+                // Zoomed view: explicit size = source px * zoom, pan clamped so an
+                // edge can't pull inside the viewport.
+                if !root.lightbox-fit: Image {
+                    source: root.lightbox-image;
+                    width: self.source.width * 1px * root.lightbox-zoom;
+                    height: self.source.height * 1px * root.lightbox-zoom;
+                    x: self.width > parent.width
+                        ? clamp((parent.width - self.width) / 2 + content-root.pan-x,
+                                parent.width - self.width, 0px)
+                        : (parent.width - self.width) / 2;
+                    y: self.height > parent.height
+                        ? clamp((parent.height - self.height) / 2 + content-root.pan-y,
+                                parent.height - self.height, 0px)
+                        : (parent.height - self.height) / 2;
+                }
+
+                // Wheel zoom + click-drag pan. Below the nav arrows in z-order.
+                drag-touch := TouchArea {
                     width: 100%;
                     height: 100%;
-                    // ASCII < / > render in the default font; ‹ › (U+2039/203A) tofu.
-                    Text {
-                        text: "<";
-                        color: white;
-                        font-size: 28px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                    mouse-cursor: root.lightbox-fit
+                        ? MouseCursor.default
+                        : (self.pressed ? MouseCursor.grabbing : MouseCursor.grab);
+
+                    property <length> start-pan-x;
+                    property <length> start-pan-y;
+
+                    scroll-event(e) => {
+                        // Anchor at fit-scale on the first tick out of fit so size
+                        // doesn't jump, then apply the wheel factor.
+                        if (root.lightbox-fit) {
+                            root.lightbox-zoom-changed(root.lightbox-fit-scale);
+                        }
+                        root.lightbox-zoom-changed(
+                            clamp(root.lightbox-zoom * pow(1.1, e.delta-y / 60px), 0.1, 8.0));
+                        return accept;
+                    }
+                    changed pressed => {
+                        if (self.pressed) {
+                            self.start-pan-x = content-root.pan-x;
+                            self.start-pan-y = content-root.pan-y;
+                        }
+                    }
+                    moved => {
+                        if (!root.lightbox-fit) {
+                            content-root.pan-x = self.start-pan-x + (self.mouse-x - self.pressed-x);
+                            content-root.pan-y = self.start-pan-y + (self.mouse-y - self.pressed-y);
+                        }
+                    }
+                    clicked => {
+                        if (root.lightbox-fit) { root.lightbox-close(); }
+                    }
+                }
+
+                // Prev / next arrows pinned to the content edges.
+                // ASCII < / > — ‹ › (U+2039/203A) tofu in the default font.
+                prev-touch := TouchArea {
+                    width: 60px;
+                    height: 100%;
+                    x: 0;
+                    clicked => { root.lightbox-prev(); }
+                    Rectangle {
+                        background: prev-touch.has-hover ? #00000080 : transparent;
+                        Text {
+                            text: "<";
+                            color: white;
+                            font-size: 28px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                next-touch := TouchArea {
+                    width: 60px;
+                    height: 100%;
+                    x: parent.width - self.width;
+                    clicked => { root.lightbox-next(); }
+                    Rectangle {
+                        background: next-touch.has-hover ? #00000080 : transparent;
+                        Text {
+                            text: ">";
+                            color: white;
+                            font-size: 28px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
                     }
                 }
             }
 
-            next-touch := TouchArea {
-                width: 60px;
-                height: 100%;
-                x: root.width - self.width;
-                y: 0;
-                clicked => { root.lightbox-next(); }
-                Rectangle {
-                    background: next-touch.has-hover ? #00000080 : transparent;
-                    width: 100%;
-                    height: 100%;
+            // Top bar: filename · counter · close (×, Latin-1 U+00D7, not tofu).
+            Rectangle {
+                x: 0; y: 0; width: parent.width; height: 36px;
+                background: #000000cc;
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 12px;
                     Text {
-                        text: ">";
+                        text: root.lightbox-filename;
                         color: white;
-                        font-size: 28px;
-                        horizontal-alignment: center;
                         vertical-alignment: center;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                    }
+                    Text {
+                        text: root.lightbox-index1 + " of " + root.lightbox-total;
+                        color: #cccccc;
+                        vertical-alignment: center;
+                    }
+                    close-touch := TouchArea {
+                        width: 28px;
+                        clicked => { root.lightbox-close(); }
+                        Text {
+                            // × (U+00D7, Latin-1) renders in the default font;
+                            // ✕ (U+2715) and ✗ (U+2717) tofu.
+                            text: "×";
+                            color: close-touch.has-hover ? white : #cccccc;
+                            font-size: 22px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            // Bottom bar: Fit button · zoom slider · percentage.
+            Rectangle {
+                x: 0; y: parent.height - 80px; width: parent.width; height: 80px;
+                background: #000000cc;
+                HorizontalLayout {
+                    padding: 16px;
+                    spacing: 16px;
+                    alignment: center;
+                    fit-touch := TouchArea {
+                        width: 60px;
+                        clicked => { root.lightbox-zoom-fit(); }
+                        Rectangle {
+                            background: fit-touch.has-hover ? #ffffff22 : #ffffff11;
+                            border-radius: 4px;
+                            Text {
+                                text: "Fit";
+                                color: white;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                    zoom-slider := Slider {
+                        minimum: 0.1;
+                        maximum: 8.0;
+                        value: root.lightbox-zoom;
+                        width: 240px;
+                        // `changed` is a named callback on Slider (not property-watch);
+                        // its parameter `v` carries the new value.
+                        changed(v) => { root.lightbox-zoom-changed(v); }
+                    }
+                    Text {
+                        text: round((root.lightbox-fit ? root.lightbox-fit-scale : root.lightbox-zoom) * 100) + "%";
+                        color: white;
+                        vertical-alignment: center;
+                        width: 56px;
                     }
                 }
             }
