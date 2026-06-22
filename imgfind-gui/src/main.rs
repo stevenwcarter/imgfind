@@ -15,6 +15,7 @@ mod sort_option;
 mod state;
 mod tagset;
 mod window;
+mod zoompan;
 
 use std::collections::{BTreeSet, HashSet};
 use std::ops::Range;
