@@ -1,13 +1,14 @@
-use crate::{database::Database, get_db_path};
+use crate::{ThumbnailSize, database::Database, get_db_path};
 use anyhow::{Context, Result};
 
 /// Long-edge target for the GUI lightbox/preview cached render.
-pub const LIGHTBOX_SIZE: u32 = 2048;
+pub const LIGHTBOX_SIZE: ThumbnailSize = ThumbnailSize(2048);
 
 /// Thumbnail sizes the GUI requests: grid (300 px), detail panel (512 px),
 /// and lightbox/preview (2048 px). Pre-generating all three avoids decode
 /// latency on first view at each size.
-pub const GUI_THUMBNAIL_SIZES: &[u32] = &[300, 512, LIGHTBOX_SIZE];
+pub const GUI_THUMBNAIL_SIZES: [ThumbnailSize; 3] =
+    [ThumbnailSize(300), ThumbnailSize(512), LIGHTBOX_SIZE];
 use crate::block_on;
 use rayon::prelude::*;
 use std::io::Cursor;
@@ -31,17 +32,18 @@ use std::thread;
 /// # Example
 /// ```no_run
 /// // Generate thumbnails for up to 10 images that don't have 300px thumbnails
+/// use imgfind::ThumbnailSize;
 /// use imgfind::block_on;
 /// use imgfind::database::Database;
 /// use imgfind::thumbnail::generate_missing_thumbnails_batch;
 /// use std::path::Path;
 /// let mut db = block_on(Database::new(Path::new("/tmp/.imgfind/imgfind.db"))).unwrap();
-/// let generated = generate_missing_thumbnails_batch(&mut db, 300, 10).unwrap();
+/// let generated = generate_missing_thumbnails_batch(&mut db, ThumbnailSize(300), 10).unwrap();
 /// println!("Generated {} thumbnails", generated);
 /// ```
 pub fn generate_missing_thumbnails_batch(
     db: &mut Database,
-    size: u32,
+    size: ThumbnailSize,
     count: usize,
 ) -> Result<usize> {
     // Fetch image paths/hashes lacking thumbnails of this size.
@@ -121,11 +123,12 @@ pub fn generate_missing_thumbnails_batch(
 }
 
 // Generate resized JPEG bytes for a thumbnail (pure function aside from file IO)
-fn generate_thumbnail_bytes(filepath: &str, size: u32) -> Result<Vec<u8>> {
+fn generate_thumbnail_bytes(filepath: &str, size: ThumbnailSize) -> Result<Vec<u8>> {
     let image = crate::decode::decode_image(std::path::Path::new(filepath))
         .with_context(|| format!("Failed to decode image: {}", filepath))?;
 
-    let resized_image = image.resize(size, size, image::imageops::FilterType::Lanczos3);
+    let px = size.get();
+    let resized_image = image.resize(px, px, image::imageops::FilterType::Lanczos3);
 
     let mut bytes: Vec<u8> = Vec::new();
     resized_image
@@ -138,11 +141,11 @@ fn generate_thumbnail_bytes(filepath: &str, size: u32) -> Result<Vec<u8>> {
 fn generate_and_store_thumbnail(
     filepath: &str,
     hash: &str,
-    size: u32,
+    size: ThumbnailSize,
     tx: &Sender<(String, u32, Vec<u8>)>,
 ) -> Result<()> {
     let bytes = generate_thumbnail_bytes(filepath, size)?;
-    tx.send((hash.to_string(), size, bytes))
+    tx.send((hash.to_string(), size.get(), bytes))
         .context("Failed to send thumbnail bytes over channel")?;
     Ok(())
 }
@@ -164,7 +167,7 @@ pub fn get_or_generate_thumbnail(
     db: &Database,
     filepath: &str,
     hash: &str,
-    size: u32,
+    size: ThumbnailSize,
 ) -> Result<Vec<u8>> {
     // First, try to get the thumbnail from the database
     if let Ok(thumbnail_data) = block_on(db.get_thumbnail(hash, size)) {
@@ -197,8 +200,11 @@ mod tests {
 
     #[test]
     fn gui_sizes_are_300_512_2048() {
-        assert_eq!(GUI_THUMBNAIL_SIZES, &[300, 512, 2048]);
-        assert_eq!(LIGHTBOX_SIZE, 2048);
+        assert_eq!(
+            GUI_THUMBNAIL_SIZES,
+            [ThumbnailSize(300), ThumbnailSize(512), ThumbnailSize(2048)]
+        );
+        assert_eq!(LIGHTBOX_SIZE, ThumbnailSize(2048));
     }
 
     /// Asserts that `get_or_generate_thumbnail` persists a thumbnail row for
@@ -226,11 +232,11 @@ mod tests {
         let abs_path = img_path.to_str().expect("utf-8 path");
         let hash = "test_persistence_hash";
 
-        for &size in GUI_THUMBNAIL_SIZES {
+        for size in GUI_THUMBNAIL_SIZES {
             // Before: no thumbnail row exists for this (hash, size) pair.
             assert!(
                 block_on(db.get_thumbnail(hash, size)).is_err(),
-                "size {size} should be absent before get_or_generate_thumbnail"
+                "size {size:?} should be absent before get_or_generate_thumbnail"
             );
 
             // Generate (and persist) the thumbnail.
@@ -238,7 +244,7 @@ mod tests {
                 get_or_generate_thumbnail(&db, abs_path, hash, size).expect("generate thumbnail");
             assert!(
                 !bytes.is_empty(),
-                "returned bytes must be non-empty for size {size}"
+                "returned bytes must be non-empty for size {size:?}"
             );
 
             // After: the row must be present and non-empty.
@@ -246,7 +252,7 @@ mod tests {
                 .expect("thumbnail must be present after get_or_generate");
             assert!(
                 !cached.is_empty(),
-                "persisted bytes must be non-empty for size {size}"
+                "persisted bytes must be non-empty for size {size:?}"
             );
         }
 

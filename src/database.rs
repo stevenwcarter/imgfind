@@ -1,6 +1,9 @@
 use crate::filters::{Filters, build_filter_clause_turso};
+use crate::ids::{CollectionId, ImageId, TagId};
 use crate::ui_state::UiState;
-use crate::{AbsolutePath, RelativePath, db_pool, get_db_parent_dir};
+use crate::{
+    AbsolutePath, EmbeddingDim, MaxK, RelativePath, ThumbnailSize, db_pool, get_db_parent_dir,
+};
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose};
 use hashbrown::HashMap;
@@ -24,7 +27,7 @@ pub type ImageSearchResult = Result<Vec<(String, f32, Option<Vec<u8>>)>>;
 /// One ranked metadata-search row: `(image id, relative path, distance,
 /// file_size)`. The `id` lets callers build stable [`crate::sort::RowMeta`]
 /// rows from ranked (relevance-ordered) results.
-pub type RankedMetaRow = (i64, String, f32, Option<i64>);
+pub type RankedMetaRow = (ImageId, String, f32, Option<i64>);
 
 /// Serialize an f32 slice to little-endian bytes (the `F32_BLOB` wire format).
 fn to_le_bytes(v: &[f32]) -> Vec<u8> {
@@ -158,7 +161,7 @@ impl Database {
 #[derive(Debug, Clone)]
 pub struct ModelInfo {
     pub name: String,
-    pub dim: usize,
+    pub dim: EmbeddingDim,
     pub table: String,
 }
 
@@ -176,7 +179,7 @@ impl Database {
         let row = rows.next().await?.context("no active model")?;
         Ok(ModelInfo {
             name: col_text(&row, 0, "name")?,
-            dim: col_i64(&row, 1, "dim")? as usize,
+            dim: EmbeddingDim(col_i64(&row, 1, "dim")? as usize),
             table: col_text(&row, 2, "table_name")?,
         })
     }
@@ -193,12 +196,12 @@ impl Database {
     }
 
     /// Register a new embedding model and create its (inactive) vector table.
-    pub async fn register_model(&self, name: &str, dim: usize) -> Result<()> {
+    pub async fn register_model(&self, name: &str, dim: EmbeddingDim) -> Result<()> {
         let table = crate::schema::sanitize_model_table(name);
         let conn = self.pool.get().await.context("get connection")?;
         conn.execute(
             "INSERT OR IGNORE INTO models (name, dim, table_name, is_active) VALUES (?1, ?2, ?3, 0)",
-            (name.to_string(), dim as i64, table.clone()),
+            (name.to_string(), dim.get() as i64, table.clone()),
         )
         .await?;
         crate::schema::create_vector_table(&conn, &table, dim).await?;
@@ -375,7 +378,7 @@ impl Database {
 
     /// Resolve the `images.id` for a stored relative path, erroring if the image
     /// is not indexed. Used by the tag/collection write methods.
-    async fn image_id_for(&self, relative_path: &RelativePath) -> Result<i64> {
+    async fn image_id_for(&self, relative_path: &RelativePath) -> Result<ImageId> {
         let rel = relative_path.as_str().into_owned();
         let conn = self.pool.get().await.context("get connection")?;
         let mut rows = conn
@@ -385,11 +388,11 @@ impl Database {
             .next()
             .await?
             .with_context(|| format!("no indexed image at {rel}"))?;
-        col_i64(&row, 0, "id")
+        Ok(ImageId(col_i64(&row, 0, "id")?))
     }
 
     /// Ensure a tag exists, returning its id.
-    pub async fn create_tag(&self, name: &str) -> Result<i64> {
+    pub async fn create_tag(&self, name: &str) -> Result<TagId> {
         let conn = self.pool.get().await.context("get connection")?;
         conn.execute(
             "INSERT OR IGNORE INTO tags (name) VALUES (?1)",
@@ -400,7 +403,7 @@ impl Database {
             .query("SELECT id FROM tags WHERE name = ?1", (name.to_string(),))
             .await?;
         let row = rows.next().await?.context("tag row missing after insert")?;
-        col_i64(&row, 0, "id")
+        Ok(TagId(col_i64(&row, 0, "id")?))
     }
 
     /// Attach `tag` to the image at `relative_path` (creating the tag if needed).
@@ -410,7 +413,7 @@ impl Database {
         let conn = self.pool.get().await.context("get connection")?;
         conn.execute(
             "INSERT OR IGNORE INTO image_tags (image_id, tag_id) VALUES (?1, ?2)",
-            (image_id, tag_id),
+            (Value::Integer(image_id.get()), Value::Integer(tag_id.get())),
         )
         .await?;
         Ok(())
@@ -423,7 +426,7 @@ impl Database {
         conn.execute(
             "DELETE FROM image_tags WHERE image_id = ?1 \
              AND tag_id = (SELECT id FROM tags WHERE name = ?2)",
-            (image_id, tag.to_string()),
+            (Value::Integer(image_id.get()), Value::Text(tag.to_string())),
         )
         .await?;
         Ok(())
@@ -446,7 +449,7 @@ impl Database {
         for image_id in ids {
             tx.execute(
                 "INSERT OR IGNORE INTO image_tags (image_id, tag_id) VALUES (?1, ?2)",
-                (image_id, tag_id),
+                (Value::Integer(image_id.get()), Value::Integer(tag_id.get())),
             )
             .await?;
         }
@@ -471,7 +474,7 @@ impl Database {
             tx.execute(
                 "DELETE FROM image_tags WHERE image_id = ?1 \
                  AND tag_id = (SELECT id FROM tags WHERE name = ?2)",
-                (image_id, tag.to_string()),
+                (Value::Integer(image_id.get()), Value::Text(tag.to_string())),
             )
             .await?;
         }
@@ -481,7 +484,7 @@ impl Database {
 
     /// Resolve a slice of relative paths to their `images.id` values in one
     /// `IN (...)` query. Paths absent from the DB are simply omitted.
-    async fn resolve_image_ids(&self, rel_paths: &[&str]) -> Result<Vec<i64>> {
+    async fn resolve_image_ids(&self, rel_paths: &[&str]) -> Result<Vec<ImageId>> {
         let placeholders = rel_paths.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!("SELECT id FROM images WHERE path IN ({placeholders})");
         let params: Vec<Value> = rel_paths
@@ -492,7 +495,7 @@ impl Database {
         let mut rows = conn.query(&sql, turso::params_from_iter(params)).await?;
         let mut ids = Vec::new();
         while let Some(row) = rows.next().await? {
-            ids.push(col_i64(&row, 0, "id")?);
+            ids.push(ImageId(col_i64(&row, 0, "id")?));
         }
         Ok(ids)
     }
@@ -509,13 +512,13 @@ impl Database {
             let Some(row) = rows.next().await? else {
                 return Ok(Vec::new());
             };
-            col_i64(&row, 0, "id")?
+            ImageId(col_i64(&row, 0, "id")?)
         };
         let mut rows = conn
             .query(
                 "SELECT t.name FROM image_tags it JOIN tags t ON t.id = it.tag_id \
                  WHERE it.image_id = ?1 ORDER BY t.name",
-                (image_id,),
+                (Value::Integer(image_id.get()),),
             )
             .await?;
         let mut out = Vec::new();
@@ -556,7 +559,7 @@ impl Database {
     }
 
     /// Ensure a collection exists, returning its id.
-    pub async fn create_collection(&self, name: &str) -> Result<i64> {
+    pub async fn create_collection(&self, name: &str) -> Result<CollectionId> {
         let conn = self.pool.get().await.context("get connection")?;
         conn.execute(
             "INSERT OR IGNORE INTO collections (name) VALUES (?1)",
@@ -573,7 +576,7 @@ impl Database {
             .next()
             .await?
             .context("collection row missing after insert")?;
-        col_i64(&row, 0, "id")
+        Ok(CollectionId(col_i64(&row, 0, "id")?))
     }
 
     /// Add the image at `relative_path` to `name` (creating the collection if needed).
@@ -583,7 +586,10 @@ impl Database {
         let conn = self.pool.get().await.context("get connection")?;
         conn.execute(
             "INSERT OR IGNORE INTO collection_images (collection_id, image_id) VALUES (?1, ?2)",
-            (collection_id, image_id),
+            (
+                Value::Integer(collection_id.get()),
+                Value::Integer(image_id.get()),
+            ),
         )
         .await?;
         Ok(())
@@ -600,7 +606,10 @@ impl Database {
         conn.execute(
             "DELETE FROM collection_images WHERE image_id = ?1 \
              AND collection_id = (SELECT id FROM collections WHERE name = ?2)",
-            (image_id, name.to_string()),
+            (
+                Value::Integer(image_id.get()),
+                Value::Text(name.to_string()),
+            ),
         )
         .await?;
         Ok(())
@@ -756,9 +765,9 @@ impl Database {
         query_embedding: &[f32],
         limit: usize,
         distance_threshold: f32,
-        max_k: usize,
+        max_k: MaxK,
     ) -> Result<Vec<(String, f32)>> {
-        let k = limit.clamp(1, max_k);
+        let k = limit.clamp(1, max_k.get());
         let vt = self.vectors_table().await?;
         let sql =
             crate::vector_sql::knn_query(&vt, "path, distance", "", "", k, 0, distance_threshold);
@@ -786,9 +795,9 @@ impl Database {
         limit: usize,
         offset: usize,
         distance_threshold: f32,
-        max_k: usize,
+        max_k: MaxK,
     ) -> ImageSearchResult {
-        let k = limit.clamp(1, max_k);
+        let k = limit.clamp(1, max_k.get());
         let vt = self.vectors_table().await?;
         let sql = crate::vector_sql::knn_query(
             &vt,
@@ -831,12 +840,12 @@ impl Database {
         limit: usize,
         offset: usize,
         distance_threshold: f32,
-        max_k: usize,
+        max_k: MaxK,
         filters: &Filters,
     ) -> Result<Vec<RankedMetaRow>> {
         // k must cover offset+limit AFTER filtering; max_k acts as a floor so a
         // full page survives post-scan filtering even on page 1.
-        let k = (offset + limit).max(1).max(max_k);
+        let k = (offset + limit).max(1).max(max_k.get());
         let vt = self.vectors_table().await?;
         let (clause, fparams) = build_filter_clause_turso(filters);
         let sql = crate::vector_sql::knn_query(
@@ -859,7 +868,7 @@ impl Database {
         let mut out = Vec::with_capacity(limit.min(k));
         while let Some(row) = rows.next().await? {
             out.push((
-                col_i64(&row, 0, "id")?,
+                ImageId(col_i64(&row, 0, "id")?),
                 col_text(&row, 1, "path")?,
                 col_opt_f64(&row, 2)?.unwrap_or(0.0) as f32,
                 col_opt_i64(&row, 3)?,
@@ -878,7 +887,7 @@ impl Database {
         limit: usize,
         offset: usize,
         distance_threshold: f32,
-        max_k: usize,
+        max_k: MaxK,
         filters: &crate::filters::Filters,
     ) -> Result<Vec<RankedMetaRow>> {
         let vt = self.vectors_table().await?;
@@ -940,7 +949,7 @@ impl Database {
         query_embedding: &[f32],
         limit: usize,
         distance_threshold: f32,
-        max_k: usize,
+        max_k: MaxK,
     ) -> Result<Vec<(String, f32, Option<String>)>> {
         let search_results = self
             .search_similar_images_with_raw_blob(
@@ -1035,7 +1044,7 @@ impl Database {
     pub async fn insert_thumbnail(
         &self,
         image_hash: &str,
-        size: u32,
+        size: ThumbnailSize,
         thumbnail_data: &[u8],
     ) -> Result<()> {
         let conn = self
@@ -1046,7 +1055,11 @@ impl Database {
         conn.execute(
             "INSERT OR REPLACE INTO thumbnails (image_hash, size, thumbnail_data) \
              VALUES (?1, ?2, ?3)",
-            (image_hash.to_string(), size as i64, thumbnail_data.to_vec()),
+            (
+                image_hash.to_string(),
+                i64::from(size.get()),
+                thumbnail_data.to_vec(),
+            ),
         )
         .await
         .context("failed to insert or replace")?;
@@ -1054,7 +1067,7 @@ impl Database {
     }
 
     /// Get a thumbnail from the database cache.
-    pub async fn get_thumbnail(&self, image_hash: &str, size: u32) -> Result<Vec<u8>> {
+    pub async fn get_thumbnail(&self, image_hash: &str, size: ThumbnailSize) -> Result<Vec<u8>> {
         let conn = self
             .pool
             .get()
@@ -1063,7 +1076,7 @@ impl Database {
         let mut rows = conn
             .query(
                 "SELECT thumbnail_data FROM thumbnails WHERE image_hash = ?1 AND size = ?2",
-                (image_hash.to_string(), size as i64),
+                (image_hash.to_string(), i64::from(size.get())),
             )
             .await?;
         let row = rows.next().await?.context("no thumbnail row")?;
@@ -1094,7 +1107,7 @@ impl Database {
     /// Returns a list of `(path, hash)` tuples for images missing thumbnails.
     pub async fn get_images_without_thumbnails(
         &self,
-        size: u32,
+        size: ThumbnailSize,
         limit: usize,
     ) -> Result<Vec<(AbsolutePath, String)>> {
         let limit = i64::try_from(limit).context("thumbnail LIMIT exceeds i64 range")?;
@@ -1110,7 +1123,7 @@ impl Database {
                  LEFT JOIN thumbnails t ON i.hash = t.image_hash AND t.size = ?1 \
                  WHERE t.id IS NULL \
                  LIMIT ?2",
-                (size as i64, limit),
+                (i64::from(size.get()), limit),
             )
             .await?;
         let mut out = Vec::new();
@@ -1124,7 +1137,7 @@ impl Database {
     }
 
     /// Count images that don't have thumbnails of a specific size.
-    pub async fn count_images_without_thumbnails(&self, size: u32) -> Result<usize> {
+    pub async fn count_images_without_thumbnails(&self, size: ThumbnailSize) -> Result<usize> {
         let conn = self
             .pool
             .get()
@@ -1136,7 +1149,7 @@ impl Database {
                  FROM images i \
                  LEFT JOIN thumbnails t ON i.hash = t.image_hash AND t.size = ?1 \
                  WHERE t.id IS NULL",
-                (size as i64,),
+                (i64::from(size.get()),),
             )
             .await?;
         let row = rows.next().await?.context("COUNT returned no row")?;
@@ -1146,7 +1159,7 @@ impl Database {
     /// Insert or update metadata for an image.
     pub async fn insert_or_update_metadata(
         &self,
-        image_id: i64,
+        image_id: ImageId,
         metadata: &ImageMetadata,
     ) -> Result<()> {
         let conn = self
@@ -1160,12 +1173,12 @@ impl Database {
               camera_make, camera_model, datetime_taken) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             (
-                Value::Integer(image_id),
+                Value::Integer(image_id.get()),
                 opt_i64(metadata.file_size.map(|s| s as i64)),
                 opt_i64(metadata.width.map(|w| w as i64)),
                 opt_i64(metadata.height.map(|h| h as i64)),
-                opt_f64(metadata.latitude),
-                opt_f64(metadata.longitude),
+                opt_f64(metadata.coords.map(|c| c.lat)),
+                opt_f64(metadata.coords.map(|c| c.lon)),
                 opt_text(metadata.camera_make.clone()),
                 opt_text(metadata.camera_model.clone()),
                 opt_text(metadata.datetime_taken.clone()),
@@ -1179,7 +1192,7 @@ impl Database {
     pub async fn get_images_without_metadata(
         &self,
         limit: usize,
-    ) -> Result<Vec<(i64, AbsolutePath, String)>> {
+    ) -> Result<Vec<(ImageId, AbsolutePath, String)>> {
         let limit = i64::try_from(limit).context("metadata LIMIT exceeds i64 range")?;
         let conn = self
             .pool
@@ -1198,7 +1211,7 @@ impl Database {
             .await?;
         let mut out = Vec::new();
         while let Some(row) = rows.next().await? {
-            let id = col_i64(&row, 0, "id")?;
+            let id = ImageId(col_i64(&row, 0, "id")?);
             let rel_path = col_text(&row, 1, "path")?;
             let hash = col_text(&row, 2, "hash")?;
             let abs_path = RelativePath(PathBuf::from(rel_path)).to_absolute(&self.parent_dir);
@@ -1339,7 +1352,7 @@ impl Database {
     /// Returns one `RowMeta` per id that exists in `images`, in the **same order
     /// as `ids`**. Ids not found in the database are silently dropped. An empty
     /// `ids` slice returns an empty `Vec` without touching the database.
-    pub async fn rehydrate_rows(&self, ids: &[i64]) -> Result<Vec<crate::sort::RowMeta>> {
+    pub async fn rehydrate_rows(&self, ids: &[ImageId]) -> Result<Vec<crate::sort::RowMeta>> {
         use crate::sort::RowMeta;
 
         if ids.is_empty() {
@@ -1357,9 +1370,9 @@ impl Database {
             .get()
             .await
             .context("DB connection for rehydrate_rows")?;
-        let params: Vec<Value> = ids.iter().map(|i| Value::Integer(*i)).collect();
+        let params: Vec<Value> = ids.iter().map(|i| Value::Integer(i.get())).collect();
         let mut rows = conn.query(&sql, turso::params_from_iter(params)).await?;
-        let mut found: HashMap<i64, RowMeta> = HashMap::new();
+        let mut found: HashMap<ImageId, RowMeta> = HashMap::new();
         while let Some(row) = rows.next().await? {
             let meta = row_meta(&row)?;
             found.insert(meta.id, meta);
@@ -1418,7 +1431,7 @@ impl Database {
     }
 
     /// Get the image ID by path.
-    pub async fn get_image_id(&self, path: &AbsolutePath) -> Result<i64> {
+    pub async fn get_image_id(&self, path: &AbsolutePath) -> Result<ImageId> {
         let rel_path = path.to_relative(&self.parent_dir).with_context(|| {
             format!("Failed to convert path {} to relative path", path.as_str())
         })?;
@@ -1434,7 +1447,7 @@ impl Database {
             )
             .await?;
         let row = rows.next().await?.context("no image row for id lookup")?;
-        col_i64(&row, 0, "id")
+        Ok(ImageId(col_i64(&row, 0, "id")?))
     }
 
     /// Read an image's stored EXIF/metadata from the `image_metadata` table by
@@ -1466,8 +1479,9 @@ impl Database {
             file_size: col_opt_i64(&row, 0)?.map(|s| s as u64),
             width: col_opt_i64(&row, 1)?.map(|w| w as u32),
             height: col_opt_i64(&row, 2)?.map(|h| h as u32),
-            latitude: col_opt_f64(&row, 3)?,
-            longitude: col_opt_f64(&row, 4)?,
+            coords: col_opt_f64(&row, 3)?
+                .zip(col_opt_f64(&row, 4)?)
+                .map(|(lat, lon)| GpsCoords { lat, lon }),
             camera_make: col_opt_text(&row, 5)?,
             camera_model: col_opt_text(&row, 6)?,
             datetime_taken: col_opt_text(&row, 7)?,
@@ -1478,9 +1492,9 @@ impl Database {
 /// Build a [`crate::sort::RowMeta`] from a `(id, path, file_size)` row, deriving
 /// the lowercased extension Rust-side.
 fn row_meta(row: &turso::Row) -> Result<crate::sort::RowMeta> {
-    let id = col_i64(row, 0, "id")?;
+    let id = ImageId(col_i64(row, 0, "id")?);
     let path = col_text(row, 1, "path")?;
-    let size = col_opt_i64(row, 2)?;
+    let size = col_opt_i64(row, 2)?.map(crate::units::FileSize);
     let ext = path
         .rsplit_once('.')
         .map(|(_, e)| e.to_lowercase())
@@ -1508,14 +1522,21 @@ fn opt_text(v: Option<String>) -> Value {
     v.map_or(Value::Null, Value::Text)
 }
 
+/// A complete GPS fix: latitude and longitude are always present together, so a
+/// half-present coordinate (one without the other) is unrepresentable.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GpsCoords {
+    pub lat: f64,
+    pub lon: f64,
+}
+
 /// Metadata extracted from image EXIF data
 #[derive(Debug, Clone)]
 pub struct ImageMetadata {
     pub file_size: Option<u64>,
     pub width: Option<u32>,
     pub height: Option<u32>,
-    pub latitude: Option<f64>,
-    pub longitude: Option<f64>,
+    pub coords: Option<GpsCoords>,
     pub camera_make: Option<String>,
     pub camera_model: Option<String>,
     pub datetime_taken: Option<String>,
@@ -1544,8 +1565,7 @@ pub fn extract_image_metadata(file_path: &str) -> Result<ImageMetadata> {
         file_size: None,
         width: None,
         height: None,
-        latitude: None,
-        longitude: None,
+        coords: None,
         camera_make: None,
         camera_model: None,
         datetime_taken: None,
@@ -1601,8 +1621,10 @@ pub fn extract_image_metadata(file_path: &str) -> Result<ImageMetadata> {
                     ),
                 )
             {
-                metadata.latitude = Some(latitude);
-                metadata.longitude = Some(longitude);
+                metadata.coords = Some(GpsCoords {
+                    lat: latitude,
+                    lon: longitude,
+                });
             }
         }
     }
@@ -1708,6 +1730,7 @@ fn generate_jitter(img: &ImageWithMetadata) -> (f64, f64) {
 mod tests {
     use super::*;
     use crate::schema::LATEST_MIGRATION_VERSION;
+    use crate::units::FileSize;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     /// Unique temp directory for an isolated test database.
@@ -1760,8 +1783,13 @@ mod tests {
         assert_eq!(meta.file_size, Some(4096));
         assert_eq!(meta.width, Some(800));
         assert_eq!(meta.height, Some(600));
-        assert_eq!(meta.latitude, Some(12.5));
-        assert_eq!(meta.longitude, Some(-77.25));
+        assert_eq!(
+            meta.coords,
+            Some(GpsCoords {
+                lat: 12.5,
+                lon: -77.25
+            })
+        );
         assert_eq!(meta.camera_make.as_deref(), Some("Canon"));
         assert_eq!(meta.camera_model.as_deref(), Some("R5"));
         assert_eq!(meta.datetime_taken.as_deref(), Some("2026:06:20 12:00:00"));
@@ -1791,6 +1819,33 @@ mod tests {
                 .expect("query")
                 .is_none(),
             "unknown path should yield Ok(None)"
+        );
+
+        // Half-present coordinate: latitude stored, longitude NULL. The paired
+        // `coords` field makes this unrepresentable, so it must read back `None`.
+        {
+            let conn = db.pool.get().await.expect("conn");
+            conn.execute(
+                "INSERT INTO images (id, path, hash) VALUES (3, 'c.jpg', 'h3')",
+                (),
+            )
+            .await
+            .expect("insert image");
+            conn.execute(
+                "INSERT INTO image_metadata (image_id, latitude) VALUES (3, 12.5)",
+                (),
+            )
+            .await
+            .expect("insert half coordinate");
+        }
+        let half = db
+            .get_image_metadata(&RelativePath(PathBuf::from("c.jpg")))
+            .await
+            .expect("query")
+            .expect("metadata row present");
+        assert_eq!(
+            half.coords, None,
+            "latitude without longitude must yield coords: None"
         );
 
         cleanup(&db_path);
@@ -2009,11 +2064,25 @@ mod tests {
         query[0] = 1.0;
 
         let page1 = db
-            .search_similar_images_meta(&query, 4, 0, 2.0, 100, &crate::filters::Filters::default())
+            .search_similar_images_meta(
+                &query,
+                4,
+                0,
+                2.0,
+                MaxK(100),
+                &crate::filters::Filters::default(),
+            )
             .await
             .expect("page 1");
         let page2 = db
-            .search_similar_images_meta(&query, 4, 4, 2.0, 100, &crate::filters::Filters::default())
+            .search_similar_images_meta(
+                &query,
+                4,
+                4,
+                2.0,
+                MaxK(100),
+                &crate::filters::Filters::default(),
+            )
             .await
             .expect("page 2");
 
@@ -2065,7 +2134,7 @@ mod tests {
                 20,
                 35,
                 2.0,
-                40,
+                MaxK(40),
                 &crate::filters::Filters::default(),
             )
             .await
@@ -2096,20 +2165,20 @@ mod tests {
 
         // usize::MAX overflows the i64 LIMIT bind and is rejected.
         assert!(
-            db.get_images_without_thumbnails(300, usize::MAX)
+            db.get_images_without_thumbnails(ThumbnailSize(300), usize::MAX)
                 .await
                 .is_err(),
             "usize::MAX must overflow the i64 LIMIT bind"
         );
 
         let missing = db
-            .count_images_without_thumbnails(300)
+            .count_images_without_thumbnails(ThumbnailSize(300))
             .await
             .expect("count missing thumbnails must succeed");
         assert_eq!(missing, 3, "all three images are missing a 300px thumbnail");
 
         let rows = db
-            .get_images_without_thumbnails(300, missing)
+            .get_images_without_thumbnails(ThumbnailSize(300), missing)
             .await
             .expect("real-count LIMIT bind must succeed");
         assert_eq!(rows.len(), 3, "the count value covers all missing images");
@@ -2160,7 +2229,7 @@ mod tests {
         let db_path = temp_db_path();
         let db = Database::new(&db_path).await.expect("create db");
         let m = db.active_model().await.unwrap();
-        assert_eq!(m.dim, 512);
+        assert_eq!(m.dim, EmbeddingDim(512));
         assert_eq!(m.table, "image_vectors");
 
         cleanup(&db_path);
@@ -2170,10 +2239,15 @@ mod tests {
     async fn register_and_switch_model_creates_table_and_flips_active() {
         let db_path = temp_db_path();
         let db = Database::new(&db_path).await.expect("create db");
-        db.register_model("test-model", 256).await.unwrap();
+        db.register_model("test-model", EmbeddingDim(256))
+            .await
+            .unwrap();
         db.set_active_model("test-model").await.unwrap();
         let m = db.active_model().await.unwrap();
-        assert_eq!((m.dim, m.table.as_str()), (256, "image_vectors_test_model"));
+        assert_eq!(
+            (m.dim, m.table.as_str()),
+            (EmbeddingDim(256), "image_vectors_test_model")
+        );
         let conn = db.pool.get().await.unwrap();
         let mut rows = conn
             .query(
@@ -2209,7 +2283,9 @@ mod tests {
             "indexed under default model"
         );
 
-        db.register_model("other-model", 8).await.unwrap();
+        db.register_model("other-model", EmbeddingDim(8))
+            .await
+            .unwrap();
         db.set_active_model("other-model").await.unwrap();
         assert!(
             !db.is_image_indexed(&abs, hash).await.unwrap(),
@@ -2299,7 +2375,7 @@ mod tests {
                 10,
                 0,
                 2.0,
-                100,
+                MaxK(100),
                 &crate::filters::Filters::default(),
             )
             .await
@@ -2374,8 +2450,8 @@ mod tests {
         let sized = db
             .browse(
                 &Filters {
-                    size_min: Some(500),
-                    size_max: Some(6000),
+                    size_min: Some(FileSize(500)),
+                    size_max: Some(FileSize(6000)),
                     ..Default::default()
                 },
                 100,
@@ -2475,7 +2551,7 @@ mod tests {
             ..Default::default()
         };
         let rows = db
-            .search_similar_images_meta(&q, 80, 0, 1.3, 100, &jpg_only)
+            .search_similar_images_meta(&q, 80, 0, 1.3, MaxK(100), &jpg_only)
             .await
             .unwrap();
         let paths: Vec<&str> = rows.iter().map(|(_, p, _, _)| p.as_str()).collect();
@@ -2485,7 +2561,7 @@ mod tests {
             "png filtered out of vector results"
         );
         let both = db
-            .search_similar_images_meta(&q, 80, 0, 1.3, 100, &Filters::default())
+            .search_similar_images_meta(&q, 80, 0, 1.3, MaxK(100), &Filters::default())
             .await
             .unwrap();
         assert_eq!(both.len(), 2);
@@ -2640,7 +2716,7 @@ mod tests {
     async fn rehydrate_preserves_order_and_drops_missing() {
         let (db, tmp) =
             test_db_with_rows(&[("a.jpg", Some(1)), ("b.jpg", Some(2)), ("c.jpg", Some(3))]).await;
-        let want = vec![3i64, 999, 1];
+        let want = vec![ImageId(3), ImageId(999), ImageId(1)];
         let rows = db.rehydrate_rows(&want).await.unwrap();
         assert_eq!(
             rows.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
@@ -2666,21 +2742,21 @@ mod tests {
             ("img3.jpg", Some(300)),
         ])
         .await;
-        let ids = vec![3i64, 999, 1, 2];
+        let ids = vec![ImageId(3), ImageId(999), ImageId(1), ImageId(2)];
         let rows = db.rehydrate_rows(&ids).await.unwrap();
 
         assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0].id, 3);
-        assert_eq!(rows[1].id, 1);
-        assert_eq!(rows[2].id, 2);
+        assert_eq!(rows[0].id, ImageId(3));
+        assert_eq!(rows[1].id, ImageId(1));
+        assert_eq!(rows[2].id, ImageId(2));
 
         assert_eq!(rows[0].path, "img3.jpg");
         assert_eq!(rows[1].path, "img1.jpg");
         assert_eq!(rows[2].path, "img2.jpg");
 
-        assert_eq!(rows[0].size, Some(300));
-        assert_eq!(rows[1].size, Some(100));
-        assert_eq!(rows[2].size, Some(200));
+        assert_eq!(rows[0].size, Some(FileSize(300)));
+        assert_eq!(rows[1].size, Some(FileSize(100)));
+        assert_eq!(rows[2].size, Some(FileSize(200)));
 
         cleanup(&tmp);
     }
@@ -2691,7 +2767,7 @@ mod tests {
         assert!(db.get_ui_state().await.unwrap().is_none());
         let st = UiState {
             search_text: "dog".into(),
-            result_ids: vec![1],
+            result_ids: vec![ImageId(1)],
             selected_index: Some(0),
             ..Default::default()
         };
@@ -2699,7 +2775,7 @@ mod tests {
         assert_eq!(db.get_ui_state().await.unwrap().unwrap(), st);
         let st2 = UiState {
             search_text: "cat".into(),
-            result_ids: vec![1],
+            result_ids: vec![ImageId(1)],
             selected_index: Some(0),
             ..Default::default()
         };
@@ -2738,7 +2814,7 @@ mod tests {
 
     #[tokio::test]
     async fn browse_all_filters_by_tags_all_and_any() {
-        use crate::filters::{Filters, TagMatch};
+        use crate::filters::{Filters, TagFilter, TagMatch};
         use crate::sort::Sort;
 
         let (db, tmp) = test_db_with_images(&["a.jpg", "b.jpg", "c.jpg"]).await;
@@ -2747,9 +2823,10 @@ mod tests {
         db.tag_image(&rel("b.jpg"), "beach").await.unwrap();
 
         let all_beach_sunset = Filters {
-            tags: vec!["beach".into(), "sunset".into()],
-            tag_match: TagMatch::AllOf,
-            tags_enabled: true,
+            tag_filter: TagFilter::Active {
+                tags: vec!["beach".into(), "sunset".into()],
+                match_mode: TagMatch::AllOf,
+            },
             ..Default::default()
         };
         let got = db
@@ -2760,8 +2837,11 @@ mod tests {
         assert_eq!(paths, vec!["a.jpg"]);
 
         let any_beach_sunset = Filters {
-            tag_match: TagMatch::AnyOf,
-            ..all_beach_sunset.clone()
+            tag_filter: TagFilter::Active {
+                tags: vec!["beach".into(), "sunset".into()],
+                match_mode: TagMatch::AnyOf,
+            },
+            ..Default::default()
         };
         let mut got = db
             .browse_all(&any_beach_sunset, &Sort::default())
@@ -2772,8 +2852,11 @@ mod tests {
         assert_eq!(paths, vec!["a.jpg", "b.jpg"]);
 
         let disabled = Filters {
-            tags_enabled: false,
-            ..all_beach_sunset
+            tag_filter: TagFilter::Inactive {
+                tags: vec!["beach".into(), "sunset".into()],
+                match_mode: TagMatch::AllOf,
+            },
+            ..Default::default()
         };
         let got = db.browse_all(&disabled, &Sort::default()).await.unwrap();
         assert_eq!(got.len(), 3);

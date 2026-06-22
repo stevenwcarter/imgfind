@@ -1,6 +1,9 @@
 //! Shared sort model for browse/search ordering (CLI + GUI).
 use serde::{Deserialize, Serialize};
 
+use crate::ids::ImageId;
+use crate::units::FileSize;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SortKey {
@@ -33,9 +36,9 @@ impl Default for Sort {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RowMeta {
-    pub id: i64,
+    pub id: ImageId,
     pub path: String,
-    pub size: Option<i64>,
+    pub size: Option<FileSize>,
     pub ext: String,
 }
 
@@ -146,27 +149,27 @@ mod tests {
     fn sort_rows_by_size_nulls_last_path_tiebreak() {
         let mut rows = vec![
             RowMeta {
-                id: 1,
+                id: ImageId(1),
                 path: "b.jpg".into(),
-                size: Some(10),
+                size: Some(FileSize(10)),
                 ext: "jpg".into(),
             },
             RowMeta {
-                id: 2,
+                id: ImageId(2),
                 path: "a.jpg".into(),
                 size: None,
                 ext: "jpg".into(),
             },
             RowMeta {
-                id: 3,
+                id: ImageId(3),
                 path: "c.jpg".into(),
-                size: Some(10),
+                size: Some(FileSize(10)),
                 ext: "jpg".into(),
             },
             RowMeta {
-                id: 4,
+                id: ImageId(4),
                 path: "d.jpg".into(),
-                size: Some(5),
+                size: Some(FileSize(5)),
                 ext: "jpg".into(),
             },
         ];
@@ -179,7 +182,7 @@ mod tests {
         );
         assert_eq!(
             rows.iter().map(|r| r.id).collect::<Vec<_>>(),
-            vec![4, 1, 3, 2]
+            vec![ImageId(4), ImageId(1), ImageId(3), ImageId(2)]
         );
     }
 
@@ -187,19 +190,19 @@ mod tests {
     fn sort_rows_by_type_then_name() {
         let mut rows = vec![
             RowMeta {
-                id: 1,
+                id: ImageId(1),
                 path: "z.png".into(),
                 size: None,
                 ext: "png".into(),
             },
             RowMeta {
-                id: 2,
+                id: ImageId(2),
                 path: "a.png".into(),
                 size: None,
                 ext: "png".into(),
             },
             RowMeta {
-                id: 3,
+                id: ImageId(3),
                 path: "m.jpg".into(),
                 size: None,
                 ext: "jpg".into(),
@@ -212,20 +215,23 @@ mod tests {
                 dir: SortDir::Asc,
             },
         );
-        assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), vec![3, 2, 1]);
+        assert_eq!(
+            rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![ImageId(3), ImageId(2), ImageId(1)]
+        );
     }
 
     #[test]
     fn sort_rows_by_name_desc() {
         let mut rows = vec![
             RowMeta {
-                id: 1,
+                id: ImageId(1),
                 path: "a.jpg".into(),
                 size: None,
                 ext: "jpg".into(),
             },
             RowMeta {
-                id: 2,
+                id: ImageId(2),
                 path: "b.jpg".into(),
                 size: None,
                 ext: "jpg".into(),
@@ -238,6 +244,9 @@ mod tests {
                 dir: SortDir::Desc,
             },
         );
-        assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), vec![2, 1]);
+        assert_eq!(
+            rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![ImageId(2), ImageId(1)]
+        );
     }
 }

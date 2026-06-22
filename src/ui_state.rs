@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::filters::Filters;
+use crate::ids::ImageId;
 use crate::sort::Sort;
 
 /// Which search mode the session was in when last saved.
@@ -13,7 +14,7 @@ pub enum PersistedMode {
     Browse,
     Text(String),
     /// Seed image id for a similarity search.
-    Similar(i64),
+    Similar(ImageId),
 }
 
 /// One color brush: a curated set of tag names quick-applied as a unit. The
@@ -46,7 +47,7 @@ pub struct UiState {
     #[serde(default)]
     pub filters: Filters,
     #[serde(default)]
-    pub result_ids: Vec<i64>,
+    pub result_ids: Vec<ImageId>,
     #[serde(default)]
     pub selected_index: Option<usize>,
     #[serde(default)]
@@ -79,7 +80,7 @@ mod tests {
                 dir: SortDir::Desc,
             },
             filters: crate::filters::Filters::default(),
-            result_ids: vec![3, 1, 2],
+            result_ids: vec![ImageId(3), ImageId(1), ImageId(2)],
             selected_index: Some(1),
             detail_open: true,
             scroll_y: 128.5,
@@ -96,8 +97,19 @@ mod tests {
             rail_visible: false,
         };
         let json = serde_json::to_string(&st).unwrap();
+        // `#[serde(transparent)]` keeps the persisted id arrays bare integers.
+        assert!(
+            json.contains("\"result_ids\":[3,1,2]"),
+            "result_ids must serialize as a bare-int array: {json}"
+        );
         let back: UiState = serde_json::from_str(&json).unwrap();
         assert_eq!(back, st);
+    }
+
+    #[test]
+    fn persisted_mode_similar_serializes_with_bare_int_value() {
+        let json = serde_json::to_string(&PersistedMode::Similar(ImageId(3))).unwrap();
+        assert_eq!(json, r#"{"kind":"similar","value":3}"#);
     }
 
     #[test]

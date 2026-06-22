@@ -1,5 +1,6 @@
 use crate::block_on;
 use crate::database::{Database, ImageMetadata, extract_image_metadata};
+use crate::ids::ImageId;
 
 use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -39,7 +40,7 @@ pub fn extract_missing_metadata(db: &mut Database, quiet: bool, count: usize) ->
 
         // Extraction is I/O-bound and pure: run it in parallel (rayon), then
         // perform the DB writes serially (the pool/txn stays single-threaded).
-        let extracted: Vec<(i64, String, Result<ImageMetadata>)> = images_without_metadata
+        let extracted: Vec<(ImageId, String, Result<ImageMetadata>)> = images_without_metadata
             .par_iter()
             .map(|(image_id, image_path, _hash)| {
                 let path_str = image_path.as_str().into_owned();

@@ -2,6 +2,8 @@
 
 use std::ops::Range;
 
+use crate::grid_index::{GridCols, ItemCount};
+
 /// Vertical pitch per tile row: 200 px tile + 8 px gap, matching `app.slint`
 /// `tile-stride` (tile-size + tile-gap = 200px + 8px = 208px).
 pub const TILE_PITCH_Y: f32 = 208.0;
@@ -35,7 +37,14 @@ pub fn visible_rows(scroll_y: f32, viewport_h: f32, pitch_y: f32) -> (usize, usi
 /// The range is expanded by `SLIDE_TRIGGER_ROWS` on each side as a read-ahead
 /// buffer, clamped to `[0, total)`, and then bounded to
 /// `[WINDOW_MIN, WINDOW_MAX]` items.
-pub fn window_range(first_row: usize, last_row: usize, cols: usize, total: usize) -> Range<usize> {
+pub fn window_range(
+    first_row: usize,
+    last_row: usize,
+    cols: GridCols,
+    total: ItemCount,
+) -> Range<usize> {
+    let cols = cols.get();
+    let total = total.get();
     if cols == 0 || total == 0 {
         return 0..0;
     }
@@ -94,7 +103,7 @@ mod tests {
         // Buffered start row = 10-4=6 → start item = 24.
         // Buffered end row = 15+4=19 → end item = 76.
         // 76-24=52 < WINDOW_MIN=200, so the window expands: end = 24+200 = 224.
-        let r = window_range(10, 15, 4, 1000);
+        let r = window_range(10, 15, GridCols(4), ItemCount(1000));
         // The brief's invariants: start ≤ buffered-start, end ≥ visible-end, clamped.
         assert!(r.start <= (10 - 4) * 4, "start={}", r.start);
         assert!(r.end >= 15 * 4, "end={}", r.end);
@@ -108,24 +117,24 @@ mod tests {
     #[test]
     fn window_range_total_smaller_than_window() {
         // total=10 < WINDOW_MIN=200: should return 0..10.
-        let r = window_range(0, 3, 4, 10);
+        let r = window_range(0, 3, GridCols(4), ItemCount(10));
         assert_eq!(r, 0..10);
     }
 
     #[test]
     fn window_range_zero_total() {
-        assert_eq!(window_range(0, 5, 4, 0), 0..0);
+        assert_eq!(window_range(0, 5, GridCols(4), ItemCount(0)), 0..0);
     }
 
     #[test]
     fn window_range_zero_cols() {
-        assert_eq!(window_range(0, 5, 0, 100), 0..0);
+        assert_eq!(window_range(0, 5, GridCols(0), ItemCount(100)), 0..0);
     }
 
     #[test]
     fn window_range_enforces_window_max() {
         // With enough items, the window should never exceed WINDOW_MAX.
-        let r = window_range(1000, 1010, 10, 100_000);
+        let r = window_range(1000, 1010, GridCols(10), ItemCount(100_000));
         assert!(r.len() <= WINDOW_MAX, "len={}", r.len());
     }
 }

@@ -4,12 +4,14 @@ mod backend;
 mod chords;
 mod detail;
 mod detail_cache;
+mod grid_index;
 mod image_util;
 mod loader;
 mod meta_cache;
 mod nav;
 mod preload;
 mod selection;
+mod sort_option;
 mod state;
 mod tagset;
 mod window;
@@ -28,11 +30,14 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use slint::{Image, Model, ModelRc, SharedString, Timer, TimerMode, VecModel, Weak};
 
+use crate::sort_option::SortOption;
 use backend::Backend;
 use detail::{DetailState, filename_of, format_metadata, select};
 use imgfind::filters::{Filters, GpsFilter, TagMatch};
+use imgfind::ids::ImageId;
 use imgfind::sort::{RowMeta, Sort, SortDir, SortKey};
 use imgfind::ui_state::{PersistedMode, UiState};
+use imgfind::units::{FileSize, ThumbnailSize};
 use state::{SearchState, ViewState};
 
 /// Whether the current tile grid was populated by a text search or a
@@ -56,7 +61,7 @@ enum SelectAfter {
     First,
     /// Select the row whose `id` equals the given id; `None` id or not found
     /// yields `None` (sort-direction toggle — follow the item to its new position).
-    ById(Option<i64>),
+    ById(Option<ImageId>),
 }
 
 /// Resolve the post-results selection index.
@@ -167,7 +172,11 @@ fn format_bytes(bytes: i64) -> String {
 /// Build the always-visible bottom statusline from the current selection and
 /// the full result set. ASCII separators only (Slint default-font glyph safety).
 fn format_statusline(sel: &selection::Selection, results: &[RowMeta]) -> String {
-    let total_bytes: i64 = results.iter().filter_map(|r| r.size).sum();
+    let total_bytes: i64 = results
+        .iter()
+        .filter_map(|r| r.size)
+        .map(FileSize::bytes)
+        .sum();
     let label = match sel.mode() {
         selection::SelectionMode::Normal => "NORMAL",
         selection::SelectionMode::Free => "VISUAL (FREE)",
@@ -183,6 +192,7 @@ fn format_statusline(sel: &selection::Selection, results: &[RowMeta]) -> String 
             .set()
             .iter()
             .filter_map(|&i| results.get(i).and_then(|r| r.size))
+            .map(FileSize::bytes)
             .sum();
         format!(
             "{base} | selected {} - {}",
@@ -223,8 +233,8 @@ fn build_filters(
         _ => GpsFilter::Any,
     };
     Filters {
-        size_min,
-        size_max,
+        size_min: size_min.map(FileSize),
+        size_max: size_max.map(FileSize),
         extensions,
         gps,
         ..Default::default()
@@ -345,7 +355,7 @@ fn main() -> Result<()> {
     // Current lightbox index. None when the lightbox is closed.
     let lb_index: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
 
-    // Index into `state.results` of the keyboard/mouse-selected tile (mirrors the
+    // Index into `state.results()` of the keyboard/mouse-selected tile (mirrors the
     // Slint `selected-index` property). Shares the index space with `lb_index`.
     let selected: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
 
@@ -589,7 +599,7 @@ fn main() -> Result<()> {
             }
             let path = {
                 let s = state_ref.lock();
-                s.results.get(idx).map(|r| r.path.clone())
+                s.results().get(idx).map(|r| r.path.clone())
             };
             let Some(path) = path else { return };
 
@@ -636,7 +646,7 @@ fn main() -> Result<()> {
                 let my_gen = preload_gen_detail.fetch_add(1, Ordering::SeqCst) + 1;
                 let paths = {
                     let s = state_ref.lock();
-                    neighbor_paths(&s.results, idx, preload_n)
+                    neighbor_paths(s.results(), idx, preload_n)
                 };
                 spawn_detail_preload(
                     weak.clone(),
@@ -716,7 +726,7 @@ fn main() -> Result<()> {
         let preload_gen_ta = Arc::clone(&preload_generation);
         window.on_tile_activated(move |index| {
             let idx = index as usize;
-            let path = state_ref.lock().results.get(idx).map(|r| r.path.clone());
+            let path = state_ref.lock().results().get(idx).map(|r| r.path.clone());
             let Some(rel) = path else { return };
             *lb_ref.lock() = Some(idx);
             // Seed the grid selection so closing the lightbox (Esc) lands on this tile.
@@ -731,7 +741,7 @@ fn main() -> Result<()> {
                 let my_gen = preload_gen_ta.fetch_add(1, Ordering::SeqCst) + 1;
                 let paths = {
                     let s = state_ref.lock();
-                    neighbor_paths(&s.results, idx, preload_n)
+                    neighbor_paths(s.results(), idx, preload_n)
                 };
                 spawn_preload(
                     backend_lb.clone(),
@@ -751,7 +761,7 @@ fn main() -> Result<()> {
         window.on_tile_open_external(move |index| {
             let path = {
                 let s = state_ref.lock();
-                s.results.get(index as usize).map(|r| r.path.clone())
+                s.results().get(index as usize).map(|r| r.path.clone())
             };
             if let Some(rel) = path {
                 let abs = backend_open.abs_path(&rel);
@@ -859,7 +869,7 @@ fn main() -> Result<()> {
             // None and prev/next will start from slot 0 — that is intentional.
             let idx = {
                 let st = state_ref.lock();
-                st.results.iter().position(|r| r.path == rel)
+                st.results().iter().position(|r| r.path == rel)
             };
             *lb_ref.lock() = idx;
 
@@ -870,7 +880,7 @@ fn main() -> Result<()> {
                 let my_gen = preload_gen_vf.fetch_add(1, Ordering::SeqCst) + 1;
                 let paths = {
                     let s = state_ref.lock();
-                    neighbor_paths(&s.results, center, preload_n)
+                    neighbor_paths(s.results(), center, preload_n)
                 };
                 spawn_preload(
                     backend_vf.clone(),
@@ -981,7 +991,7 @@ fn main() -> Result<()> {
             }
             let path = state_ref
                 .lock()
-                .results
+                .results()
                 .get(new_idx)
                 .map(|r| r.path.clone());
             if let Some(rel) = path {
@@ -993,7 +1003,7 @@ fn main() -> Result<()> {
                 let my_gen = preload_gen_prev.fetch_add(1, Ordering::SeqCst) + 1;
                 let paths = {
                     let s = state_ref.lock();
-                    neighbor_paths(&s.results, new_idx, preload_n)
+                    neighbor_paths(s.results(), new_idx, preload_n)
                 };
                 spawn_preload(
                     backend_lb.clone(),
@@ -1019,7 +1029,7 @@ fn main() -> Result<()> {
             tracing::debug!("lightbox-next invoked");
             let (new_idx, len) = {
                 let s = state_ref.lock();
-                let len = s.results.len();
+                let len = s.results().len();
                 let mut guard = lb_ref.lock();
                 let current = guard.unwrap_or(0);
                 let next = clamp_next(current, len);
@@ -1036,7 +1046,7 @@ fn main() -> Result<()> {
             }
             let path = state_ref
                 .lock()
-                .results
+                .results()
                 .get(new_idx)
                 .map(|r| r.path.clone());
             if let Some(rel) = path {
@@ -1048,7 +1058,7 @@ fn main() -> Result<()> {
                 let my_gen = preload_gen_next.fetch_add(1, Ordering::SeqCst) + 1;
                 let paths = {
                     let s = state_ref.lock();
-                    neighbor_paths(&s.results, new_idx, preload_n)
+                    neighbor_paths(s.results(), new_idx, preload_n)
                 };
                 spawn_preload(
                     backend_lb.clone(),
@@ -1072,9 +1082,14 @@ fn main() -> Result<()> {
             let Some(dir) = nav::NavDir::from_i32(dir_i) else {
                 return;
             };
-            let len = state_ref.lock().results.len();
+            let len = state_ref.lock().results().len();
             let cur = *selected_ref.lock();
-            let new = nav::move_selection(cur, dir, cols_i.max(0) as usize, len);
+            let new = nav::move_selection(
+                cur.map(grid_index::CursorIndex),
+                dir,
+                grid_index::GridCols(cols_i.max(0) as usize),
+                grid_index::ItemCount(len),
+            );
             *selected_ref.lock() = new;
             // Move the multi-selection cursor so a Range selection grows/shrinks
             // live as the cursor moves (a no-op in Normal mode). Drop the guard
@@ -1375,7 +1390,7 @@ fn main() -> Result<()> {
             let Some(w) = weak.upgrade() else { return };
             let new_filters = {
                 let mut f = filters_ref.lock();
-                tagset::set_words(&mut f.tags, text.as_str());
+                tagset::set_words(f.tag_filter.tags_mut(), text.as_str());
                 push_filter_tags(&w, &f);
                 f.clone()
             };
@@ -1406,7 +1421,7 @@ fn main() -> Result<()> {
             let Some(w) = weak.upgrade() else { return };
             let new_filters = {
                 let mut f = filters_ref.lock();
-                tagset::remove(&mut f.tags, tag.as_str());
+                tagset::remove(f.tag_filter.tags_mut(), tag.as_str());
                 push_filter_tags(&w, &f);
                 f.clone()
             };
@@ -1438,10 +1453,7 @@ fn main() -> Result<()> {
             let Some(w) = weak.upgrade() else { return };
             let new_filters = {
                 let mut f = filters_ref.lock();
-                f.tag_match = match f.tag_match {
-                    TagMatch::AllOf => TagMatch::AnyOf,
-                    TagMatch::AnyOf => TagMatch::AllOf,
-                };
+                f.tag_filter.toggle_match_mode();
                 push_filter_tags(&w, &f);
                 f.clone()
             };
@@ -1472,7 +1484,7 @@ fn main() -> Result<()> {
             let Some(w) = weak.upgrade() else { return };
             let new_filters = {
                 let mut f = filters_ref.lock();
-                f.tags_enabled = !f.tags_enabled;
+                f.tag_filter.toggle_enabled();
                 push_filter_tags(&w, &f);
                 f.clone()
             };
@@ -1527,10 +1539,10 @@ fn main() -> Result<()> {
             w.set_sort_desc(new_desc);
             // Capture the currently selected item's id BEFORE the resort,
             // so we can follow it to its new position after the direction flip.
-            let prev_id: Option<i64> = {
+            let prev_id: Option<ImageId> = {
                 let sel = *sel_handles.selected.lock();
                 let s = state_ref.lock();
-                sel.and_then(|i| s.results.get(i)).map(|r| r.id)
+                sel.and_then(|i| s.results().get(i)).map(|r| r.id)
             };
             apply_sort_change(
                 weak.clone(),
@@ -1632,7 +1644,7 @@ fn main() -> Result<()> {
             }
             // Copy state out before any `invoke_*` so no guard is held across a
             // re-entrant UI callback (tile-selected re-locks `selected`).
-            let empty = state_ref.lock().results.is_empty();
+            let empty = state_ref.lock().results().is_empty();
             if empty {
                 return;
             }
@@ -1769,7 +1781,7 @@ fn main() -> Result<()> {
                     let new_filters = {
                         let tags = brushes_ref.lock()[c.index()].clone();
                         let mut f = filters_ref.lock();
-                        f.tags = tags;
+                        f.tag_filter.set_tags(tags);
                         push_filter_tags(&w, &f);
                         f.clone()
                     };
@@ -1787,7 +1799,7 @@ fn main() -> Result<()> {
                 chords::Action::ToggleTagFilter => {
                     let new_filters = {
                         let mut f = filters_ref.lock();
-                        f.tags_enabled = !f.tags_enabled;
+                        f.tag_filter.toggle_enabled();
                         push_filter_tags(&w, &f);
                         f.clone()
                     };
@@ -2036,10 +2048,11 @@ fn push_detail_tags(w: &MainWindow, tags: &[String]) {
 /// the joined editor text, the AND/OR mode bool, and the master enable. Called
 /// after every tag-filter edit and during restore/fresh-start setup.
 fn push_filter_tags(w: &MainWindow, f: &Filters) {
-    w.set_filter_tags(string_model(&f.tags));
-    w.set_filter_tags_joined(f.tags.join(" ").into());
-    w.set_tag_match_and(matches!(f.tag_match, TagMatch::AllOf));
-    w.set_tags_enabled(f.tags_enabled);
+    let tags = f.tag_filter.tags();
+    w.set_filter_tags(string_model(tags));
+    w.set_filter_tags_joined(tags.join(" ").into());
+    w.set_tag_match_and(matches!(f.tag_filter.match_mode(), TagMatch::AllOf));
+    w.set_tags_enabled(f.tag_filter.is_enabled());
 }
 
 /// Show the rail with empty contents on a fresh DB (no persisted session). The
@@ -2294,13 +2307,13 @@ fn restore_session(st: UiState, ctx: RestoreCtx<'_>) {
         *ctx.filters.lock() = st.filters.clone();
         *ctx.selected_exts.lock() = exts.clone();
         let lo = bytes_to_fraction(
-            st.filters.size_min,
+            st.filters.size_min.map(FileSize::bytes),
             ctx.size_bounds.0,
             ctx.size_bounds.1,
             true,
         );
         let hi = bytes_to_fraction(
-            st.filters.size_max,
+            st.filters.size_max.map(FileSize::bytes),
             ctx.size_bounds.0,
             ctx.size_bounds.1,
             false,
@@ -2323,7 +2336,7 @@ fn restore_session(st: UiState, ctx: RestoreCtx<'_>) {
     {
         let path = {
             let s = ctx.state.lock();
-            s.results.get(idx).map(|r| r.path.clone())
+            s.results().get(idx).map(|r| r.path.clone())
         };
         if let Some(path) = path {
             let ds = select(path.clone());
@@ -2404,7 +2417,10 @@ fn persist_session(
 ) {
     let (result_ids, sort) = {
         let s = state.lock();
-        (s.results.iter().map(|r| r.id).collect::<Vec<i64>>(), s.sort)
+        (
+            s.results().iter().map(|r| r.id).collect::<Vec<ImageId>>(),
+            s.sort,
+        )
     };
     let search_text;
     let mode = {
@@ -2508,20 +2524,17 @@ fn apply_sort_change(
     let Some(w) = weak.upgrade() else { return };
     let idx = w.get_sort_index() as usize;
     let desc = w.get_sort_desc();
-    let option_str: String = {
-        let model = w.get_sort_options();
-        model
-            .row_data(idx)
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "Name".to_string())
-    };
     let dir = if desc { SortDir::Desc } else { SortDir::Asc };
     let mode = mode_ref.lock().clone();
+    // Browse mode omits Relevance from the selector; search/similar include it.
+    let with_relevance = !matches!(&mode, SearchMode::Text(q) if q.is_empty());
+    let option = selected_sort_option(idx, with_relevance);
     match mode {
         SearchMode::Text(q) if q.is_empty() => {
-            // Browse mode: re-issue the browse query with the new sort.
+            // Browse mode: re-issue the browse query with the new sort. Browse
+            // has no Relevance option, so the key is always concrete.
             let sort = Sort {
-                key: option_str_to_sort_key(&option_str),
+                key: option.to_sort_key().unwrap_or(SortKey::Name),
                 dir,
             };
             state_ref.lock().sort = sort;
@@ -2539,17 +2552,18 @@ fn apply_sort_change(
             // Search/similar mode: in-memory resort (no backend round-trip).
             {
                 let mut s = state_ref.lock();
-                if option_str == "Relevance" {
-                    s.resort_to_relevance();
-                    // Keep sort field as default placeholder — Relevance has
-                    // no SortKey equivalent; browse after a clear will reset.
-                    s.sort = Sort::default();
-                } else {
-                    let sort = Sort {
-                        key: option_str_to_sort_key(&option_str),
-                        dir,
-                    };
-                    s.resort(&sort);
+                match option.to_sort_key() {
+                    None => {
+                        // Relevance: restore relevance order.
+                        s.resort_to_relevance();
+                        // Keep sort field as default placeholder — Relevance has
+                        // no SortKey equivalent; browse after a clear will reset.
+                        s.sort = Sort::default();
+                    }
+                    Some(key) => {
+                        let sort = Sort { key, dir };
+                        s.resort(&sort);
+                    }
                 }
             }
             // Bump generation so the loader timer rebuilds the tile model.
@@ -2557,7 +2571,7 @@ fn apply_sort_change(
             // The row order changed: drop the multi-selection (its indices point
             // into the old order) and mark dirty so the tick re-statuses.
             selection.clear();
-            let results = state_ref.lock().results.clone();
+            let results = state_ref.lock().results().to_vec();
             apply_selection_after_results(&w, &selection.selected, &results, &after);
         }
     }
@@ -2666,7 +2680,7 @@ fn build_tiles_model(
         .zip(images)
         .enumerate()
         .map(|(i, (r, maybe_img))| {
-            let size_kb = r.size.unwrap_or(0) / 1024;
+            let size_kb = r.size.map_or(0, FileSize::bytes) / 1024;
             // Global index: window offset + position within this slice.
             let index = offset + i;
             Tile {
@@ -2748,9 +2762,14 @@ fn loader_tick(t: LoaderTick<'_>) {
     let cols = t.window.get_cols().max(0) as usize;
     let viewport_h = t.window.get_grid_viewport_h();
     let scroll_px = (-t.window.get_grid_viewport_y()).max(0.0);
-    let total = t.state_ref.lock().results.len();
+    let total = t.state_ref.lock().results().len();
     let (first_row, last_row) = window::visible_rows(scroll_px, viewport_h, window::TILE_PITCH_Y);
-    let range = window::window_range(first_row, last_row, cols, total);
+    let range = window::window_range(
+        first_row,
+        last_row,
+        grid_index::GridCols(cols),
+        grid_index::ItemCount(total),
+    );
 
     // 3. Rebuild only when the window/generation changed, or when a freshly
     // decoded thumbnail in the current window needs to appear. Otherwise the
@@ -2780,7 +2799,7 @@ fn loader_tick(t: LoaderTick<'_>) {
     // 4. Request missing thumbnails for the visible window.
     let paths: Vec<String> = {
         let s = t.state_ref.lock();
-        s.results
+        s.results()
             .get(range.clone())
             .map(|slice| slice.iter().map(|r| r.path.clone()).collect())
             .unwrap_or_default()
@@ -2806,7 +2825,7 @@ fn rebuild_window(
 ) {
     let slice: Vec<RowMeta> = {
         let s = state_ref.lock();
-        s.results
+        s.results()
             .get(range.clone())
             .map(<[_]>::to_vec)
             .unwrap_or_default()
@@ -2827,7 +2846,7 @@ fn push_statusline(
     let line = {
         let sel = selection.lock();
         let s = state.lock();
-        format_statusline(&sel, &s.results)
+        format_statusline(&sel, s.results())
     };
     w.set_statusline(line.into());
 }
@@ -2878,7 +2897,11 @@ fn apply_fetch_result(
                 }
                 Err(e) => s.apply_error(e.to_string()),
             }
-            (s.view_state(), s.error.clone(), s.results.clone())
+            (
+                s.view_state(),
+                s.error().map(str::to_owned),
+                s.results().to_vec(),
+            )
         };
 
         // A new result set is installed: bump the generation and clear the
@@ -3061,14 +3084,14 @@ fn focused_path(
     // once in an order that could deadlock against another path.
     let lb = *lb_index.lock();
     if let Some(i) = lb {
-        return state.lock().results.get(i).map(|r| r.path.clone());
+        return state.lock().results().get(i).map(|r| r.path.clone());
     }
     let detail_path = detail.lock().as_ref().map(|d| d.path.clone());
     if let Some(p) = detail_path {
         return Some(p);
     }
     let sel = (*selected.lock())?;
-    state.lock().results.get(sel).map(|r| r.path.clone())
+    state.lock().results().get(sel).map(|r| r.path.clone())
 }
 
 /// Holders needed to resolve the focused image and refresh the detail panel
@@ -3161,7 +3184,7 @@ fn selected_paths(
     let s = state.lock();
     sel.set()
         .iter()
-        .filter_map(|&i| s.results.get(i).map(|r| r.path.clone()))
+        .filter_map(|&i| s.results().get(i).map(|r| r.path.clone()))
         .collect()
 }
 
@@ -3229,7 +3252,7 @@ fn neighbor_paths(results: &[RowMeta], center: usize, n: usize) -> Vec<String> {
 fn spawn_preload(
     backend: Backend,
     paths: Vec<String>,
-    size: u32,
+    size: ThumbnailSize,
     preload_generation: Arc<AtomicU64>,
     my_gen: u64,
 ) {
@@ -3249,7 +3272,7 @@ fn spawn_preload(
 }
 
 /// 512px is the detail-panel preview size (matches `GUI_THUMBNAIL_SIZES`).
-const DETAIL_SIZE: u32 = 512;
+const DETAIL_SIZE: ThumbnailSize = ThumbnailSize(512);
 
 /// Load the detail-panel preview image for `path`, setting ONLY `detail_image`
 /// (never blocked on metadata).
@@ -3465,26 +3488,27 @@ fn load_lightbox_image(
 /// prepended as the first option so it is selected by default.  For browse mode
 /// it is omitted because browse results have no relevance ranking.
 fn make_sort_options_model(with_relevance: bool) -> ModelRc<SharedString> {
-    let mut opts: Vec<SharedString> = Vec::new();
-    if with_relevance {
-        opts.push("Relevance".into());
-    }
-    opts.push("Name".into());
-    opts.push("Size".into());
-    opts.push("Type".into());
+    let opts: Vec<SharedString> = SortOption::all()
+        .iter()
+        .filter(|o| with_relevance || **o != SortOption::Relevance)
+        .map(|o| SharedString::from(o.to_string()))
+        .collect();
     ModelRc::from(Rc::new(VecModel::from(opts)))
 }
 
-/// Map a sort-selector option string to a [`SortKey`].
+/// Resolve the selector's row index to its [`SortOption`], honoring whether
+/// Relevance is present (search mode) or omitted (browse mode).
 ///
-/// "Relevance" is handled by the caller before this point; any other unknown
-/// string falls back to `SortKey::Name`.
-fn option_str_to_sort_key(s: &str) -> SortKey {
-    match s {
-        "Size" => SortKey::Size,
-        "Type" => SortKey::Type,
-        _ => SortKey::Name,
-    }
+/// The model order matches `make_sort_options_model`: in search mode the rows
+/// are `SortOption::all()` (Relevance first); in browse mode Relevance is
+/// dropped, shifting the concrete keys up by one. An out-of-range index falls
+/// back to `Name`.
+fn selected_sort_option(idx: usize, with_relevance: bool) -> SortOption {
+    SortOption::all()
+        .into_iter()
+        .filter(|o| with_relevance || *o != SortOption::Relevance)
+        .nth(idx)
+        .unwrap_or(SortOption::Name)
 }
 
 #[cfg(test)]
@@ -3512,9 +3536,10 @@ mod arg_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        DetailState, build_filters, build_size_label, clamp_next, clamp_prev, detail_shows,
-        format_bytes, format_statusline, fraction_to_bytes, is_current_generation,
+        DetailState, FileSize, build_filters, build_size_label, clamp_next, clamp_prev,
+        detail_shows, format_bytes, format_statusline, fraction_to_bytes, is_current_generation,
     };
+    use imgfind::ids::ImageId;
     use imgfind::sort::RowMeta;
     use std::collections::HashSet;
 
@@ -3634,15 +3659,15 @@ mod tests {
         use crate::selection::Selection;
         let rows = vec![
             RowMeta {
-                id: 1,
+                id: ImageId(1),
                 path: "a".into(),
-                size: Some(1_000_000),
+                size: Some(FileSize(1_000_000)),
                 ext: "jpg".into(),
             },
             RowMeta {
-                id: 2,
+                id: ImageId(2),
                 path: "b".into(),
-                size: Some(1_000_000),
+                size: Some(FileSize(1_000_000)),
                 ext: "jpg".into(),
             },
         ];
@@ -3658,7 +3683,7 @@ mod tests {
     fn statusline_none_size_counts_as_zero() {
         use crate::selection::Selection;
         let rows = vec![RowMeta {
-            id: 1,
+            id: ImageId(1),
             path: "a".into(),
             size: None,
             ext: "jpg".into(),
@@ -3674,21 +3699,21 @@ mod tests {
         use crate::selection::Selection;
         let rows = vec![
             RowMeta {
-                id: 1,
+                id: ImageId(1),
                 path: "a".into(),
-                size: Some(2_000_000),
+                size: Some(FileSize(2_000_000)),
                 ext: "jpg".into(),
             },
             RowMeta {
-                id: 2,
+                id: ImageId(2),
                 path: "b".into(),
-                size: Some(3_000_000),
+                size: Some(FileSize(3_000_000)),
                 ext: "jpg".into(),
             },
             RowMeta {
-                id: 3,
+                id: ImageId(3),
                 path: "c".into(),
-                size: Some(4_000_000),
+                size: Some(FileSize(4_000_000)),
                 ext: "jpg".into(),
             },
         ];
@@ -3708,15 +3733,15 @@ mod tests {
         use crate::selection::Selection;
         let rows = vec![
             RowMeta {
-                id: 1,
+                id: ImageId(1),
                 path: "a".into(),
-                size: Some(1),
+                size: Some(FileSize(1)),
                 ext: "jpg".into(),
             },
             RowMeta {
-                id: 2,
+                id: ImageId(2),
                 path: "b".into(),
-                size: Some(1),
+                size: Some(FileSize(1)),
                 ext: "jpg".into(),
             },
         ];
@@ -3743,15 +3768,18 @@ mod tests {
         // Inverted slider: lo fraction maps to a LARGER byte value than hi.
         // lo=0.8 -> Some(high bytes); hi=0.2 -> Some(low bytes); both Some, min>max.
         let f = build_filters(0.8, 0.2, (0, 1000), &HashSet::new(), 0);
-        let (mn, mx) = (f.size_min.unwrap(), f.size_max.unwrap());
-        assert!(mn <= mx, "size_min ({mn}) must be <= size_max ({mx}) after swap");
+        let (mn, mx) = (f.size_min.unwrap().bytes(), f.size_max.unwrap().bytes());
+        assert!(
+            mn <= mx,
+            "size_min ({mn}) must be <= size_max ({mx}) after swap"
+        );
     }
 
     #[test]
     fn build_filters_leaves_normal_size_range() {
         let f = build_filters(0.2, 0.8, (0, 1000), &HashSet::new(), 0);
-        assert_eq!(f.size_min, Some(200));
-        assert_eq!(f.size_max, Some(800));
+        assert_eq!(f.size_min, Some(FileSize(200)));
+        assert_eq!(f.size_max, Some(FileSize(800)));
     }
 }
 
@@ -3762,13 +3790,14 @@ mod restore_tests {
         sort_to_selector_index,
     };
     use imgfind::filters::GpsFilter;
+    use imgfind::ids::ImageId;
     use imgfind::sort::{Sort, SortDir, SortKey};
 
     #[test]
     fn mode_is_search_only_for_text_and_similar() {
         assert!(!mode_is_search(&PersistedMode::Browse));
         assert!(mode_is_search(&PersistedMode::Text("cat".into())));
-        assert!(mode_is_search(&PersistedMode::Similar(7)));
+        assert!(mode_is_search(&PersistedMode::Similar(ImageId(7))));
     }
 
     #[test]
@@ -3783,7 +3812,10 @@ mod restore_tests {
             sort_to_selector_index(sort, &PersistedMode::Text("x".into())),
             0
         );
-        assert_eq!(sort_to_selector_index(sort, &PersistedMode::Similar(1)), 0);
+        assert_eq!(
+            sort_to_selector_index(sort, &PersistedMode::Similar(ImageId(1))),
+            0
+        );
     }
 
     #[test]
@@ -3834,13 +3866,45 @@ mod restore_tests {
 
 #[cfg(test)]
 mod sort_sel_tests {
-    use super::{RowMeta, SelectAfter, resolve_selection};
+    use super::{
+        FileSize, ImageId, RowMeta, SelectAfter, SortKey, SortOption, resolve_selection,
+        selected_sort_option,
+    };
+
+    #[test]
+    fn selected_option_search_mode_includes_relevance() {
+        // Search mode model: [Relevance, Name, Size, Type].
+        assert_eq!(selected_sort_option(0, true), SortOption::Relevance);
+        assert_eq!(selected_sort_option(1, true), SortOption::Name);
+        assert_eq!(selected_sort_option(2, true), SortOption::Size);
+        assert_eq!(selected_sort_option(3, true), SortOption::Type);
+    }
+
+    #[test]
+    fn selected_option_browse_mode_omits_relevance() {
+        // Browse mode model: [Name, Size, Type].
+        assert_eq!(selected_sort_option(0, false), SortOption::Name);
+        assert_eq!(selected_sort_option(1, false), SortOption::Size);
+        assert_eq!(selected_sort_option(2, false), SortOption::Type);
+    }
+
+    #[test]
+    fn selected_option_out_of_range_falls_back_to_name() {
+        assert_eq!(selected_sort_option(99, true), SortOption::Name);
+        assert_eq!(selected_sort_option(99, false), SortOption::Name);
+    }
+
+    #[test]
+    fn relevance_has_no_sort_key() {
+        assert_eq!(SortOption::Relevance.to_sort_key(), None);
+        assert_eq!(SortOption::Type.to_sort_key(), Some(SortKey::Type));
+    }
 
     fn make_row(id: i64) -> RowMeta {
         RowMeta {
-            id,
+            id: ImageId(id),
             path: format!("img{id}.jpg"),
-            size: Some(100),
+            size: Some(FileSize(100)),
             ext: "jpg".to_string(),
         }
     }
@@ -3892,7 +3956,7 @@ mod sort_sel_tests {
     fn resolve_by_id_found() {
         let rows = vec![make_row(10), make_row(20), make_row(30)];
         assert_eq!(
-            resolve_selection(&SelectAfter::ById(Some(20)), &rows, None),
+            resolve_selection(&SelectAfter::ById(Some(ImageId(20))), &rows, None),
             Some(1)
         );
     }
@@ -3901,7 +3965,7 @@ mod sort_sel_tests {
     fn resolve_by_id_not_found() {
         let rows = vec![make_row(10), make_row(20)];
         assert_eq!(
-            resolve_selection(&SelectAfter::ById(Some(99)), &rows, None),
+            resolve_selection(&SelectAfter::ById(Some(ImageId(99))), &rows, None),
             None
         );
     }

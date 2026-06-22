@@ -10,11 +10,14 @@ use clipper::ClipEmbedder;
 use imgfind::config::SearchConfig;
 use imgfind::database::{Database, ImageMetadata, extract_image_metadata};
 use imgfind::filters::Filters;
+use imgfind::ids::ImageId;
 use imgfind::search::SearchEngine;
 use imgfind::sort::{RowMeta, Sort};
 use imgfind::thumbnail::get_or_generate_thumbnail;
 use imgfind::ui_state::UiState;
-use imgfind::{AbsolutePath, RelativePath, get_db_path, relative_to_abs_path};
+use imgfind::{
+    AbsolutePath, FileSize, RelativePath, ThumbnailSize, get_db_path, relative_to_abs_path,
+};
 
 /// Maximum number of ranked results fetched per search/similar query. The
 /// full ordered set lives in `SearchState`, but ranked vector search is
@@ -100,7 +103,7 @@ impl Backend {
                 ext: ext_from(&path),
                 id,
                 path,
-                size,
+                size: size.map(FileSize),
             })
             .collect())
     }
@@ -111,7 +114,7 @@ impl Backend {
     }
 
     /// Fetch [`RowMeta`] for an explicit ordered id list (session restore).
-    pub fn rehydrate(&self, ids: &[i64]) -> Result<Vec<RowMeta>> {
+    pub fn rehydrate(&self, ids: &[ImageId]) -> Result<Vec<RowMeta>> {
         imgfind::block_on(self.db.rehydrate_rows(ids)).context("Rehydrate failed")
     }
 
@@ -129,7 +132,7 @@ impl Backend {
 
     /// Resolve a stored relative image path back to its DB row id (used to
     /// persist/restore a similarity-search seed by id rather than by path).
-    pub fn id_for_rel_path(&self, rel_path: &str) -> Result<i64> {
+    pub fn id_for_rel_path(&self, rel_path: &str) -> Result<ImageId> {
         let abs = AbsolutePath(self.abs_path(rel_path));
         imgfind::block_on(self.db.get_image_id(&abs))
             .with_context(|| format!("No image id for {rel_path}"))
@@ -143,7 +146,7 @@ impl Backend {
         imgfind::block_on(self.db.file_size_bounds()).context("Failed to read size bounds")
     }
 
-    pub fn thumbnail(&self, rel_path: &str, size: u32) -> Result<Vec<u8>> {
+    pub fn thumbnail(&self, rel_path: &str, size: ThumbnailSize) -> Result<Vec<u8>> {
         let hash = imgfind::block_on(self.db.get_image_hash(&Self::rel(rel_path)))
             .with_context(|| format!("No hash for {rel_path}"))?;
         let abs = self.abs_path(rel_path);
@@ -235,7 +238,7 @@ impl Backend {
                 ext: ext_from(&path),
                 id,
                 path,
-                size,
+                size: size.map(FileSize),
             })
             .collect())
     }
@@ -244,6 +247,7 @@ impl Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use imgfind::database::GpsCoords;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     fn temp_db() -> (Database, PathBuf) {
@@ -284,10 +288,13 @@ mod tests {
             vec![0.0f32; 512],
         )]))
         .expect("insert image");
-        imgfind::block_on(db.insert_thumbnail("h", 300, &[1, 2, 3, 4])).expect("insert thumb");
+        imgfind::block_on(db.insert_thumbnail("h", ThumbnailSize(300), &[1, 2, 3, 4]))
+            .expect("insert thumb");
 
         let backend = backend_with(db);
-        let bytes = backend.thumbnail("a.jpg", 300).expect("thumb");
+        let bytes = backend
+            .thumbnail("a.jpg", ThumbnailSize(300))
+            .expect("thumb");
         assert_eq!(bytes, vec![1, 2, 3, 4]);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -359,8 +366,7 @@ mod tests {
                 file_size: Some(1000),
                 width: None,
                 height: None,
-                latitude: Some(1.0),
-                longitude: Some(1.0),
+                coords: Some(GpsCoords { lat: 1.0, lon: 1.0 }),
                 camera_make: None,
                 camera_model: None,
                 datetime_taken: None,
@@ -373,8 +379,7 @@ mod tests {
                 file_size: Some(50),
                 width: None,
                 height: None,
-                latitude: None,
-                longitude: None,
+                coords: None,
                 camera_make: None,
                 camera_model: None,
                 datetime_taken: None,
@@ -434,8 +439,7 @@ mod tests {
                 file_size: Some(2048),
                 width: Some(1024),
                 height: Some(768),
-                latitude: Some(5.5),
-                longitude: Some(6.5),
+                coords: Some(GpsCoords { lat: 5.5, lon: 6.5 }),
                 camera_make: None,
                 camera_model: None,
                 datetime_taken: None,
@@ -449,8 +453,7 @@ mod tests {
         assert_eq!(meta.file_size, Some(2048));
         assert_eq!(meta.width, Some(1024));
         assert_eq!(meta.height, Some(768));
-        assert_eq!(meta.latitude, Some(5.5));
-        assert_eq!(meta.longitude, Some(6.5));
+        assert_eq!(meta.coords, Some(GpsCoords { lat: 5.5, lon: 6.5 }));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -506,7 +509,7 @@ mod tests {
 
         let backend = backend_with(db);
         let bytes = backend
-            .thumbnail("pic.png", 64)
+            .thumbnail("pic.png", ThumbnailSize(64))
             .expect("thumbnail from abs path");
         assert!(
             !bytes.is_empty(),
