@@ -3681,12 +3681,7 @@ fn apply_lightbox_view(w: &MainWindow, zoom: f32, fit: bool) {
 
 /// Apply an absolute zoom value to the lightbox: clamp, store, set fit=false,
 /// call apply_lightbox_view. Does NOT trigger a full-res load.
-fn lightbox_apply_zoom(
-    w: &MainWindow,
-    lb_zoom: &Mutex<f32>,
-    lb_fit: &Mutex<bool>,
-    new_zoom: f32,
-) {
+fn lightbox_apply_zoom(w: &MainWindow, lb_zoom: &Mutex<f32>, lb_fit: &Mutex<bool>, new_zoom: f32) {
     let zc = zoompan::clamp_zoom(new_zoom);
     *lb_zoom.lock() = zc;
     *lb_fit.lock() = false;
