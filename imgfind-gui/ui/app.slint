@@ -949,13 +949,13 @@ export component MainWindow inherits Window {
                     property <length> start-pan-y;
 
                     scroll-event(e) => {
-                        // Anchor at fit-scale on the first tick out of fit so size
-                        // doesn't jump, then apply the wheel factor.
-                        if (root.lightbox-fit) {
-                            root.lightbox-zoom-changed(root.lightbox-fit-scale);
-                        }
+                        // Resolve the base zoom (fit-scale when in fit, else the
+                        // current zoom) and apply the wheel factor in ONE expression
+                        // so the first tick out of fit doesn't read a stale
+                        // root.lightbox-zoom across the Rust boundary (no size jump).
                         root.lightbox-zoom-changed(
-                            clamp(root.lightbox-zoom * pow(1.1, e.delta-y / 60px), 0.1, 8.0));
+                            clamp((root.lightbox-fit ? root.lightbox-fit-scale : root.lightbox-zoom)
+                                * pow(1.1, e.delta-y / 60px), 0.1, 8.0));
                         return accept;
                     }
                     changed pressed => {
