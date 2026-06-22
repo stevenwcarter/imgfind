@@ -16,7 +16,7 @@ use imgfind::sort::{RowMeta, Sort};
 use imgfind::thumbnail::get_or_generate_thumbnail;
 use imgfind::ui_state::UiState;
 use imgfind::{
-    AbsolutePath, FileSize, RelativePath, ThumbnailSize, get_db_path, relative_to_abs_path,
+    AbsolutePath, FileSize, RelativePath, ThumbnailSpec, get_db_path, relative_to_abs_path,
 };
 
 /// Maximum number of ranked results fetched per search/similar query. The
@@ -146,12 +146,12 @@ impl Backend {
         imgfind::block_on(self.db.file_size_bounds()).context("Failed to read size bounds")
     }
 
-    pub fn thumbnail(&self, rel_path: &str, size: ThumbnailSize) -> Result<Vec<u8>> {
+    pub fn thumbnail(&self, rel_path: &str, spec: impl Into<ThumbnailSpec>) -> Result<Vec<u8>> {
         let hash = imgfind::block_on(self.db.get_image_hash(&Self::rel(rel_path)))
             .with_context(|| format!("No hash for {rel_path}"))?;
         let abs = self.abs_path(rel_path);
         let abs_str = abs.to_string_lossy();
-        get_or_generate_thumbnail(&self.db, &abs_str, &hash, size)
+        get_or_generate_thumbnail(&self.db, &abs_str, &hash, spec)
             .with_context(|| format!("Failed to load thumbnail for {rel_path}"))
     }
 
@@ -248,6 +248,7 @@ impl Backend {
 mod tests {
     use super::*;
     use imgfind::database::GpsCoords;
+    use imgfind::units::ThumbnailSize;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     fn temp_db() -> (Database, PathBuf) {

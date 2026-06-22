@@ -2,7 +2,8 @@ use crate::filters::{Filters, build_filter_clause_turso};
 use crate::ids::{CollectionId, ImageId, TagId};
 use crate::ui_state::UiState;
 use crate::{
-    AbsolutePath, EmbeddingDim, MaxK, RelativePath, ThumbnailSize, db_pool, get_db_parent_dir,
+    AbsolutePath, EmbeddingDim, MaxK, RelativePath, ThumbnailSize, ThumbnailSpec, db_pool,
+    get_db_parent_dir,
 };
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose};
@@ -1041,12 +1042,16 @@ impl Database {
     }
 
     /// Insert a thumbnail into the database cache.
+    ///
+    /// `spec` accepts either a [`ThumbnailSize`] (scaled thumbnail) or a
+    /// [`ThumbnailSpec`] directly. `FullSize` is stored under `size = 0`.
     pub async fn insert_thumbnail(
         &self,
         image_hash: &str,
-        size: ThumbnailSize,
+        spec: impl Into<ThumbnailSpec>,
         thumbnail_data: &[u8],
     ) -> Result<()> {
+        let size_col = i64::from(spec.into().to_db_size());
         let conn = self
             .pool
             .get()
@@ -1055,11 +1060,7 @@ impl Database {
         conn.execute(
             "INSERT OR REPLACE INTO thumbnails (image_hash, size, thumbnail_data) \
              VALUES (?1, ?2, ?3)",
-            (
-                image_hash.to_string(),
-                i64::from(size.get()),
-                thumbnail_data.to_vec(),
-            ),
+            (image_hash.to_string(), size_col, thumbnail_data.to_vec()),
         )
         .await
         .context("failed to insert or replace")?;
@@ -1067,7 +1068,15 @@ impl Database {
     }
 
     /// Get a thumbnail from the database cache.
-    pub async fn get_thumbnail(&self, image_hash: &str, size: ThumbnailSize) -> Result<Vec<u8>> {
+    ///
+    /// `spec` accepts either a [`ThumbnailSize`] (scaled thumbnail) or a
+    /// [`ThumbnailSpec`] directly. `FullSize` is looked up under `size = 0`.
+    pub async fn get_thumbnail(
+        &self,
+        image_hash: &str,
+        spec: impl Into<ThumbnailSpec>,
+    ) -> Result<Vec<u8>> {
+        let size_col = i64::from(spec.into().to_db_size());
         let conn = self
             .pool
             .get()
@@ -1076,7 +1085,7 @@ impl Database {
         let mut rows = conn
             .query(
                 "SELECT thumbnail_data FROM thumbnails WHERE image_hash = ?1 AND size = ?2",
-                (image_hash.to_string(), i64::from(size.get())),
+                (image_hash.to_string(), size_col),
             )
             .await?;
         let row = rows.next().await?.context("no thumbnail row")?;
@@ -2915,5 +2924,34 @@ mod tests {
         );
 
         cleanup(&tmp);
+    }
+
+    #[tokio::test]
+    async fn full_size_thumbnail_round_trips_and_is_distinct_from_scaled() {
+        use crate::{ThumbnailSize, ThumbnailSpec};
+        let db_path = temp_db_path();
+        let db = Database::new(&db_path).await.expect("create db");
+
+        db.insert_thumbnail("h", ThumbnailSpec::FullSize, &[1, 2, 3])
+            .await
+            .unwrap();
+        db.insert_thumbnail("h", ThumbnailSize(2048), &[9, 9])
+            .await
+            .unwrap();
+
+        // FullSize stored under size=0, retrievable by the enum (not the integer).
+        assert_eq!(
+            db.get_thumbnail("h", ThumbnailSpec::FullSize)
+                .await
+                .unwrap(),
+            vec![1, 2, 3]
+        );
+        // Distinct from the scaled row for the same hash — no key collision.
+        assert_eq!(
+            db.get_thumbnail("h", ThumbnailSize(2048)).await.unwrap(),
+            vec![9, 9]
+        );
+
+        cleanup(&db_path);
     }
 }

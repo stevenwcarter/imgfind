@@ -54,6 +54,44 @@ impl ThumbnailSize {
     }
 }
 
+/// Which rendition of an image to fetch / generate / store. The DB
+/// `thumbnails.size` column encodes a `ScaleSize` as its pixel value and
+/// `FullSize` as the sentinel `0`. That encoding lives only in
+/// `to_db_size`/`from_db_size`, so the `0` can never leak into application
+/// logic — callers always pass and match on the enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ThumbnailSpec {
+    /// A scaled thumbnail with the given long-edge target (e.g. 300/512/2048).
+    ScaleSize(ThumbnailSize),
+    /// The original, full-resolution rendition.
+    FullSize,
+}
+
+impl ThumbnailSpec {
+    /// On-disk `thumbnails.size` value. `FullSize` → 0; `ScaleSize(px)` → px.
+    pub const fn to_db_size(self) -> u32 {
+        match self {
+            ThumbnailSpec::ScaleSize(px) => px.get(),
+            ThumbnailSpec::FullSize => 0,
+        }
+    }
+
+    /// Inverse of [`to_db_size`](Self::to_db_size). `0` → `FullSize`, else
+    /// `ScaleSize`.
+    pub const fn from_db_size(n: u32) -> Self {
+        match n {
+            0 => ThumbnailSpec::FullSize,
+            n => ThumbnailSpec::ScaleSize(ThumbnailSize(n)),
+        }
+    }
+}
+
+impl From<ThumbnailSize> for ThumbnailSpec {
+    fn from(size: ThumbnailSize) -> Self {
+        ThumbnailSpec::ScaleSize(size)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -79,5 +117,27 @@ mod tests {
     fn thumbnail_size_exposes_pixel_value() {
         assert_eq!(ThumbnailSize(512).get(), 512);
         assert_eq!(ThumbnailSize(300), ThumbnailSize(300));
+    }
+
+    #[test]
+    fn thumbnail_spec_db_size_round_trips() {
+        use ThumbnailSpec::*;
+        assert_eq!(FullSize.to_db_size(), 0);
+        assert_eq!(ScaleSize(ThumbnailSize(2048)).to_db_size(), 2048);
+        // round-trip both ways
+        assert_eq!(ThumbnailSpec::from_db_size(0), FullSize);
+        assert_eq!(
+            ThumbnailSpec::from_db_size(300),
+            ScaleSize(ThumbnailSize(300))
+        );
+        for spec in [FullSize, ScaleSize(ThumbnailSize(512))] {
+            assert_eq!(ThumbnailSpec::from_db_size(spec.to_db_size()), spec);
+        }
+    }
+
+    #[test]
+    fn thumbnail_size_converts_to_scale_spec() {
+        let spec: ThumbnailSpec = ThumbnailSize(300).into();
+        assert_eq!(spec, ThumbnailSpec::ScaleSize(ThumbnailSize(300)));
     }
 }
