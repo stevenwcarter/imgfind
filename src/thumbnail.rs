@@ -1,4 +1,4 @@
-use crate::{ThumbnailSize, database::Database, get_db_path};
+use crate::{ThumbnailSize, ThumbnailSpec, database::Database, get_db_path};
 use anyhow::{Context, Result};
 
 /// Long-edge target for the GUI lightbox/preview cached render.
@@ -122,16 +122,24 @@ pub fn generate_missing_thumbnails_batch(
     Ok(generated_count.load(Ordering::SeqCst))
 }
 
-// Generate resized JPEG bytes for a thumbnail (pure function aside from file IO)
-fn generate_thumbnail_bytes(filepath: &str, size: ThumbnailSize) -> Result<Vec<u8>> {
-    let image = crate::decode::decode_image(std::path::Path::new(filepath))
-        .with_context(|| format!("Failed to decode image: {}", filepath))?;
-
-    let px = size.get();
-    let resized_image = image.resize(px, px, image::imageops::FilterType::Lanczos3);
+// Generate JPEG bytes for a thumbnail rendition (pure aside from file IO).
+// `ScaleSize` downscales via the fast decode path; `FullSize` uses the
+// RAW-aware full-resolution decode and encodes at native dimensions.
+fn generate_thumbnail_bytes(filepath: &str, spec: ThumbnailSpec) -> Result<Vec<u8>> {
+    let path = std::path::Path::new(filepath);
+    let out_image = match spec {
+        ThumbnailSpec::ScaleSize(size) => {
+            let image = crate::decode::decode_image(path)
+                .with_context(|| format!("Failed to decode image: {}", filepath))?;
+            let px = size.get();
+            image.resize(px, px, image::imageops::FilterType::Lanczos3)
+        }
+        ThumbnailSpec::FullSize => crate::decode::decode_full_image(path)
+            .with_context(|| format!("Failed to decode full image: {}", filepath))?,
+    };
 
     let mut bytes: Vec<u8> = Vec::new();
-    resized_image
+    out_image
         .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Jpeg)
         .context("Failed to encode thumbnail as JPEG")?;
     Ok(bytes)
@@ -144,22 +152,22 @@ fn generate_and_store_thumbnail(
     size: ThumbnailSize,
     tx: &Sender<(String, u32, Vec<u8>)>,
 ) -> Result<()> {
-    let bytes = generate_thumbnail_bytes(filepath, size)?;
+    let bytes = generate_thumbnail_bytes(filepath, ThumbnailSpec::ScaleSize(size))?;
     tx.send((hash.to_string(), size.get(), bytes))
         .context("Failed to send thumbnail bytes over channel")?;
     Ok(())
 }
 
-/// Generate or retrieve a thumbnail for an image
+/// Generate or retrieve a thumbnail for an image.
 ///
-/// This function first checks if a thumbnail exists in the database cache.
-/// If not, it generates a new thumbnail, stores it in the database, and returns it.
+/// Checks the database cache first. On a miss, generates the rendition
+/// (scaled or full-resolution depending on `spec`), persists it, and returns it.
 ///
 /// # Arguments
 /// * `db` - Database connection
 /// * `filepath` - Path to the image file
 /// * `hash` - Hash of the image (used as cache key)
-/// * `size` - Desired thumbnail size
+/// * `spec` - `ThumbnailSize` for a scaled rendition, or `ThumbnailSpec::FullSize`
 ///
 /// # Returns
 /// * `Result<Vec<u8>>` - JPEG encoded thumbnail bytes
@@ -167,20 +175,20 @@ pub fn get_or_generate_thumbnail(
     db: &Database,
     filepath: &str,
     hash: &str,
-    size: ThumbnailSize,
+    spec: impl Into<ThumbnailSpec>,
 ) -> Result<Vec<u8>> {
-    // First, try to get the thumbnail from the database
-    if let Ok(thumbnail_data) = block_on(db.get_thumbnail(hash, size)) {
+    let spec = spec.into();
+    // First, try the database cache.
+    if let Ok(thumbnail_data) = block_on(db.get_thumbnail(hash, spec)) {
         return Ok(thumbnail_data);
     }
 
-    // If not found, generate bytes and insert directly (synchronous path)
-    let bytes = generate_thumbnail_bytes(filepath, size)?;
-    block_on(db.insert_thumbnail(hash, size, &bytes))
+    // Miss: generate, persist, return.
+    let bytes = generate_thumbnail_bytes(filepath, spec)?;
+    block_on(db.insert_thumbnail(hash, spec, &bytes))
         .context("Failed to store thumbnail in database")?;
-
-    // Return the newly generated thumbnail
-    block_on(db.get_thumbnail(hash, size)).context("Failed to retrieve newly generated thumbnail")
+    block_on(db.get_thumbnail(hash, spec))
+        .context("Failed to retrieve newly generated thumbnail")
 }
 
 #[cfg(test)]
@@ -256,6 +264,38 @@ mod tests {
             );
         }
 
+        let _ = std::fs::remove_dir_all(parent_dir);
+    }
+
+    /// `get_or_generate_thumbnail(FullSize)` persists a row under size=0 and the
+    /// returned bytes decode to the original (un-downscaled) dimensions.
+    #[test]
+    fn get_or_generate_full_size_persists_size_zero() {
+        use crate::ThumbnailSpec;
+        let db_path = temp_db_path();
+        let db = block_on(Database::new(&db_path)).expect("create test db");
+        let parent_dir = db_path.parent().unwrap().parent().unwrap();
+
+        // 64×40 so the original is larger than a tiny thumbnail and clearly "full".
+        let img_path = parent_dir.join("full_fixture.png");
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_pixel(64, 40, Rgb([10, 20, 30]));
+        img.save(&img_path).unwrap();
+        let abs_path = img_path.to_str().unwrap();
+        let hash = "full_size_hash";
+
+        assert!(block_on(db.get_thumbnail(hash, ThumbnailSpec::FullSize)).is_err());
+
+        let bytes =
+            get_or_generate_thumbnail(&db, abs_path, hash, ThumbnailSpec::FullSize).unwrap();
+        let decoded = image::load_from_memory(&bytes).unwrap();
+        assert_eq!(
+            (decoded.width(), decoded.height()),
+            (64, 40),
+            "FullSize must preserve original dimensions (no downscale)"
+        );
+
+        // Persisted under size=0 and retrievable as FullSize.
+        assert!(block_on(db.get_thumbnail(hash, ThumbnailSpec::FullSize)).is_ok());
         let _ = std::fs::remove_dir_all(parent_dir);
     }
 }
