@@ -387,6 +387,11 @@ fn main() -> Result<()> {
     // slow decode can't land after the user has already navigated to another image.
     let lb_generation: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
 
+    // Separate generation counter for the progressive full-res hot-swap. Bumped
+    // alongside `lb_generation` on every navigation/open so a late full-res decode
+    // for a now-stale image is silently dropped without disturbing the current view.
+    let lb_fullres_generation: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+
     // Monotonic counter bumped at the start of every preload dispatch.
     // Bumping before spawning ensures stale in-flight preloads stop when the
     // user moves on to a different focus image.
@@ -729,6 +734,7 @@ fn main() -> Result<()> {
         let selected_ref = Arc::clone(&selected);
         let backend_lb = backend.clone();
         let gen_ref = Arc::clone(&lb_generation);
+        let fullres_gen_ta = Arc::clone(&lb_fullres_generation);
         let preload_gen_ta = Arc::clone(&preload_generation);
         window.on_tile_activated(move |index| {
             let idx = index as usize;
@@ -740,6 +746,8 @@ fn main() -> Result<()> {
             // Reset zoom/fit on open (utmost parity with navigation).
             *lb_zoom_ref.lock() = 1.0;
             *lb_fit_ref.lock() = true;
+            // Invalidate any in-flight full-res decode from the previous image.
+            fullres_gen_ta.fetch_add(1, Ordering::SeqCst);
             if let Some(w) = weak.upgrade() {
                 w.set_selected_index(index);
                 apply_lightbox_view(&w, 1.0, true);
@@ -877,6 +885,7 @@ fn main() -> Result<()> {
         let lb_fit_ref = Arc::clone(&lb_fit);
         let backend_vf = backend.clone();
         let gen_ref = Arc::clone(&lb_generation);
+        let fullres_gen_vf = Arc::clone(&lb_fullres_generation);
         let preload_gen_vf = Arc::clone(&preload_generation);
         window.on_detail_view_full(move || {
             let seed_path = {
@@ -898,6 +907,8 @@ fn main() -> Result<()> {
             // Reset zoom/fit on open (utmost parity with tile-activated).
             *lb_zoom_ref.lock() = 1.0;
             *lb_fit_ref.lock() = true;
+            // Invalidate any in-flight full-res decode from the previous image.
+            fullres_gen_vf.fetch_add(1, Ordering::SeqCst);
             if let Some(w) = weak.upgrade() {
                 apply_lightbox_view(&w, 1.0, true);
                 let results = state_ref.lock();
@@ -1017,6 +1028,7 @@ fn main() -> Result<()> {
         let selected_ref = Arc::clone(&selected);
         let backend_lb = backend.clone();
         let gen_ref = Arc::clone(&lb_generation);
+        let fullres_gen_prev = Arc::clone(&lb_fullres_generation);
         let preload_gen_prev = Arc::clone(&preload_generation);
         window.on_lightbox_prev(move || {
             tracing::debug!("lightbox-prev invoked");
@@ -1032,6 +1044,8 @@ fn main() -> Result<()> {
             // Reset zoom/fit on every navigation (utmost parity with open path).
             *lb_zoom_ref.lock() = 1.0;
             *lb_fit_ref.lock() = true;
+            // Invalidate any in-flight full-res decode from the previous image.
+            fullres_gen_prev.fetch_add(1, Ordering::SeqCst);
             if let Some(w) = weak.upgrade() {
                 w.set_selected_index(new_idx as i32);
                 apply_lightbox_view(&w, 1.0, true);
@@ -1084,6 +1098,7 @@ fn main() -> Result<()> {
         let selected_ref = Arc::clone(&selected);
         let backend_lb = backend.clone();
         let gen_ref = Arc::clone(&lb_generation);
+        let fullres_gen_next = Arc::clone(&lb_fullres_generation);
         let preload_gen_next = Arc::clone(&preload_generation);
         window.on_lightbox_next(move || {
             tracing::debug!("lightbox-next invoked");
@@ -1104,6 +1119,8 @@ fn main() -> Result<()> {
             // Reset zoom/fit on every navigation (utmost parity with open path).
             *lb_zoom_ref.lock() = 1.0;
             *lb_fit_ref.lock() = true;
+            // Invalidate any in-flight full-res decode from the previous image.
+            fullres_gen_next.fetch_add(1, Ordering::SeqCst);
             if let Some(w) = weak.upgrade() {
                 w.set_selected_index(new_idx as i32);
                 apply_lightbox_view(&w, 1.0, true);
@@ -1151,6 +1168,10 @@ fn main() -> Result<()> {
         let weak = window.as_weak();
         let lb_zoom_ref = Arc::clone(&lb_zoom);
         let lb_fit_ref = Arc::clone(&lb_fit);
+        let state_ref = Arc::clone(&state);
+        let lb_ref = Arc::clone(&lb_index);
+        let backend_zoom = backend.clone();
+        let fullres_gen_zoom = Arc::clone(&lb_fullres_generation);
         window.on_lightbox_zoom_changed(move |z| {
             // Last-write-wins: clamp the absolute incoming value; do not accumulate.
             let zc = zoompan::clamp_zoom(z);
@@ -1158,6 +1179,22 @@ fn main() -> Result<()> {
             *lb_fit_ref.lock() = false;
             if let Some(w) = weak.upgrade() {
                 apply_lightbox_view(&w, zc, false);
+            }
+            // On entering zoom, upgrade to full-res in the background (cache-first).
+            // The generation guard silently drops a decode that arrives after the
+            // user navigates to another image.
+            let rel = state_ref
+                .lock()
+                .results()
+                .get(lb_ref.lock().unwrap_or(0))
+                .map(|r| r.path.clone());
+            if let Some(rel) = rel {
+                load_lightbox_fullres(
+                    weak.clone(),
+                    backend_zoom.clone(),
+                    rel,
+                    Arc::clone(&fullres_gen_zoom),
+                );
             }
         });
     }
@@ -3599,6 +3636,50 @@ fn load_lightbox_image(
                 w.set_lightbox_fit_scale(fit_scale);
             }
             w.set_lightbox_open(true);
+        })
+        .ok();
+    });
+}
+
+/// Decode (cache-first) the native-resolution rendition off-thread and swap it
+/// in WITHOUT disturbing the current zoom/fit/pan state — only the pixels
+/// sharpen. Guarded by `generation` so a decode that completes after the user
+/// navigates to a different image is silently dropped.
+///
+/// `Backend::thumbnail(FullSize)` persists the result under `size = 0`, so
+/// repeated triggers (e.g. every wheel tick while zooming) are cheap: the DB
+/// cache is hit and the same bytes are returned instantly. The generation guard
+/// guarantees only the decode that is still current ever reaches the UI thread.
+fn load_lightbox_fullres(
+    weak: Weak<MainWindow>,
+    backend: Backend,
+    rel_path: String,
+    generation: Arc<AtomicU64>,
+) {
+    let my_gen = generation.load(Ordering::SeqCst);
+    std::thread::spawn(move || {
+        let bytes = match backend.thumbnail(&rel_path, imgfind::ThumbnailSpec::FullSize) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!("Lightbox full-res: failed to load {rel_path}: {e:?}");
+                return;
+            }
+        };
+        let img = match image::load_from_memory(&bytes) {
+            Ok(img) => img,
+            Err(e) => {
+                tracing::warn!("Lightbox full-res: failed to decode {rel_path}: {e:?}");
+                return;
+            }
+        };
+        slint::invoke_from_event_loop(move || {
+            // Drop this result if the user navigated while we decoded.
+            if my_gen != generation.load(Ordering::SeqCst) {
+                return;
+            }
+            let Some(w) = weak.upgrade() else { return };
+            // Swap pixels only — leave zoom/fit/pan state untouched.
+            w.set_lightbox_image(image_util::dynamic_to_slint_image(&img));
         })
         .ok();
     });
