@@ -1,32 +1,34 @@
 //! Pure zoom/pan math for the lightbox. No Slint types so it unit-tests cleanly;
 //! `app.slint` mirrors the same clamp formula for live pan during a drag.
 
-// The lightbox wiring task will consume these; silence dead-code until then.
-#![allow(dead_code)]
-
 pub const ZOOM_MIN: f32 = 0.1;
 pub const ZOOM_MAX: f32 = 8.0;
+#[allow(dead_code)]
 pub const ZOOM_STEP: f32 = 1.25;
 
 pub fn clamp_zoom(z: f32) -> f32 {
     z.clamp(ZOOM_MIN, ZOOM_MAX)
 }
 
+#[allow(dead_code)]
 pub fn zoom_in(z: f32) -> f32 {
     clamp_zoom(z * ZOOM_STEP)
 }
 
+#[allow(dead_code)]
 pub fn zoom_out(z: f32) -> f32 {
     clamp_zoom(z / ZOOM_STEP)
 }
 
 /// Wheel/trackpad zoom: ~60px per notch, 1.1 base for smooth perceived steps.
+#[allow(dead_code)]
 pub fn wheel_zoom(z: f32, delta_px: f32) -> f32 {
     clamp_zoom(z * 1.1f32.powf(delta_px / 60.0))
 }
 
 /// Clamp a pan offset so a too-large image can't be dragged off the viewport.
 /// When the image fits within the viewport it is centered (pan = 0).
+#[allow(dead_code)]
 pub fn clamp_pan(image_len: f32, viewport_len: f32, pan: f32) -> f32 {
     let overhang = (image_len - viewport_len) / 2.0;
     if overhang <= 0.0 {

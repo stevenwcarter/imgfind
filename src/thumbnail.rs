@@ -187,8 +187,7 @@ pub fn get_or_generate_thumbnail(
     let bytes = generate_thumbnail_bytes(filepath, spec)?;
     block_on(db.insert_thumbnail(hash, spec, &bytes))
         .context("Failed to store thumbnail in database")?;
-    block_on(db.get_thumbnail(hash, spec))
-        .context("Failed to retrieve newly generated thumbnail")
+    block_on(db.get_thumbnail(hash, spec)).context("Failed to retrieve newly generated thumbnail")
 }
 
 #[cfg(test)]

@@ -188,6 +188,10 @@ export component MainWindow inherits Window {
     // Visible height of the scroll viewport, for the T14 windowed loader's
     // `visible_rows` computation.
     out property <length> grid-viewport-h: grid-scroll.visible-height;
+    // Lightbox content-area dimensions (window minus 36px top bar + 80px bottom bar).
+    // Used by Rust to compute fit-scale after decoding an image.
+    out property <length> lightbox-content-w: root.width;
+    out property <length> lightbox-content-h: root.height - 36px - 80px;
 
     // ALL keyboard shortcuts live in ONE place: the single `app-keys` FocusScope
     // below, which wraps the whole window and uses `capture-key-pressed`. Slint

@@ -355,6 +355,9 @@ fn main() -> Result<()> {
 
     // Current lightbox index. None when the lightbox is closed.
     let lb_index: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
+    // Lightbox view state (GUI-runtime only; never persisted to ui_state).
+    let lb_zoom: Arc<Mutex<f32>> = Arc::new(Mutex::new(1.0));
+    let lb_fit: Arc<Mutex<bool>> = Arc::new(Mutex::new(true));
 
     // Index into `state.results()` of the keyboard/mouse-selected tile (mirrors the
     // Slint `selected-index` property). Shares the index space with `lb_index`.
@@ -721,6 +724,8 @@ fn main() -> Result<()> {
         let weak = window.as_weak();
         let state_ref = Arc::clone(&state);
         let lb_ref = Arc::clone(&lb_index);
+        let lb_zoom_ref = Arc::clone(&lb_zoom);
+        let lb_fit_ref = Arc::clone(&lb_fit);
         let selected_ref = Arc::clone(&selected);
         let backend_lb = backend.clone();
         let gen_ref = Arc::clone(&lb_generation);
@@ -732,8 +737,23 @@ fn main() -> Result<()> {
             *lb_ref.lock() = Some(idx);
             // Seed the grid selection so closing the lightbox (Esc) lands on this tile.
             *selected_ref.lock() = Some(idx);
+            // Reset zoom/fit on open (utmost parity with navigation).
+            *lb_zoom_ref.lock() = 1.0;
+            *lb_fit_ref.lock() = true;
             if let Some(w) = weak.upgrade() {
                 w.set_selected_index(index);
+                apply_lightbox_view(&w, 1.0, true);
+                let results = state_ref.lock();
+                let total = results.results().len() as i32;
+                if let Some(row) = results.results().get(idx) {
+                    let fname = std::path::Path::new(&row.path)
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| row.path.clone());
+                    w.set_lightbox_filename(fname.into());
+                }
+                w.set_lightbox_index1((idx as i32) + 1);
+                w.set_lightbox_total(total);
             }
             load_lightbox_image(weak.clone(), backend_lb.clone(), rel, gen_ref.clone());
 
@@ -853,6 +873,8 @@ fn main() -> Result<()> {
         let detail_ref = Arc::clone(&detail);
         let state_ref = Arc::clone(&state);
         let lb_ref = Arc::clone(&lb_index);
+        let lb_zoom_ref = Arc::clone(&lb_zoom);
+        let lb_fit_ref = Arc::clone(&lb_fit);
         let backend_vf = backend.clone();
         let gen_ref = Arc::clone(&lb_generation);
         let preload_gen_vf = Arc::clone(&preload_generation);
@@ -873,6 +895,24 @@ fn main() -> Result<()> {
                 st.results().iter().position(|r| r.path == rel)
             };
             *lb_ref.lock() = idx;
+            // Reset zoom/fit on open (utmost parity with tile-activated).
+            *lb_zoom_ref.lock() = 1.0;
+            *lb_fit_ref.lock() = true;
+            if let Some(w) = weak.upgrade() {
+                apply_lightbox_view(&w, 1.0, true);
+                let results = state_ref.lock();
+                let total = results.results().len() as i32;
+                let effective_idx = idx.unwrap_or(0);
+                if let Some(row) = results.results().get(effective_idx) {
+                    let fname = std::path::Path::new(&row.path)
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| row.path.clone());
+                    w.set_lightbox_filename(fname.into());
+                }
+                w.set_lightbox_index1((effective_idx as i32) + 1);
+                w.set_lightbox_total(total);
+            }
 
             load_lightbox_image(weak.clone(), backend_vf.clone(), rel, gen_ref.clone());
 
@@ -972,6 +1012,8 @@ fn main() -> Result<()> {
         let weak = window.as_weak();
         let state_ref = Arc::clone(&state);
         let lb_ref = Arc::clone(&lb_index);
+        let lb_zoom_ref = Arc::clone(&lb_zoom);
+        let lb_fit_ref = Arc::clone(&lb_fit);
         let selected_ref = Arc::clone(&selected);
         let backend_lb = backend.clone();
         let gen_ref = Arc::clone(&lb_generation);
@@ -987,8 +1029,23 @@ fn main() -> Result<()> {
             };
             // Mirror into the grid selection so closing the lightbox lands on this tile.
             *selected_ref.lock() = Some(new_idx);
+            // Reset zoom/fit on every navigation (utmost parity with open path).
+            *lb_zoom_ref.lock() = 1.0;
+            *lb_fit_ref.lock() = true;
             if let Some(w) = weak.upgrade() {
                 w.set_selected_index(new_idx as i32);
+                apply_lightbox_view(&w, 1.0, true);
+                let results = state_ref.lock();
+                let total = results.results().len() as i32;
+                if let Some(row) = results.results().get(new_idx) {
+                    let fname = std::path::Path::new(&row.path)
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| row.path.clone());
+                    w.set_lightbox_filename(fname.into());
+                }
+                w.set_lightbox_index1((new_idx as i32) + 1);
+                w.set_lightbox_total(total);
             }
             let path = state_ref
                 .lock()
@@ -1022,6 +1079,8 @@ fn main() -> Result<()> {
         let weak = window.as_weak();
         let state_ref = Arc::clone(&state);
         let lb_ref = Arc::clone(&lb_index);
+        let lb_zoom_ref = Arc::clone(&lb_zoom);
+        let lb_fit_ref = Arc::clone(&lb_fit);
         let selected_ref = Arc::clone(&selected);
         let backend_lb = backend.clone();
         let gen_ref = Arc::clone(&lb_generation);
@@ -1042,8 +1101,23 @@ fn main() -> Result<()> {
             }
             // Mirror into the grid selection so closing the lightbox lands on this tile.
             *selected_ref.lock() = Some(new_idx);
+            // Reset zoom/fit on every navigation (utmost parity with open path).
+            *lb_zoom_ref.lock() = 1.0;
+            *lb_fit_ref.lock() = true;
             if let Some(w) = weak.upgrade() {
                 w.set_selected_index(new_idx as i32);
+                apply_lightbox_view(&w, 1.0, true);
+                let results = state_ref.lock();
+                let total = results.results().len() as i32;
+                if let Some(row) = results.results().get(new_idx) {
+                    let fname = std::path::Path::new(&row.path)
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| row.path.clone());
+                    w.set_lightbox_filename(fname.into());
+                }
+                w.set_lightbox_index1((new_idx as i32) + 1);
+                w.set_lightbox_total(total);
             }
             let path = state_ref
                 .lock()
@@ -1068,6 +1142,36 @@ fn main() -> Result<()> {
                     Arc::clone(&preload_gen_next),
                     my_gen,
                 );
+            }
+        });
+    }
+
+    // --- lightbox-zoom-changed callback: absolute zoom value from slider / keyboard / wheel ---
+    {
+        let weak = window.as_weak();
+        let lb_zoom_ref = Arc::clone(&lb_zoom);
+        let lb_fit_ref = Arc::clone(&lb_fit);
+        window.on_lightbox_zoom_changed(move |z| {
+            // Last-write-wins: clamp the absolute incoming value; do not accumulate.
+            let zc = zoompan::clamp_zoom(z);
+            *lb_zoom_ref.lock() = zc;
+            *lb_fit_ref.lock() = false;
+            if let Some(w) = weak.upgrade() {
+                apply_lightbox_view(&w, zc, false);
+            }
+        });
+    }
+
+    // --- lightbox-zoom-fit callback: reset to fit view ---
+    {
+        let weak = window.as_weak();
+        let lb_zoom_ref = Arc::clone(&lb_zoom);
+        let lb_fit_ref = Arc::clone(&lb_fit);
+        window.on_lightbox_zoom_fit(move || {
+            *lb_zoom_ref.lock() = 1.0;
+            *lb_fit_ref.lock() = true;
+            if let Some(w) = weak.upgrade() {
+                apply_lightbox_view(&w, 1.0, true);
             }
         });
     }
@@ -3405,6 +3509,12 @@ fn spawn_detail_preload(
     });
 }
 
+/// Push zoom/fit to the UI in one place so every entry point stays consistent.
+fn apply_lightbox_view(w: &MainWindow, zoom: f32, fit: bool) {
+    w.set_lightbox_zoom(zoom);
+    w.set_lightbox_fit(fit);
+}
+
 /// Previous lightbox index, clamped at 0 (no wrap).
 fn clamp_prev(current: usize) -> usize {
     current.saturating_sub(1)
@@ -3469,6 +3579,9 @@ fn load_lightbox_image(
             }
         };
 
+        // Capture image dimensions off the UI thread (DynamicImage is Send).
+        let (iw, ih) = (img.width() as f32, img.height() as f32);
+
         slint::invoke_from_event_loop(move || {
             // Drop this result if a newer lightbox load superseded it while we decoded.
             if !is_current_generation(my_gen, generation.load(Ordering::SeqCst)) {
@@ -3477,6 +3590,14 @@ fn load_lightbox_image(
             let Some(w) = weak.upgrade() else { return };
             let slint_img = image_util::dynamic_to_slint_image(&img);
             w.set_lightbox_image(slint_img);
+            // Compute fit-scale from content-area dimensions so the first wheel tick
+            // out of fit doesn't cause a size jump.
+            if iw > 0.0 && ih > 0.0 {
+                let vw = w.get_lightbox_content_w();
+                let vh = w.get_lightbox_content_h();
+                let fit_scale = (vw / iw).min(vh / ih).max(0.0001);
+                w.set_lightbox_fit_scale(fit_scale);
+            }
             w.set_lightbox_open(true);
         })
         .ok();

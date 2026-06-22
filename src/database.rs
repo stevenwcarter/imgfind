@@ -2941,7 +2941,9 @@ mod tests {
 
         // FullSize stored under size=0, retrievable by the enum (not the integer).
         assert_eq!(
-            db.get_thumbnail("h", ThumbnailSpec::FullSize).await.unwrap(),
+            db.get_thumbnail("h", ThumbnailSpec::FullSize)
+                .await
+                .unwrap(),
             vec![1, 2, 3]
         );
         // Distinct from the scaled row for the same hash — no key collision.
