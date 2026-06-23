@@ -1,5 +1,7 @@
 slint::include_modules!();
 
+mod recents;
+
 use anyhow::Result;
 
 fn main() -> Result<()> {
