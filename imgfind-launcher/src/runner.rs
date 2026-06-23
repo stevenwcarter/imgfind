@@ -68,25 +68,31 @@ pub fn run_plan(
             .spawn()
             .with_context(|| format!("spawning {}", program.to_string_lossy()))?;
 
-        // Drain stderr on a thread; read stdout on this thread; interleave lines.
+        // Drain stdout and stderr on separate threads; call on_line live as
+        // lines arrive on the calling thread.  Both threads hold a Sender clone;
+        // when they both finish (streams closed) all Senders drop and the
+        // receive loop exits naturally.
+        let stdout = child.stdout.take().context("child stdout")?;
         let stderr = child.stderr.take().context("child stderr")?;
         let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let tx_out = tx.clone();
+        let out_thread = std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                let _ = tx_out.send(line);
+            }
+        });
         let tx_err = tx.clone();
         let err_thread = std::thread::spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                 let _ = tx_err.send(line);
             }
         });
-        if let Some(stdout) = child.stdout.take() {
-            let tx_out = tx.clone();
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                let _ = tx_out.send(line);
-            }
-        }
+        // Drop the original tx so the channel closes once both reader threads finish.
         drop(tx);
         for line in rx {
             on_line(line);
         }
+        let _ = out_thread.join();
         let _ = err_thread.join();
 
         let status = child.wait().context("waiting for child")?;
