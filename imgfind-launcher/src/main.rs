@@ -1,6 +1,7 @@
 slint::include_modules!();
 
 mod recents;
+mod runner;
 
 use anyhow::Result;
 
