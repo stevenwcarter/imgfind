@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "imgfind-gui"]
+members = [".", "imgfind-gui", "imgfind-launcher"]
 resolver = "2"
 
 [package]

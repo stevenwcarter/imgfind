@@ -1,0 +1,23 @@
+[package]
+name = "imgfind-launcher"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Desktop launcher for imgfind: pick a library to open or index a new folder."
+repository = "https://github.com/stevenwcarter/imgfind"
+readme = "../README.md"
+
+[dependencies]
+imgfind = { path = ".." }
+slint = "1.16"
+rfd = "0.15"
+clap = { version = "4.0", features = ["derive"] }
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+dirs = "6.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[build-dependencies]
+slint-build = "1.16"
