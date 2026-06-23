@@ -397,6 +397,12 @@ fn main() -> Result<()> {
     // base 2048px decode from overwriting sharper full-res pixels already shown.
     let lb_shown_fullres: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
+    // Dedup guard: records the generation a full-res decode has been started for,
+    // so rapid zoom ticks don't each spawn their own (possibly multi-second RAW)
+    // decode before the first finishes. Monotonic like `lb_fullres_generation`,
+    // so it never needs resetting.
+    let lb_fullres_started: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+
     // Monotonic counter bumped at the start of every preload dispatch.
     // Bumping before spawning ensures stale in-flight preloads stop when the
     // user moves on to a different focus image.
@@ -1217,6 +1223,7 @@ fn main() -> Result<()> {
         let lb_ref = Arc::clone(&lb_index);
         let backend_zoom = backend.clone();
         let fullres_gen_zoom = Arc::clone(&lb_fullres_generation);
+        let fullres_started_zoom = Arc::clone(&lb_fullres_started);
         let shown_fullres_zoom = Arc::clone(&lb_shown_fullres);
         window.on_lightbox_zoom_changed(move |z| {
             if let Some(w) = weak.upgrade() {
@@ -1236,6 +1243,7 @@ fn main() -> Result<()> {
                     backend_zoom.clone(),
                     rel,
                     Arc::clone(&fullres_gen_zoom),
+                    Arc::clone(&fullres_started_zoom),
                     Arc::clone(&shown_fullres_zoom),
                 );
             }
@@ -1266,6 +1274,7 @@ fn main() -> Result<()> {
         let lb_ref = Arc::clone(&lb_index);
         let backend_wheel = backend.clone();
         let fullres_gen_wheel = Arc::clone(&lb_fullres_generation);
+        let fullres_started_wheel = Arc::clone(&lb_fullres_started);
         let shown_fullres_wheel = Arc::clone(&lb_shown_fullres);
         window.on_lightbox_zoom_wheel(move |delta| {
             let base = if *lb_fit_ref.lock() {
@@ -1290,6 +1299,7 @@ fn main() -> Result<()> {
                     backend_wheel.clone(),
                     rel,
                     Arc::clone(&fullres_gen_wheel),
+                    Arc::clone(&fullres_started_wheel),
                     Arc::clone(&shown_fullres_wheel),
                 );
             }
@@ -1306,6 +1316,7 @@ fn main() -> Result<()> {
         let lb_ref = Arc::clone(&lb_index);
         let backend_step = backend.clone();
         let fullres_gen_step = Arc::clone(&lb_fullres_generation);
+        let fullres_started_step = Arc::clone(&lb_fullres_started);
         let shown_fullres_step = Arc::clone(&lb_shown_fullres);
         window.on_lightbox_zoom_step(move |dir| {
             let base = if *lb_fit_ref.lock() {
@@ -1334,6 +1345,7 @@ fn main() -> Result<()> {
                     backend_step.clone(),
                     rel,
                     Arc::clone(&fullres_gen_step),
+                    Arc::clone(&fullres_started_step),
                     Arc::clone(&shown_fullres_step),
                 );
             }
@@ -3799,9 +3811,15 @@ fn load_lightbox_fullres(
     backend: Backend,
     rel_path: String,
     generation: Arc<AtomicU64>,
+    started_gen: Arc<AtomicU64>,
     shown_fullres: Arc<AtomicBool>,
 ) {
     let my_gen = generation.load(Ordering::SeqCst);
+    // Skip if a decode for this generation is already in flight: rapid zoom ticks
+    // would otherwise each spawn their own decode of the same image.
+    if !zoompan::claim_fullres_decode(&started_gen, my_gen) {
+        return;
+    }
     std::thread::spawn(move || {
         let bytes = match backend.thumbnail(&rel_path, imgfind::ThumbnailSpec::FullSize) {
             Ok(b) => b,
