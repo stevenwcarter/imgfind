@@ -3790,6 +3790,12 @@ fn load_lightbox_image(
                 let fit_scale = (vw / iw).min(vh / ih).max(0.0001);
                 *lb_fit_scale_ref.lock() = fit_scale;
                 w.set_lightbox_fit_scale(fit_scale);
+                // Anchor the zoomed-image geometry to the base (2048px) rendition's
+                // dimensions so the later full-res hot-swap — same picture, larger
+                // pixel size — doesn't change on-screen size. `lightbox-zoom` stays
+                // base-relative; the full-res swap only sharpens pixels.
+                w.set_lightbox_base_w(iw);
+                w.set_lightbox_base_h(ih);
             }
             w.set_lightbox_open(true);
         })

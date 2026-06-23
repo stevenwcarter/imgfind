@@ -50,6 +50,8 @@ export component MainWindow inherits Window {
     in property <float> lightbox-zoom: 1.0;
     in property <bool> lightbox-fit: true;
     in property <float> lightbox-fit-scale: 1.0;
+    in property <length> lightbox-base-w;
+    in property <length> lightbox-base-h;
     callback lightbox-zoom-changed(float);
     callback lightbox-zoom-fit();
     callback lightbox-zoom-wheel(float);  // raw delta-y in px (unitless float)
@@ -927,8 +929,8 @@ export component MainWindow inherits Window {
                 // edge can't pull inside the viewport.
                 if !root.lightbox-fit: Image {
                     source: root.lightbox-image;
-                    width: self.source.width * 1px * root.lightbox-zoom;
-                    height: self.source.height * 1px * root.lightbox-zoom;
+                    width: root.lightbox-base-w * root.lightbox-zoom;
+                    height: root.lightbox-base-h * root.lightbox-zoom;
                     x: self.width > parent.width
                         ? clamp((parent.width - self.width) / 2 + content-root.pan-x,
                                 parent.width - self.width, 0px)
