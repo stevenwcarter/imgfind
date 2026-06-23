@@ -47,6 +47,22 @@ pub mod vector_sql;
 pub use ids::{CollectionId, ImageId, TagId};
 pub use units::{EmbeddingDim, FileSize, MaxK, ThumbnailSize, ThumbnailSpec};
 
+/// Walk up from `start` (inclusive) and return the first directory that
+/// contains a `.imgfind/imgfind.db`, or `None` if no ancestor does. Pure
+/// lookup: never creates anything and never falls back to `~/.imgfind`.
+pub fn find_db_root_upward(start: &Path) -> Option<PathBuf> {
+    let mut dir = start.to_path_buf();
+    loop {
+        if dir.join(".imgfind").join("imgfind.db").exists() {
+            return Some(dir);
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent.to_path_buf(),
+            None => return None,
+        }
+    }
+}
+
 pub fn get_db_path(dir: Option<&str>) -> Result<PathBuf> {
     // First, try to find existing database by walking up directory tree
     if let Some(dir) = dir {
@@ -58,19 +74,9 @@ pub fn get_db_path(dir: Option<&str>) -> Result<PathBuf> {
         }
     }
 
-    let mut current_dir = std::env::current_dir().context("Failed to get current directory")?;
-
-    loop {
-        let potential_db = current_dir.join(".imgfind").join("imgfind.db");
-        if potential_db.exists() {
-            return Ok(potential_db);
-        }
-
-        if let Some(parent) = current_dir.parent() {
-            current_dir = parent.to_path_buf();
-        } else {
-            break;
-        }
+    let current_dir = std::env::current_dir().context("Failed to get current directory")?;
+    if let Some(root) = find_db_root_upward(&current_dir) {
+        return Ok(root.join(".imgfind").join("imgfind.db"));
     }
 
     // Default to ~/.imgfind/imgfind.db
@@ -171,6 +177,35 @@ pub fn relative_to_abs_path(rel_path: &Path, db_parent: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    #[test]
+    fn find_db_root_upward_finds_at_start() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("lib");
+        fs::create_dir_all(root.join(".imgfind")).unwrap();
+        fs::write(root.join(".imgfind").join("imgfind.db"), b"x").unwrap();
+        assert_eq!(find_db_root_upward(&root), Some(root.clone()));
+    }
+
+    #[test]
+    fn find_db_root_upward_finds_at_ancestor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("lib");
+        let deep = root.join("a").join("b");
+        fs::create_dir_all(&deep).unwrap();
+        fs::create_dir_all(root.join(".imgfind")).unwrap();
+        fs::write(root.join(".imgfind").join("imgfind.db"), b"x").unwrap();
+        assert_eq!(find_db_root_upward(&deep), Some(root.clone()));
+    }
+
+    #[test]
+    fn find_db_root_upward_none_when_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let deep = tmp.path().join("a").join("b");
+        fs::create_dir_all(&deep).unwrap();
+        assert_eq!(find_db_root_upward(&deep), None);
+    }
 
     #[test]
     fn rel_abs_roundtrip_within_base() {
