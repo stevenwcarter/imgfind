@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use dirs::home_dir;
 use std::{
+    ffi::OsString,
     fs,
     future::Future,
     path::{Path, PathBuf},
@@ -61,6 +62,30 @@ pub fn find_db_root_upward(start: &Path) -> Option<PathBuf> {
             None => return None,
         }
     }
+}
+
+/// Resolve a sibling executable: prefer one next to the current executable
+/// (the `install.sh` / cargo target layout), else fall back to the bare name
+/// for a `PATH` lookup. Used to spawn `imgfind` / `imgfind-gui` from sibling
+/// binaries (e.g. the launcher, `imgfind gui`).
+pub fn resolve_sibling_binary(name: &str) -> OsString {
+    sibling_binary_from(std::env::current_exe().ok().as_deref(), name, |p| {
+        p.exists()
+    })
+}
+
+fn sibling_binary_from(
+    current_exe: Option<&Path>,
+    name: &str,
+    exists: impl Fn(&Path) -> bool,
+) -> OsString {
+    if let Some(exe) = current_exe {
+        let cand = exe.with_file_name(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+        if exists(&cand) {
+            return cand.into_os_string();
+        }
+    }
+    OsString::from(name)
 }
 
 pub fn get_db_path(dir: Option<&str>) -> Result<PathBuf> {
@@ -221,5 +246,29 @@ mod tests {
         let base = Path::new("/data");
         let abs = AbsolutePath(PathBuf::from("/other/a.jpg"));
         assert!(abs.to_relative(base).is_err());
+    }
+
+    #[test]
+    fn sibling_binary_prefers_existing_sibling() {
+        let exe = PathBuf::from("/opt/app/imgfind");
+        let got = sibling_binary_from(Some(&exe), "imgfind-gui", |_p| true);
+        let want = PathBuf::from(format!(
+            "/opt/app/imgfind-gui{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        assert_eq!(got, want.into_os_string());
+    }
+
+    #[test]
+    fn sibling_binary_falls_back_to_bare_name_when_missing() {
+        let exe = PathBuf::from("/opt/app/imgfind");
+        let got = sibling_binary_from(Some(&exe), "imgfind-gui", |_p| false);
+        assert_eq!(got, std::ffi::OsString::from("imgfind-gui"));
+    }
+
+    #[test]
+    fn sibling_binary_bare_name_when_no_current_exe() {
+        let got = sibling_binary_from(None, "imgfind-gui", |_p| true);
+        assert_eq!(got, std::ffi::OsString::from("imgfind-gui"));
     }
 }

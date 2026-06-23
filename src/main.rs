@@ -348,15 +348,7 @@ fn parse_threshold(s: &str) -> Result<f32, String> {
 /// the child's status. The `Result<()>` return type exists only to propagate a spawn
 /// failure (`?` at the call site) — that is the function's sole `Err` path.
 fn launch_gui(args: &[std::ffi::OsString]) -> anyhow::Result<()> {
-    use std::ffi::OsString;
-
-    // Prefer a sibling of the current executable (install.sh + cargo target layout);
-    // otherwise rely on PATH.
-    let sibling = std::env::current_exe().ok().and_then(|p| {
-        let cand = p.with_file_name(format!("imgfind-gui{}", std::env::consts::EXE_SUFFIX));
-        cand.exists().then_some(cand.into_os_string())
-    });
-    let program = sibling.unwrap_or_else(|| OsString::from("imgfind-gui"));
+    let program = imgfind::resolve_sibling_binary("imgfind-gui");
 
     let status = std::process::Command::new(&program)
         .args(args)
