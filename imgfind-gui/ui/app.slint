@@ -273,9 +273,13 @@ export component MainWindow inherits Window {
                     root.key(event.text);
                     return accept;
                 }
-                // Zoom controls: 0 = fit, +/= = zoom in, - = zoom out.
+                // Zoom controls: 0 = fit, 1 = 100% (1:1), +/= = zoom in, - = zoom out.
                 if (event.text == "0") {
                     root.lightbox-zoom-fit();
+                    return accept;
+                }
+                if (event.text == "1") {
+                    root.lightbox-zoom-changed(1.0);
                     return accept;
                 }
                 if (event.text == "+" || event.text == "=") {
@@ -1061,6 +1065,22 @@ export component MainWindow inherits Window {
                             border-radius: 4px;
                             Text {
                                 text: "Fit";
+                                color: white;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                    // 1:1 → native resolution (zoom 1.0). Reuses zoom-changed so it
+                    // exits fit and kicks off the full-res background decode.
+                    one-to-one-touch := TouchArea {
+                        width: 60px;
+                        clicked => { root.lightbox-zoom-changed(1.0); }
+                        Rectangle {
+                            background: one-to-one-touch.has-hover ? #ffffff22 : #ffffff11;
+                            border-radius: 4px;
+                            Text {
+                                text: "1:1";
                                 color: white;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;

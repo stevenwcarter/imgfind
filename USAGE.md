@@ -95,7 +95,7 @@ The GUI launches directly into a browse-all view (or restores the previous sessi
 
 A **sort selector** beside the filter bar lets you order by Name, Size, or Type (with an asc/desc toggle); while a semantic query is active, Relevance is also offered. Browse re-queries the DB; search re-sorts in memory.
 
-Click a thumbnail to open a **detail panel** on the right (512px thumbnail + metadata + "Search similar"). Double-click (or "View full") opens the full-screen **lightbox** (prev/next navigation, Esc to close); the lightbox uses a persisted 2048px cached thumbnail. Right-click a thumbnail to open the original file in the OS viewer.
+Click a thumbnail to open a **detail panel** on the right (512px thumbnail + metadata + "Search similar"). Double-click (or "View full") opens the full-screen **lightbox** (prev/next navigation, Esc to close); the lightbox uses a persisted 2048px cached thumbnail, upgrading to full native resolution on first zoom. In the lightbox, scroll to zoom and drag to pan; the bottom bar has **Fit** and **1:1** (100% / native) buttons, and the keys `+`/`-` step zoom, `0` fits, `1` jumps to 100%. Right-click a thumbnail to open the original file in the OS viewer.
 
 Keyboard navigation: `h/j/k/l` or arrow keys move the selection; `Enter` opens the detail panel; `Space` opens the lightbox; `Esc` closes the panel.
 
