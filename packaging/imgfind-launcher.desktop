@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=imgfind
+GenericName=Semantic Image Search
+Comment=Find your images by natural-language search
+Exec=imgfind-launcher
+Terminal=false
+Categories=Graphics;Photography;
