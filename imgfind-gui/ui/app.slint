@@ -52,9 +52,14 @@ export component MainWindow inherits Window {
     in property <float> lightbox-fit-scale: 1.0;
     in property <length> lightbox-base-w;
     in property <length> lightbox-base-h;
+    // Pan offset from centered (px). Lifted to root so the wheel callback can
+    // recompute it for cursor-anchored zoom; the drag handler also writes it.
+    in-out property <length> lightbox-pan-x;
+    in-out property <length> lightbox-pan-y;
     callback lightbox-zoom-changed(float);
     callback lightbox-zoom-fit();
-    callback lightbox-zoom-wheel(float);  // raw delta-y in px (unitless float)
+    // delta-y (px), cursor x/y and viewport w/h (all px) for cursor-anchored zoom.
+    callback lightbox-zoom-wheel(float, length, length, length, length);
     callback lightbox-zoom-step(int);     // +1 = zoom in, -1 = zoom out
 
     // Detail panel state set from Rust.
@@ -889,21 +894,19 @@ export component MainWindow inherits Window {
             width: root.width;
             height: root.height;
 
-            // Local pan offset (px), reset on navigation / entering fit.
-            property <length> pan-x: 0px;
-            property <length> pan-y: 0px;
-            // Mirror root properties so we can watch them with `changed`.
+            // Pan offset lives on root (lightbox-pan-x/y); reset on navigation /
+            // entering fit. Mirror root properties so we can watch them.
             property <int> nav-gen: root.lightbox-index1;
             property <bool> fit-mirror: root.lightbox-fit;
 
             changed nav-gen => {
-                content-root.pan-x = 0px;
-                content-root.pan-y = 0px;
+                root.lightbox-pan-x = 0px;
+                root.lightbox-pan-y = 0px;
             }
             changed fit-mirror => {
                 if (root.lightbox-fit) {
-                    content-root.pan-x = 0px;
-                    content-root.pan-y = 0px;
+                    root.lightbox-pan-x = 0px;
+                    root.lightbox-pan-y = 0px;
                 }
             }
 
@@ -936,11 +939,11 @@ export component MainWindow inherits Window {
                     width: root.lightbox-base-w * root.lightbox-zoom;
                     height: root.lightbox-base-h * root.lightbox-zoom;
                     x: self.width > parent.width
-                        ? clamp((parent.width - self.width) / 2 + content-root.pan-x,
+                        ? clamp((parent.width - self.width) / 2 + root.lightbox-pan-x,
                                 parent.width - self.width, 0px)
                         : (parent.width - self.width) / 2;
                     y: self.height > parent.height
-                        ? clamp((parent.height - self.height) / 2 + content-root.pan-y,
+                        ? clamp((parent.height - self.height) / 2 + root.lightbox-pan-y,
                                 parent.height - self.height, 0px)
                         : (parent.height - self.height) / 2;
                 }
@@ -957,19 +960,19 @@ export component MainWindow inherits Window {
                     property <length> start-pan-y;
 
                     scroll-event(e) => {
-                        root.lightbox-zoom-wheel(e.delta-y / 1px);
+                        root.lightbox-zoom-wheel(e.delta-y / 1px, self.mouse-x, self.mouse-y, self.width, self.height);
                         return accept;
                     }
                     changed pressed => {
                         if (self.pressed) {
-                            self.start-pan-x = content-root.pan-x;
-                            self.start-pan-y = content-root.pan-y;
+                            self.start-pan-x = root.lightbox-pan-x;
+                            self.start-pan-y = root.lightbox-pan-y;
                         }
                     }
                     moved => {
                         if (!root.lightbox-fit) {
-                            content-root.pan-x = self.start-pan-x + (self.mouse-x - self.pressed-x);
-                            content-root.pan-y = self.start-pan-y + (self.mouse-y - self.pressed-y);
+                            root.lightbox-pan-x = self.start-pan-x + (self.mouse-x - self.pressed-x);
+                            root.lightbox-pan-y = self.start-pan-y + (self.mouse-y - self.pressed-y);
                         }
                     }
                     clicked => {

@@ -1276,15 +1276,28 @@ fn main() -> Result<()> {
         let fullres_gen_wheel = Arc::clone(&lb_fullres_generation);
         let fullres_started_wheel = Arc::clone(&lb_fullres_started);
         let shown_fullres_wheel = Arc::clone(&lb_shown_fullres);
-        window.on_lightbox_zoom_wheel(move |delta| {
-            let base = if *lb_fit_ref.lock() {
+        window.on_lightbox_zoom_wheel(move |delta, cursor_x, cursor_y, view_w, view_h| {
+            let fit = *lb_fit_ref.lock();
+            let base = if fit {
                 *lb_fit_scale_ref.lock()
             } else {
                 *lb_zoom_ref.lock()
             };
             let new_zoom = zoompan::wheel_zoom(base, delta);
             if let Some(w) = weak.upgrade() {
+                // Cursor-anchored zoom: recompute pan so the point under the
+                // cursor stays put. In fit mode the image is centered (pan 0).
+                let base_w = w.get_lightbox_base_w();
+                let base_h = w.get_lightbox_base_h();
+                let old_pan_x = if fit { 0.0 } else { w.get_lightbox_pan_x() };
+                let old_pan_y = if fit { 0.0 } else { w.get_lightbox_pan_y() };
+                let pan_x =
+                    zoompan::anchored_pan(view_w, base_w, cursor_x, base, new_zoom, old_pan_x);
+                let pan_y =
+                    zoompan::anchored_pan(view_h, base_h, cursor_y, base, new_zoom, old_pan_y);
                 lightbox_apply_zoom(&w, &lb_zoom_ref, &lb_fit_ref, new_zoom);
+                w.set_lightbox_pan_x(pan_x);
+                w.set_lightbox_pan_y(pan_y);
             }
             // Lock lb_ref before state_ref (matching on_lightbox_prev/next ordering).
             let lb_idx = *lb_ref.lock();
@@ -3689,6 +3702,13 @@ fn spawn_detail_preload(
 fn apply_lightbox_view(w: &MainWindow, zoom: f32, fit: bool) {
     w.set_lightbox_zoom(zoom);
     w.set_lightbox_fit(fit);
+    // Pan is a persistent root property (set by wheel zoom / drag), so reset it
+    // here whenever we return to fit — on open, navigation, the Fit button, and
+    // the `0` key — so a stale pan can't surface on the next zoom.
+    if fit {
+        w.set_lightbox_pan_x(0.0);
+        w.set_lightbox_pan_y(0.0);
+    }
 }
 
 /// Apply an absolute zoom value to the lightbox: clamp, store, set fit=false,
