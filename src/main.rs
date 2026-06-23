@@ -133,6 +133,10 @@ enum Commands {
         /// Number of thumbnails to generate per size in this batch.
         #[arg(short, long, default_value_t = 50)]
         count: usize,
+        /// Generate ALL missing thumbnails for each requested size (loops in
+        /// batches of --count until none remain), instead of a single batch.
+        #[arg(long)]
+        all: bool,
     },
     /// Manage embedding models
     Models {
@@ -281,11 +285,17 @@ fn main() -> Result<()> {
             size,
             count,
             gui_sizes,
+            all,
         } => {
             let db_path = get_db_path(None)?;
             let mut db = imgfind::block_on(Database::new(&db_path))?;
             for s in resolve_thumbnail_sizes(&size, gui_sizes)? {
-                generate_thumbnails_batch(&mut db, s, count)?;
+                if all {
+                    let n = imgfind::thumbnail::generate_all_missing_thumbnails(&mut db, s, count)?;
+                    println!("Generated {} thumbnails of size {}px (all)", n, s.get());
+                } else {
+                    generate_thumbnails_batch(&mut db, s, count)?;
+                }
             }
         }
         Commands::Models { action } => {
