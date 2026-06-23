@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -45,10 +45,7 @@ pub fn plan(folder: &Path, create_new: bool) -> Vec<ChildCommandSpec> {
 /// `on_line`. Stops at the first non-zero exit. `RUST_LOG=info` is set on the
 /// child unless already set in this process's environment, so the live `tracing`
 /// progress lines reach the log pane (indicatif bars auto-hide when piped).
-pub fn run_plan(
-    specs: &[ChildCommandSpec],
-    mut on_line: impl FnMut(String) + Send,
-) -> Result<()> {
+pub fn run_plan(specs: &[ChildCommandSpec], mut on_line: impl FnMut(String) + Send) -> Result<()> {
     for spec in specs {
         let program = match spec.kind {
             ChildKind::Imgfind => imgfind::resolve_sibling_binary("imgfind"),

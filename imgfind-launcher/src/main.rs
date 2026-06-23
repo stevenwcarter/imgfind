@@ -188,9 +188,7 @@ fn main() -> Result<()> {
                     slint::invoke_from_event_loop(move || {
                         if let Some(win) = w.upgrade() {
                             let current = win.get_log_text();
-                            win.set_log_text(
-                                (current.as_str().to_owned() + &appended).into(),
-                            );
+                            win.set_log_text((current.as_str().to_owned() + &appended).into());
                         }
                     })
                     .ok();
@@ -273,7 +271,11 @@ fn main() -> Result<()> {
 /// Spawn `imgfind-gui --dir <root>` in the background (fire-and-forget).
 fn spawn_gui(root: &std::path::Path) {
     let bin = imgfind::resolve_sibling_binary("imgfind-gui");
-    if let Err(e) = std::process::Command::new(&bin).arg("--dir").arg(root).spawn() {
+    if let Err(e) = std::process::Command::new(&bin)
+        .arg("--dir")
+        .arg(root)
+        .spawn()
+    {
         tracing::error!("failed to spawn imgfind-gui: {e}");
     }
 }

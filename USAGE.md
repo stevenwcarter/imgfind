@@ -122,13 +122,16 @@ Note: the map view is not yet ported to the GUI.
 
 Generate thumbnails in batches (also done automatically during indexing unless `--no-thumbnails`):
 ```bash
-imgfind thumbnails                    # generate missing 300px thumbnails (default, batch of 50)
+imgfind thumbnails                           # generate missing 300px thumbnails (default, batch of 50)
 imgfind thumbnails --size 300 --size 512 --size 2048  # one or more explicit sizes
-imgfind thumbnails --gui-sizes        # shorthand for all three GUI sizes (300, 512, 2048)
-imgfind thumbnails --gui-sizes --count 200  # larger batch per size
+imgfind thumbnails --gui-sizes               # shorthand for all three GUI sizes (300, 512, 2048)
+imgfind thumbnails --gui-sizes --count 200   # larger batch per size
+imgfind thumbnails --gui-sizes --all         # loop batches until ALL missing thumbnails are generated
 ```
 
 The GUI uses three thumbnail sizes: **300px** (grid tiles), **512px** (detail panel), and **2048px** (lightbox/preview, long-edge). All three are persisted in the DB so repeat views load instantly. Pass `--gui-sizes` to pre-generate all three before the first launch to avoid per-image decode on first view.
+
+`--all` loops batches of `--count` (default 50) until no thumbnails remain missing for the requested sizes. Useful for a one-shot "fill in everything" run, and is what `imgfind-launcher` runs in the background after indexing a new folder (`imgfind thumbnails --gui-sizes --all`).
 
 ### 6. Manage Embedding Models
 

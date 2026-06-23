@@ -259,8 +259,12 @@ mod tests {
         }
     }
     impl ThumbnailBatcher for FakeBatcher {
-        fn remaining(&mut self) -> Result<usize> { Ok(Self::pop(&self.remaining)) }
-        fn generate_batch(&mut self) -> Result<usize> { Ok(Self::pop(&self.generated)) }
+        fn remaining(&mut self) -> Result<usize> {
+            Ok(Self::pop(&self.remaining))
+        }
+        fn generate_batch(&mut self) -> Result<usize> {
+            Ok(Self::pop(&self.generated))
+        }
     }
 
     #[test]

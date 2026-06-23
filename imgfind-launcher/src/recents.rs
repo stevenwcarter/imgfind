@@ -125,8 +125,10 @@ mod tests {
         let mut r = Recents::default();
         r.record(&a, 1);
         // Push a bogus entry that does not exist.
-        r.entries
-            .push(RecentEntry { root: tmp.path().join("gone"), last_opened: 2 });
+        r.entries.push(RecentEntry {
+            root: tmp.path().join("gone"),
+            last_opened: 2,
+        });
         r.prune_missing();
         assert_eq!(r.entries.len(), 1);
         assert_eq!(r.entries[0].root, a.canonicalize().unwrap());
