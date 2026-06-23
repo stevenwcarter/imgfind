@@ -2,7 +2,8 @@
 //!
 //! `TursoPool` wraps a [`deadpool`] managed pool around a [`turso::Database`],
 //! giving callers a `get()` that checks out a ready-to-use connection with
-//! per-connection PRAGMAs already applied.
+//! per-connection settings already applied (a 5 s busy timeout, plus the
+//! `foreign_keys = ON` and `journal_mode = WAL` PRAGMAs).
 use anyhow::{Context, Result};
 use deadpool::managed::{Manager, Metrics, Pool, RecycleResult};
 use std::path::{Path, PathBuf};
@@ -18,6 +19,12 @@ impl Manager for TursoManager {
 
     async fn create(&self) -> std::result::Result<turso::Connection, turso::Error> {
         let conn = self.db.connect()?;
+        // Without a busy timeout, turso defaults to `BusyHandler::None`, so a
+        // second concurrent writer under WAL's single-writer lock fails
+        // immediately with `SQLITE_BUSY` ("database is locked") instead of
+        // waiting and retrying (e.g. the lightbox full-res store racing the
+        // grid thumbnail worker). 5000 ms matches turso's own sync default.
+        conn.busy_timeout(std::time::Duration::from_millis(5000))?;
         conn.execute("PRAGMA foreign_keys = ON", ()).await?;
         // `PRAGMA journal_mode = WAL` returns a result row ("wal"); use `query`
         // and drain it so turso does not treat the row as an unexpected result.
@@ -83,5 +90,55 @@ mod tests {
         let mut rows = conn.query("SELECT 1", ()).await.unwrap();
         let row = rows.next().await.unwrap().unwrap();
         assert_eq!(row.get_value(0).unwrap().as_integer().copied(), Some(1_i64));
+    }
+
+    /// Regression test: concurrent WAL writers must not fail immediately with
+    /// `SQLITE_BUSY` ("database is locked"). Reproduces the lightbox full-res
+    /// store racing the grid thumbnail worker. Requires a file-backed DB —
+    /// `:memory:` does not exercise WAL's single-writer lock.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_writers_do_not_hit_database_locked() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("contention.db");
+        let pool = TursoPool::open(&db_path, 8).await.unwrap();
+
+        {
+            let conn = pool.get().await.unwrap();
+            conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, blob BLOB)", ())
+                .await
+                .unwrap();
+        }
+
+        const TASKS: usize = 8;
+        const WRITES_PER_TASK: usize = 40;
+        let blob = vec![0xab_u8; 256 * 1024];
+
+        let mut handles = Vec::with_capacity(TASKS);
+        for task in 0..TASKS {
+            let pool = pool.clone();
+            let blob = blob.clone();
+            handles.push(tokio::spawn(async move {
+                for i in 0..WRITES_PER_TASK {
+                    let conn = pool.get().await.map_err(|e| e.to_string())?;
+                    let id = (task * WRITES_PER_TASK + i) as i64;
+                    conn.execute(
+                        "INSERT OR REPLACE INTO t (id, blob) VALUES (?, ?)",
+                        (id, blob.clone()),
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+                }
+                Ok::<(), String>(())
+            }));
+        }
+
+        for handle in handles {
+            let result = handle.await.unwrap();
+            assert!(
+                result.is_ok(),
+                "concurrent writer failed: {}",
+                result.unwrap_err()
+            );
+        }
     }
 }

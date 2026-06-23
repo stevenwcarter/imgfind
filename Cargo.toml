@@ -63,3 +63,4 @@ serde_json = "1.0"
 
 [dev-dependencies]
 insta = "1.48"
+tempfile = "3.27.0"
