@@ -1,13 +1,9 @@
-// Public API not yet wired into the UI — suppress dead_code until the next task
-// integrates this module into the launcher window.
-#![allow(dead_code)]
-
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Maximum number of remembered libraries.
-pub const MAX_RECENTS: usize = 20;
+pub(crate) const MAX_RECENTS: usize = 20;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecentEntry {

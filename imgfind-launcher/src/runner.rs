@@ -1,20 +1,16 @@
-// Public API not yet wired into the UI — suppress dead_code until the next task
-// integrates this module into the launcher window.
-#![allow(dead_code)]
-
 use anyhow::{bail, Context, Result};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChildKind {
+pub(crate) enum ChildKind {
     Imgfind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChildCommandSpec {
-    pub kind: ChildKind,
+    pub(crate) kind: ChildKind,
     pub args: Vec<String>,
     pub cwd: PathBuf,
 }
