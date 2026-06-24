@@ -4,7 +4,7 @@
 
 `imgfind` is a Rust-based tool for finding images by natural-language query. It uses CLIP embeddings to compute semantic similarity between a text prompt and indexed image content.
 
-The project ships as a **2-crate workspace**: a core `imgfind` binary (CLI + ratatui TUI) and a separate `imgfind-gui` binary (native Slint desktop GUI).
+The project ships as a **3-crate workspace**: a core `imgfind` binary (CLI + ratatui TUI), a separate `imgfind-gui` binary (native Slint desktop GUI), and `imgfind-launcher` (desktop front-door launcher).
 
 ## Features
 
@@ -171,6 +171,10 @@ Launch with `imgfind gui` (or `imgfind-gui` directly). The GUI restores the prev
 | `ft` | Toggle the tag filter on/off |
 
 Color brushes are input shortcuts only — a brush is a set of tags; no color is stored on an image. Brushes and filter state persist across sessions. Tag filtering (AND/OR, enable toggle) appears in the filter pane and combines with the size/type/GPS filters.
+
+## Launcher
+
+`imgfind-launcher` is the desktop "front door" — launch it from the OS app menu or by running `imgfind-launcher`. It shows recently-opened libraries and lets you open one (or pick another folder) directly in the GUI; it can also kick off indexing for a new or existing library and streams live progress. No CLIP model is loaded by the launcher itself.
 
 ## Configuration
 

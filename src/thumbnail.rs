@@ -190,11 +190,111 @@ pub fn get_or_generate_thumbnail(
     block_on(db.get_thumbnail(hash, spec)).context("Failed to retrieve newly generated thumbnail")
 }
 
+/// Abstraction over "how many thumbnails are missing" and "generate one batch",
+/// so the loop control in `run_until_complete` can be tested with a fake.
+pub trait ThumbnailBatcher {
+    fn remaining(&mut self) -> Result<usize>;
+    fn generate_batch(&mut self) -> Result<usize>;
+}
+
+/// Drive batched generation to completion. Stops when nothing remains, OR when a
+/// batch makes zero forward progress (guards against permanently-undecodable
+/// images so the loop can never run forever). Returns the total generated.
+pub fn run_until_complete(b: &mut impl ThumbnailBatcher) -> Result<usize> {
+    let mut total = 0usize;
+    loop {
+        if b.remaining()? == 0 {
+            break;
+        }
+        let generated = b.generate_batch()?;
+        total += generated;
+        if generated == 0 {
+            break;
+        }
+    }
+    Ok(total)
+}
+
+/// Real `ThumbnailBatcher` over a database + target size + per-batch count.
+struct DbThumbnailBatcher<'a> {
+    db: &'a mut Database,
+    size: ThumbnailSize,
+    batch: usize,
+}
+impl ThumbnailBatcher for DbThumbnailBatcher<'_> {
+    fn remaining(&mut self) -> Result<usize> {
+        block_on(self.db.count_images_without_thumbnails(self.size))
+    }
+    fn generate_batch(&mut self) -> Result<usize> {
+        generate_missing_thumbnails_batch(self.db, self.size, self.batch)
+    }
+}
+
+/// Generate *every* missing thumbnail of `size`, in batches of `batch`.
+pub fn generate_all_missing_thumbnails(
+    db: &mut Database,
+    size: ThumbnailSize,
+    batch: usize,
+) -> Result<usize> {
+    let mut b = DbThumbnailBatcher { db, size, batch };
+    run_until_complete(&mut b)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use image::{ImageBuffer, Rgb};
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Scripted fake batcher: `remaining` and `generated` are popped front-to-back;
+    /// when a sequence is exhausted its last value repeats.
+    struct FakeBatcher {
+        remaining: std::cell::RefCell<Vec<usize>>,
+        generated: std::cell::RefCell<Vec<usize>>,
+    }
+    impl FakeBatcher {
+        fn pop(seq: &std::cell::RefCell<Vec<usize>>) -> usize {
+            let mut v = seq.borrow_mut();
+            if v.len() > 1 { v.remove(0) } else { v[0] }
+        }
+    }
+    impl ThumbnailBatcher for FakeBatcher {
+        fn remaining(&mut self) -> Result<usize> {
+            Ok(Self::pop(&self.remaining))
+        }
+        fn generate_batch(&mut self) -> Result<usize> {
+            Ok(Self::pop(&self.generated))
+        }
+    }
+
+    #[test]
+    fn run_until_complete_stops_when_none_remain() {
+        let mut b = FakeBatcher {
+            remaining: std::cell::RefCell::new(vec![5, 0]),
+            generated: std::cell::RefCell::new(vec![5]),
+        };
+        assert_eq!(run_until_complete(&mut b).unwrap(), 5);
+    }
+
+    #[test]
+    fn run_until_complete_stops_on_zero_progress() {
+        // 2 images remain forever (undecodable); each batch generates 0.
+        let mut b = FakeBatcher {
+            remaining: std::cell::RefCell::new(vec![2]),
+            generated: std::cell::RefCell::new(vec![0]),
+        };
+        // Must terminate (not hang) and report zero generated.
+        assert_eq!(run_until_complete(&mut b).unwrap(), 0);
+    }
+
+    #[test]
+    fn run_until_complete_sums_then_stops_on_zero_progress() {
+        let mut b = FakeBatcher {
+            remaining: std::cell::RefCell::new(vec![4, 2, 2]),
+            generated: std::cell::RefCell::new(vec![2, 0]),
+        };
+        assert_eq!(run_until_complete(&mut b).unwrap(), 2);
+    }
 
     /// Returns a unique `<tmpdir>/.imgfind/imgfind.db` path per test invocation.
     fn temp_db_path() -> std::path::PathBuf {

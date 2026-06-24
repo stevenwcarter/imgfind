@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use dirs::home_dir;
 use std::{
+    ffi::OsString,
     fs,
     future::Future,
     path::{Path, PathBuf},
@@ -47,6 +48,46 @@ pub mod vector_sql;
 pub use ids::{CollectionId, ImageId, TagId};
 pub use units::{EmbeddingDim, FileSize, MaxK, ThumbnailSize, ThumbnailSpec};
 
+/// Walk up from `start` (inclusive) and return the first directory that
+/// contains a `.imgfind/imgfind.db`, or `None` if no ancestor does. Pure
+/// lookup: never creates anything and never falls back to `~/.imgfind`.
+pub fn find_db_root_upward(start: &Path) -> Option<PathBuf> {
+    let mut dir = start.to_path_buf();
+    loop {
+        if dir.join(".imgfind").join("imgfind.db").exists() {
+            return Some(dir);
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent.to_path_buf(),
+            None => return None,
+        }
+    }
+}
+
+/// Resolve a sibling executable: prefer one next to the current executable
+/// (the `install.sh` / cargo target layout), else fall back to the bare name
+/// for a `PATH` lookup. Used to spawn `imgfind` / `imgfind-gui` from sibling
+/// binaries (e.g. the launcher, `imgfind gui`).
+pub fn resolve_sibling_binary(name: &str) -> OsString {
+    sibling_binary_from(std::env::current_exe().ok().as_deref(), name, |p| {
+        p.exists()
+    })
+}
+
+fn sibling_binary_from(
+    current_exe: Option<&Path>,
+    name: &str,
+    exists: impl Fn(&Path) -> bool,
+) -> OsString {
+    if let Some(exe) = current_exe {
+        let cand = exe.with_file_name(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+        if exists(&cand) {
+            return cand.into_os_string();
+        }
+    }
+    OsString::from(name)
+}
+
 pub fn get_db_path(dir: Option<&str>) -> Result<PathBuf> {
     // First, try to find existing database by walking up directory tree
     if let Some(dir) = dir {
@@ -58,19 +99,9 @@ pub fn get_db_path(dir: Option<&str>) -> Result<PathBuf> {
         }
     }
 
-    let mut current_dir = std::env::current_dir().context("Failed to get current directory")?;
-
-    loop {
-        let potential_db = current_dir.join(".imgfind").join("imgfind.db");
-        if potential_db.exists() {
-            return Ok(potential_db);
-        }
-
-        if let Some(parent) = current_dir.parent() {
-            current_dir = parent.to_path_buf();
-        } else {
-            break;
-        }
+    let current_dir = std::env::current_dir().context("Failed to get current directory")?;
+    if let Some(root) = find_db_root_upward(&current_dir) {
+        return Ok(root.join(".imgfind").join("imgfind.db"));
     }
 
     // Default to ~/.imgfind/imgfind.db
@@ -171,6 +202,35 @@ pub fn relative_to_abs_path(rel_path: &Path, db_parent: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    #[test]
+    fn find_db_root_upward_finds_at_start() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("lib");
+        fs::create_dir_all(root.join(".imgfind")).unwrap();
+        fs::write(root.join(".imgfind").join("imgfind.db"), b"x").unwrap();
+        assert_eq!(find_db_root_upward(&root), Some(root.clone()));
+    }
+
+    #[test]
+    fn find_db_root_upward_finds_at_ancestor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("lib");
+        let deep = root.join("a").join("b");
+        fs::create_dir_all(&deep).unwrap();
+        fs::create_dir_all(root.join(".imgfind")).unwrap();
+        fs::write(root.join(".imgfind").join("imgfind.db"), b"x").unwrap();
+        assert_eq!(find_db_root_upward(&deep), Some(root.clone()));
+    }
+
+    #[test]
+    fn find_db_root_upward_none_when_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let deep = tmp.path().join("a").join("b");
+        fs::create_dir_all(&deep).unwrap();
+        assert_eq!(find_db_root_upward(&deep), None);
+    }
 
     #[test]
     fn rel_abs_roundtrip_within_base() {
@@ -186,5 +246,29 @@ mod tests {
         let base = Path::new("/data");
         let abs = AbsolutePath(PathBuf::from("/other/a.jpg"));
         assert!(abs.to_relative(base).is_err());
+    }
+
+    #[test]
+    fn sibling_binary_prefers_existing_sibling() {
+        let exe = PathBuf::from("/opt/app/imgfind");
+        let got = sibling_binary_from(Some(&exe), "imgfind-gui", |_p| true);
+        let want = PathBuf::from(format!(
+            "/opt/app/imgfind-gui{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        assert_eq!(got, want.into_os_string());
+    }
+
+    #[test]
+    fn sibling_binary_falls_back_to_bare_name_when_missing() {
+        let exe = PathBuf::from("/opt/app/imgfind");
+        let got = sibling_binary_from(Some(&exe), "imgfind-gui", |_p| false);
+        assert_eq!(got, std::ffi::OsString::from("imgfind-gui"));
+    }
+
+    #[test]
+    fn sibling_binary_bare_name_when_no_current_exe() {
+        let got = sibling_binary_from(None, "imgfind-gui", |_p| true);
+        assert_eq!(got, std::ffi::OsString::from("imgfind-gui"));
     }
 }
