@@ -59,3 +59,4 @@ minimum-system-version = "10.15"
 # is the documented mechanism (wix.fragment_paths → Vec<PathBuf>).
 [package.metadata.packager.wix]
 fragment-paths = ["../packaging/wix-path-env.wxs"]
+component-group-refs = ["SetPathEnvGroup"]

@@ -2,17 +2,18 @@
 <!--
   WiX fragment: add the imgfind install directory to the system PATH.
 
-  cargo-packager (wix.fragment_paths) merges this fragment into the generated
-  .wxsi installer.  The Environment element appends [INSTALLDIR] to the
-  system-level PATH on install and removes it on uninstall.
+  cargo-packager (wix.fragment-paths) merges this fragment into the generated
+  MSI installer.  The ComponentGroup is pulled in via wix.component-group-refs
+  in imgfind-launcher/Cargo.toml, which causes the WiX linker to reference
+  SetPathEnvGroup from cargo-packager's generated Feature element.
 
-  Referenced from [package.metadata.packager.wix] fragment_paths in
-  imgfind-launcher/Cargo.toml.
+  The Environment element appends [INSTALLDIR] to the system-level PATH on
+  install and removes the entry on uninstall (Permanent="no").
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Fragment>
     <DirectoryRef Id="INSTALLDIR">
-      <Component Id="SetPathEnv" Guid="a1b2c3d4-e5f6-7890-abcd-ef1234567890">
+      <Component Id="SetPathEnv" Guid="4e41b861-d59d-438f-a4c3-5d3b5e666776" KeyPath="yes">
         <Environment
           Id="PATH"
           Name="PATH"
@@ -25,8 +26,8 @@
       </Component>
     </DirectoryRef>
 
-    <Feature Id="PathFeature" Title="Add to PATH" Level="1">
+    <ComponentGroup Id="SetPathEnvGroup">
       <ComponentRef Id="SetPathEnv" />
-    </Feature>
+    </ComponentGroup>
   </Fragment>
 </Wix>
