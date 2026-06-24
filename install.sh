@@ -44,13 +44,16 @@ if [ -f "$LAUNCHER_BINARY" ]; then
     chmod +x "$LOCAL_BIN/imgfind-launcher"
 
     # Install a desktop entry so it shows up in the OS application menu.
-    DESKTOP_DIR="$HOME/.local/share/applications"
-    mkdir -p "$DESKTOP_DIR"
-    DESKTOP_SRC="$PROJECT_DIR/packaging/imgfind-launcher.desktop"
-    if [ -f "$DESKTOP_SRC" ]; then
-        echo "🖥  Installing desktop entry to $DESKTOP_DIR..."
-        sed "s|^Exec=imgfind-launcher\$|Exec=$LOCAL_BIN/imgfind-launcher|" \
-            "$DESKTOP_SRC" > "$DESKTOP_DIR/imgfind-launcher.desktop"
+    # XDG .desktop entries are Linux-only; skip on macOS/other platforms.
+    if [ "$(uname -s)" = "Linux" ]; then
+        DESKTOP_DIR="$HOME/.local/share/applications"
+        mkdir -p "$DESKTOP_DIR"
+        DESKTOP_SRC="$PROJECT_DIR/packaging/imgfind-launcher.desktop"
+        if [ -f "$DESKTOP_SRC" ]; then
+            echo "🖥  Installing desktop entry to $DESKTOP_DIR..."
+            sed "s|^Exec=imgfind-launcher\$|Exec=$LOCAL_BIN/imgfind-launcher|" \
+                "$DESKTOP_SRC" > "$DESKTOP_DIR/imgfind-launcher.desktop"
+        fi
     fi
 fi
 
