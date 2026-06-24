@@ -75,7 +75,8 @@ jobs:
         working-directory: imgfind
         run: |
           cargo build --release -p imgfind-launcher -p imgfind-gui -p imgfind
-          STAGE=imgfind-${GITHUB_REF_NAME}-linux-x86_64
+          SAFE_REF="${GITHUB_REF_NAME//\//-}"
+          STAGE=imgfind-${SAFE_REF}-linux-x86_64
           mkdir -p "$STAGE/packaging"
           cp target/release/imgfind target/release/imgfind-gui target/release/imgfind-launcher "$STAGE/"
           cp install.sh "$STAGE/"
@@ -87,10 +88,11 @@ jobs:
         working-directory: imgfind
         shell: bash
         run: |
+          SAFE_REF="${GITHUB_REF_NAME//\//-}"
           mkdir -p ../dist
           # dmg/msi land under target/<something>; find and rename.
-          find target -maxdepth 4 -name '*.dmg' -exec cp {} "../dist/imgfind-${GITHUB_REF_NAME}-macos-universal.dmg" \; 2>/dev/null || true
-          find target -maxdepth 4 -name '*.msi' -exec cp {} "../dist/imgfind-${GITHUB_REF_NAME}-windows-x86_64.msi" \; 2>/dev/null || true
+          find target -maxdepth 4 -name '*.dmg' -exec cp {} "../dist/imgfind-${SAFE_REF}-macos-universal.dmg" \; 2>/dev/null || true
+          find target -maxdepth 4 -name '*.msi' -exec cp {} "../dist/imgfind-${SAFE_REF}-windows-x86_64.msi" \; 2>/dev/null || true
           cp imgfind-*-linux-x86_64.tar.gz ../dist/ 2>/dev/null || true
 
       - uses: actions/upload-artifact@v4
