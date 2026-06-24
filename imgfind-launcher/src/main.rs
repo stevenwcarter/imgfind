@@ -78,12 +78,7 @@ fn main() -> Result<()> {
         let recents_path = recents_path.clone();
         window.on_open_root(move |root_str| {
             let root = PathBuf::from(root_str.as_str());
-            if let Some(path) = recents_path.as_deref() {
-                let mut r = Recents::load_from(path);
-                r.record(&root, now_secs());
-                r.save_to(path)
-                    .unwrap_or_else(|e| tracing::warn!("failed to save recents: {e}"));
-            }
+            record_recent(recents_path.as_deref(), &root);
             spawn_gui(&root);
             if let Some(w) = weak.upgrade() {
                 let _ = w.hide();
@@ -96,11 +91,12 @@ fn main() -> Result<()> {
     {
         let weak = window.as_weak();
         let pending_folder = Rc::clone(&pending_folder);
+        let recents_path = recents_path.clone();
         window.on_open_other(move || {
             let Some(folder) = rfd::FileDialog::new().pick_folder() else {
                 return;
             };
-            if let Some(root) = imgfind::find_db_root_upward(&folder) {
+            if let Some(root) = open_existing_library(&folder, recents_path.as_deref()) {
                 spawn_gui(&root);
                 if let Some(w) = weak.upgrade() {
                     let _ = w.hide();
@@ -198,13 +194,7 @@ fn main() -> Result<()> {
                     if let Some(win) = weak_bg.upgrade() {
                         match result {
                             Ok(()) => {
-                                if let Some(path) = recents_path_bg.as_deref() {
-                                    let mut r = Recents::load_from(path);
-                                    r.record(&run_root, now_secs());
-                                    r.save_to(path).unwrap_or_else(|e| {
-                                        tracing::warn!("failed to save recents: {e}");
-                                    });
-                                }
+                                record_recent(recents_path_bg.as_deref(), &run_root);
                                 // Store the resolved root; guard drops before UI calls.
                                 *resolved_root_bg.lock().unwrap() = Some(run_root);
                                 win.set_status_line("Done".into());
@@ -268,6 +258,29 @@ fn main() -> Result<()> {
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
+/// Load recents from `path` (if any), record `root` at the front, and persist.
+/// Save failures are logged, not propagated — recents are best-effort.
+fn record_recent(recents_path: Option<&std::path::Path>, root: &std::path::Path) {
+    let Some(path) = recents_path else { return };
+    let mut r = Recents::load_from(path);
+    r.record(root, now_secs());
+    r.save_to(path)
+        .unwrap_or_else(|e| tracing::warn!("failed to save recents: {e}"));
+}
+
+/// Resolve a user-picked `folder` to an existing library root, recording it as
+/// most-recently-used. Returns `Some(root)` when a library was found (and
+/// recorded) — the caller should open it — or `None` when the folder has no
+/// library yet and must be indexed.
+fn open_existing_library(
+    folder: &std::path::Path,
+    recents_path: Option<&std::path::Path>,
+) -> Option<PathBuf> {
+    let root = imgfind::find_db_root_upward(folder)?;
+    record_recent(recents_path, &root);
+    Some(root)
+}
+
 /// Spawn `imgfind-gui --dir <root>` in the background (fire-and-forget).
 fn spawn_gui(root: &std::path::Path) {
     let bin = imgfind::resolve_sibling_binary("imgfind-gui");
@@ -329,5 +342,32 @@ mod tests {
         assert_eq!(abbrev_home("/home/steve/photos", Some(home)), "~/photos");
         assert_eq!(abbrev_home("/other/path", Some(home)), "/other/path");
         assert_eq!(abbrev_home("/any/path", None), "/any/path");
+    }
+
+    #[test]
+    fn open_existing_library_records_recent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("photos");
+        std::fs::create_dir_all(lib.join(".imgfind")).unwrap();
+        std::fs::write(lib.join(".imgfind").join("imgfind.db"), b"x").unwrap();
+        let recents_path = tmp.path().join("recent.json");
+
+        let root = open_existing_library(&lib, Some(&recents_path));
+        assert_eq!(root, Some(lib.clone()));
+
+        let loaded = Recents::load_from(&recents_path);
+        assert_eq!(loaded.entries.len(), 1);
+        assert_eq!(loaded.entries[0].root, lib.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn open_existing_library_none_and_records_nothing_when_no_db() {
+        let tmp = tempfile::tempdir().unwrap();
+        let folder = tmp.path().join("plain");
+        std::fs::create_dir_all(&folder).unwrap();
+        let recents_path = tmp.path().join("recent.json");
+
+        assert!(open_existing_library(&folder, Some(&recents_path)).is_none());
+        assert!(!recents_path.exists());
     }
 }
