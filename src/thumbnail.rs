@@ -1,4 +1,4 @@
-use crate::{ThumbnailSize, ThumbnailSpec, database::Database, get_db_path};
+use crate::{ThumbnailSize, ThumbnailSpec, database::Database, edits::ImageEdits, get_db_path};
 use anyhow::{Context, Result};
 
 /// Long-edge target for the GUI lightbox/preview cached render.
@@ -99,15 +99,31 @@ pub fn generate_missing_thumbnails_batch(
         flush(&mut buffer);
     });
 
+    // Fetch edits for each image on the coordinating thread before handing off to rayon
+    // workers.  The async DB call must not run inside a rayon task.
+    let images_with_edits: Vec<(crate::AbsolutePath, String, ImageEdits)> =
+        images_without_thumbnails
+            .into_iter()
+            .map(|(abs_path, hash)| {
+                let rel = abs_path.to_relative(&db.parent_dir).unwrap_or_else(|_| {
+                    crate::RelativePath(abs_path.0.clone())
+                });
+                let edits = block_on(db.get_image_edits(&rel)).unwrap_or_default();
+                (abs_path, hash, edits)
+            })
+            .collect();
+
     // Parallel generation of thumbnails (CPU-bound); each task sends bytes to single writer.
-    images_without_thumbnails
+    images_with_edits
         .par_iter()
-        .for_each(|(path, hash)| {
-            let path = path.as_str();
-            if let Err(e) = generate_and_store_thumbnail(path.as_ref(), hash, size, &tx) {
-                log::warn!("Failed to generate thumbnail for {}: {:?}", path, e);
+        .for_each(|(path, hash, edits)| {
+            let path_str = path.as_str();
+            if let Err(e) =
+                generate_and_store_thumbnail(path_str.as_ref(), hash, size, edits, &tx)
+            {
+                log::warn!("Failed to generate thumbnail for {}: {:?}", path_str, e);
             } else {
-                log::info!("Generated thumbnail for: {}", path);
+                log::info!("Generated thumbnail for: {}", path_str);
             }
         });
 
@@ -125,17 +141,27 @@ pub fn generate_missing_thumbnails_batch(
 // Generate JPEG bytes for a thumbnail rendition (pure aside from file IO).
 // `ScaleSize` downscales via the fast decode path; `FullSize` uses the
 // RAW-aware full-resolution decode and encodes at native dimensions.
-fn generate_thumbnail_bytes(filepath: &str, spec: ThumbnailSpec) -> Result<Vec<u8>> {
+// `edits` are applied after decode and before resize/encode; identity edits
+// short-circuit with no copy (see `apply_adjustments`).
+fn generate_thumbnail_bytes(
+    filepath: &str,
+    spec: ThumbnailSpec,
+    edits: &ImageEdits,
+) -> Result<Vec<u8>> {
     let path = std::path::Path::new(filepath);
     let out_image = match spec {
         ThumbnailSpec::ScaleSize(size) => {
-            let image = crate::decode::decode_image(path)
+            let img = crate::decode::decode_image(path)
                 .with_context(|| format!("Failed to decode image: {}", filepath))?;
+            let img = crate::edits::apply_adjustments(img, edits);
             let px = size.get();
-            image.resize(px, px, image::imageops::FilterType::Lanczos3)
+            img.resize(px, px, image::imageops::FilterType::Lanczos3)
         }
-        ThumbnailSpec::FullSize => crate::decode::decode_full_image(path)
-            .with_context(|| format!("Failed to decode full image: {}", filepath))?,
+        ThumbnailSpec::FullSize => {
+            let img = crate::decode::decode_full_image(path)
+                .with_context(|| format!("Failed to decode full image: {}", filepath))?;
+            crate::edits::apply_adjustments(img, edits)
+        }
     };
 
     let mut bytes: Vec<u8> = Vec::new();
@@ -150,9 +176,10 @@ fn generate_and_store_thumbnail(
     filepath: &str,
     hash: &str,
     size: ThumbnailSize,
+    edits: &ImageEdits,
     tx: &Sender<(String, u32, Vec<u8>)>,
 ) -> Result<()> {
-    let bytes = generate_thumbnail_bytes(filepath, ThumbnailSpec::ScaleSize(size))?;
+    let bytes = generate_thumbnail_bytes(filepath, ThumbnailSpec::ScaleSize(size), edits)?;
     tx.send((hash.to_string(), size.get(), bytes))
         .context("Failed to send thumbnail bytes over channel")?;
     Ok(())
@@ -183,8 +210,13 @@ pub fn get_or_generate_thumbnail(
         return Ok(thumbnail_data);
     }
 
-    // Miss: generate, persist, return.
-    let bytes = generate_thumbnail_bytes(filepath, spec)?;
+    // Miss: fetch edits (identity is the fast common case), generate, persist, return.
+    let abs = crate::AbsolutePath(std::path::PathBuf::from(filepath));
+    let rel = abs
+        .to_relative(&db.parent_dir)
+        .unwrap_or_else(|_| crate::RelativePath(abs.0.clone()));
+    let edits = block_on(db.get_image_edits(&rel)).unwrap_or_default();
+    let bytes = generate_thumbnail_bytes(filepath, spec, &edits)?;
     block_on(db.insert_thumbnail(hash, spec, &bytes))
         .context("Failed to store thumbnail in database")?;
     block_on(db.get_thumbnail(hash, spec)).context("Failed to retrieve newly generated thumbnail")
@@ -396,5 +428,38 @@ mod tests {
         // Persisted under size=0 and retrievable as FullSize.
         assert!(block_on(db.get_thumbnail(hash, ThumbnailSpec::FullSize)).is_ok());
         let _ = std::fs::remove_dir_all(parent_dir);
+    }
+
+    #[test]
+    fn edited_thumbnail_differs_from_unedited() {
+        // Build a small temp image file, generate at 64px with identity vs +2 EV.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.png");
+        image::RgbImage::from_pixel(80, 80, image::Rgb([100, 100, 100]))
+            .save(&path)
+            .unwrap();
+        let p = path.to_str().unwrap();
+        let plain = generate_thumbnail_bytes(
+            p,
+            ThumbnailSpec::ScaleSize(ThumbnailSize(64)),
+            &ImageEdits::identity(),
+        )
+        .unwrap();
+        let bright = generate_thumbnail_bytes(
+            p,
+            ThumbnailSpec::ScaleSize(ThumbnailSize(64)),
+            &ImageEdits { exposure: 2.0 },
+        )
+        .unwrap();
+        assert_ne!(plain, bright, "exposure edit must change generated thumbnail bytes");
+
+        // And identity equals a second identity render (determinism + true no-op).
+        let plain2 = generate_thumbnail_bytes(
+            p,
+            ThumbnailSpec::ScaleSize(ThumbnailSize(64)),
+            &ImageEdits::identity(),
+        )
+        .unwrap();
+        assert_eq!(plain, plain2);
     }
 }
