@@ -222,6 +222,37 @@ pub fn get_or_generate_thumbnail(
     block_on(db.get_thumbnail(hash, spec)).context("Failed to retrieve newly generated thumbnail")
 }
 
+/// Regenerate all cached thumbnail sizes for a single image with new edits applied.
+///
+/// For each size currently stored under `hash`, decodes the original file at
+/// `abs_path`, applies `edits`, and overwrites the blob via `insert_thumbnail`.
+/// Returns the count of sizes regenerated.
+///
+/// The caller is responsible for ensuring `abs_path` still points to the
+/// original file (edits are non-destructive; originals are never modified).
+pub fn regenerate_thumbnails_for_image(
+    db: &Database,
+    abs_path: &str,
+    hash: &str,
+    edits: &ImageEdits,
+) -> anyhow::Result<usize> {
+    let sizes = block_on(db.get_thumbnail_sizes(hash))?;
+    let mut count = 0;
+    for size in sizes {
+        let spec = if size == 0 {
+            ThumbnailSpec::FullSize
+        } else {
+            ThumbnailSpec::ScaleSize(ThumbnailSize(size))
+        };
+        let bytes = generate_thumbnail_bytes(abs_path, spec, edits)
+            .with_context(|| format!("failed to regenerate thumbnail (spec={spec:?}) for {abs_path}"))?;
+        block_on(db.insert_thumbnail(hash, spec, &bytes))
+            .with_context(|| format!("failed to store regenerated thumbnail (spec={spec:?})"))?;
+        count += 1;
+    }
+    Ok(count)
+}
+
 /// Abstraction over "how many thumbnails are missing" and "generate one batch",
 /// so the loop control in `run_until_complete` can be tested with a fake.
 pub trait ThumbnailBatcher {
@@ -461,5 +492,62 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plain, plain2);
+    }
+
+    /// `regenerate_thumbnails_for_image` overwrites every cached size with the
+    /// new edits baked in — the stored bytes change for a non-identity edit.
+    #[test]
+    fn regenerate_overwrites_existing_sizes_with_edits() {
+        use crate::{ThumbnailSpec, edits::ImageEdits};
+
+        let db_path = temp_db_path();
+        let db = block_on(Database::new(&db_path)).expect("create test db");
+        let parent_dir = db_path.parent().unwrap().parent().unwrap();
+
+        // A small but real decodable image (80×80 mid-grey).
+        let img_path = parent_dir.join("regen_fixture.png");
+        image::RgbImage::from_pixel(80, 80, image::Rgb([120, 120, 120]))
+            .save(&img_path)
+            .expect("save fixture");
+        let abs_path = img_path.to_str().unwrap();
+        let hash = "regen_test_hash";
+
+        // Seed identity thumbnails at 64px and FullSize (size=0) so
+        // get_thumbnail_sizes returns both.
+        let identity_bytes_64 =
+            generate_thumbnail_bytes(abs_path, ThumbnailSpec::ScaleSize(ThumbnailSize(64)), &ImageEdits::identity())
+                .expect("identity 64");
+        let identity_bytes_full =
+            generate_thumbnail_bytes(abs_path, ThumbnailSpec::FullSize, &ImageEdits::identity())
+                .expect("identity full");
+
+        block_on(db.insert_thumbnail(hash, ThumbnailSpec::ScaleSize(ThumbnailSize(64)), &identity_bytes_64))
+            .expect("seed 64");
+        block_on(db.insert_thumbnail(hash, ThumbnailSpec::FullSize, &identity_bytes_full))
+            .expect("seed full");
+
+        // Capture what is currently stored for the 64px size.
+        let before_64 = block_on(db.get_thumbnail(hash, ThumbnailSpec::ScaleSize(ThumbnailSize(64))))
+            .expect("before 64");
+
+        // Regenerate with +2 EV — both sizes must change.
+        let n = super::regenerate_thumbnails_for_image(
+            &db,
+            abs_path,
+            hash,
+            &ImageEdits { exposure: 2.0 },
+        )
+        .expect("regenerate");
+
+        assert!(n >= 1, "at least one size should have been regenerated");
+
+        let after_64 = block_on(db.get_thumbnail(hash, ThumbnailSpec::ScaleSize(ThumbnailSize(64))))
+            .expect("after 64");
+        assert_ne!(
+            before_64, after_64,
+            "64px thumbnail bytes must change after +2 EV edit"
+        );
+
+        let _ = std::fs::remove_dir_all(parent_dir);
     }
 }
