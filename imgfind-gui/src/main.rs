@@ -4,6 +4,7 @@ mod backend;
 mod chords;
 mod detail;
 mod detail_cache;
+mod edits_ui;
 mod grid_index;
 mod image_util;
 mod loader;
@@ -355,6 +356,23 @@ fn main() -> Result<()> {
 
     // Current lightbox index. None when the lightbox is closed.
     let lb_index: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
+
+    // Unedited base image (lightbox-size) decoded on entering edit mode; the live
+    // exposure preview is `apply_adjustments(base.clone(), …)`. `None` when not
+    // in edit mode. Held in an Arc<Mutex<_>> so the background decode can store it
+    // and the exposure-changed handler can read it.
+    let lb_edit_base: Arc<Mutex<Option<image::DynamicImage>>> = Arc::new(Mutex::new(None));
+    // Last-accepted exposure for the current image (Reset target and discard
+    // restore value). Seeded from the DB when edit mode opens, updated on Accept.
+    let lb_last_accepted_exposure: Arc<Mutex<f32>> = Arc::new(Mutex::new(0.0));
+    // Monotonic guard for the live-preview render: each exposure change / base
+    // decode claims the next value, and a render only applies if it is still the
+    // latest, so a slow off-thread multiply can't clobber a newer slider value.
+    let lb_edit_generation: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+
+    // Grid-thumbnail paths to evict from the loader LRU after an edit is accepted,
+    // so the grid re-requests the rebaked thumbnail. Drained by the loader tick.
+    let evict_paths: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
     // Lightbox view state (GUI-runtime only; never persisted to ui_state).
     let lb_zoom: Arc<Mutex<f32>> = Arc::new(Mutex::new(1.0));
     let lb_fit: Arc<Mutex<bool>> = Arc::new(Mutex::new(true));
@@ -1065,6 +1083,13 @@ fn main() -> Result<()> {
         let preload_gen_prev = Arc::clone(&preload_generation);
         window.on_lightbox_prev(move || {
             tracing::debug!("lightbox-prev invoked");
+            // If edit mode is on, discard it first (revert + restore baked image)
+            // so navigation starts from a clean, non-edit state.
+            if let Some(w) = weak.upgrade()
+                && w.get_edit_mode()
+            {
+                w.invoke_edit_toggle();
+            }
             let new_idx = {
                 let mut guard = lb_ref.lock();
                 let current = guard.unwrap_or(0);
@@ -1145,6 +1170,13 @@ fn main() -> Result<()> {
         let preload_gen_next = Arc::clone(&preload_generation);
         window.on_lightbox_next(move || {
             tracing::debug!("lightbox-next invoked");
+            // If edit mode is on, discard it first (revert + restore baked image)
+            // so navigation starts from a clean, non-edit state.
+            if let Some(w) = weak.upgrade()
+                && w.get_edit_mode()
+            {
+                w.invoke_edit_toggle();
+            }
             let (new_idx, len) = {
                 let s = state_ref.lock();
                 let len = s.results().len();
@@ -1362,6 +1394,206 @@ fn main() -> Result<()> {
                     Arc::clone(&shown_fullres_step),
                 );
             }
+        });
+    }
+
+    // --- edit-toggle callback: enter/exit lightbox edit mode ---
+    //
+    // ENTER: read the stored exposure, seed the slider + last-accepted value,
+    // decode the UNEDITED original (lightbox-size) on a background thread, store
+    // it as the live-preview base, then render the preview at the stored exposure.
+    // EXIT (discard): restore the slider to the last-accepted exposure, drop the
+    // base, and reload the normal (baked) lightbox image.
+    {
+        let weak = window.as_weak();
+        let state_ref = Arc::clone(&state);
+        let lb_ref = Arc::clone(&lb_index);
+        let edit_base_ref = Arc::clone(&lb_edit_base);
+        let last_accepted_ref = Arc::clone(&lb_last_accepted_exposure);
+        let edit_gen_ref = Arc::clone(&lb_edit_generation);
+        let gen_ref = Arc::clone(&lb_generation);
+        let shown_fullres_ref = Arc::clone(&lb_shown_fullres);
+        let fit_scale_ref = Arc::clone(&lb_fit_scale);
+        let backend_edit = backend.clone();
+        window.on_edit_toggle(move || {
+            let Some(w) = weak.upgrade() else { return };
+            // Resolve the current image (lb_ref before state_ref, matching the
+            // zoom handlers' lock ordering).
+            let lb_idx = *lb_ref.lock();
+            let rel = state_ref
+                .lock()
+                .results()
+                .get(lb_idx.unwrap_or(0))
+                .map(|r| r.path.clone());
+
+            if w.get_edit_mode() {
+                // EXIT (discard): revert slider, clear base, restore baked image.
+                let restore = *last_accepted_ref.lock();
+                set_edit_exposure(&w, restore);
+                *edit_base_ref.lock() = None;
+                // Invalidate any in-flight preview render so a late one can't land.
+                edit_gen_ref.fetch_add(1, Ordering::SeqCst);
+                w.set_edit_mode(false);
+                if let Some(rel) = rel {
+                    load_lightbox_image(
+                        weak.clone(),
+                        backend_edit.clone(),
+                        rel,
+                        gen_ref.clone(),
+                        Arc::clone(&shown_fullres_ref),
+                        Arc::clone(&fit_scale_ref),
+                    );
+                }
+                return;
+            }
+
+            // ENTER edit mode.
+            let Some(rel) = rel else { return };
+            let stored = backend_edit
+                .image_edits(&rel)
+                .map(|e| e.exposure)
+                .unwrap_or_else(|e| {
+                    tracing::warn!("edit-mode: failed to read edits for {rel}: {e:#}");
+                    0.0
+                });
+            let exposure = edits_ui::clamp_exposure(stored);
+            *last_accepted_ref.lock() = exposure;
+            set_edit_exposure(&w, exposure);
+            w.set_edit_mode(true);
+            // Clear any prior base so a stale render can't read it before the new
+            // decode completes; the render is kicked from the decode thread.
+            *edit_base_ref.lock() = None;
+
+            // Decode the unedited original off-thread, then store + render.
+            let backend_d = backend_edit.clone();
+            let weak_d = weak.clone();
+            let base_d = Arc::clone(&edit_base_ref);
+            let gen_d = Arc::clone(&edit_gen_ref);
+            let rel_d = rel.clone();
+            std::thread::spawn(move || {
+                let img = match backend_d.decode_lightbox_base(&rel_d) {
+                    Ok(img) => img,
+                    Err(e) => {
+                        tracing::warn!("edit-mode: failed to decode base for {rel_d}: {e:#}");
+                        return;
+                    }
+                };
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(w) = weak_d.upgrade() else { return };
+                    // Bail if the user already left edit mode while we decoded.
+                    if !w.get_edit_mode() {
+                        return;
+                    }
+                    *base_d.lock() = Some(img);
+                    render_edit_preview(weak_d.clone(), base_d, gen_d, w.get_edit_exposure());
+                });
+            });
+        });
+    }
+
+    // --- edit-exposure-changed callback: live-preview a new slider value ---
+    {
+        let weak = window.as_weak();
+        let edit_base_ref = Arc::clone(&lb_edit_base);
+        let edit_gen_ref = Arc::clone(&lb_edit_generation);
+        window.on_edit_exposure_changed(move |v| {
+            let v = edits_ui::clamp_exposure(v);
+            if let Some(w) = weak.upgrade() {
+                set_edit_exposure(&w, v);
+            }
+            render_edit_preview(
+                weak.clone(),
+                Arc::clone(&edit_base_ref),
+                Arc::clone(&edit_gen_ref),
+                v,
+            );
+        });
+    }
+
+    // --- edit-reset callback: revert the slider to the last-accepted exposure ---
+    {
+        let weak = window.as_weak();
+        let edit_base_ref = Arc::clone(&lb_edit_base);
+        let edit_gen_ref = Arc::clone(&lb_edit_generation);
+        let last_accepted_ref = Arc::clone(&lb_last_accepted_exposure);
+        window.on_edit_reset(move || {
+            let v = *last_accepted_ref.lock();
+            if let Some(w) = weak.upgrade() {
+                set_edit_exposure(&w, v);
+            }
+            render_edit_preview(
+                weak.clone(),
+                Arc::clone(&edit_base_ref),
+                Arc::clone(&edit_gen_ref),
+                v,
+            );
+        });
+    }
+
+    // --- edit-accept callback: persist edits + rebake thumbnails, then exit ---
+    //
+    // The DB write and (potentially slow) thumbnail regeneration run on a
+    // background thread; on success the UI thread updates the last-accepted
+    // exposure, exits edit mode, queues the grid thumbnail for re-fetch, evicts
+    // the detail-panel cache entry, and reloads the now-baked lightbox image.
+    {
+        let weak = window.as_weak();
+        let state_ref = Arc::clone(&state);
+        let lb_ref = Arc::clone(&lb_index);
+        let edit_base_ref = Arc::clone(&lb_edit_base);
+        let last_accepted_ref = Arc::clone(&lb_last_accepted_exposure);
+        let edit_gen_ref = Arc::clone(&lb_edit_generation);
+        let gen_ref = Arc::clone(&lb_generation);
+        let shown_fullres_ref = Arc::clone(&lb_shown_fullres);
+        let fit_scale_ref = Arc::clone(&lb_fit_scale);
+        let evict_ref = Arc::clone(&evict_paths);
+        let backend_accept = backend.clone();
+        window.on_edit_accept(move || {
+            let Some(w) = weak.upgrade() else { return };
+            let lb_idx = *lb_ref.lock();
+            let rel = state_ref
+                .lock()
+                .results()
+                .get(lb_idx.unwrap_or(0))
+                .map(|r| r.path.clone());
+            let Some(rel) = rel else { return };
+            let exposure = edits_ui::clamp_exposure(w.get_edit_exposure());
+
+            let backend_a = backend_accept.clone();
+            let weak_a = weak.clone();
+            let last_accepted_a = Arc::clone(&last_accepted_ref);
+            let edit_base_a = Arc::clone(&edit_base_ref);
+            let edit_gen_a = Arc::clone(&edit_gen_ref);
+            let gen_a = gen_ref.clone();
+            let shown_fullres_a = Arc::clone(&shown_fullres_ref);
+            let fit_scale_a = Arc::clone(&fit_scale_ref);
+            let evict_a = Arc::clone(&evict_ref);
+            std::thread::spawn(move || {
+                let edits = imgfind::edits::ImageEdits { exposure };
+                if let Err(e) = backend_a.save_edits_and_regenerate(&rel, &edits) {
+                    tracing::warn!("edit-accept: failed to save/regenerate for {rel}: {e:#}");
+                    return;
+                }
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(w) = weak_a.upgrade() else { return };
+                    *last_accepted_a.lock() = exposure;
+                    *edit_base_a.lock() = None;
+                    edit_gen_a.fetch_add(1, Ordering::SeqCst);
+                    w.set_edit_mode(false);
+                    // Refresh the grid (LRU evict + re-request) and detail panel.
+                    evict_a.lock().insert(rel.clone());
+                    detail_cache::remove(&rel);
+                    // Reload the now-baked lightbox rendition.
+                    load_lightbox_image(
+                        weak_a.clone(),
+                        backend_a.clone(),
+                        rel,
+                        gen_a,
+                        shown_fullres_a,
+                        fit_scale_a,
+                    );
+                });
+            });
         });
     }
 
@@ -2172,6 +2404,7 @@ fn main() -> Result<()> {
         let grid_gen_ref = Arc::clone(&grid_generation);
         let selection_ref = Arc::clone(&selection);
         let selection_dirty_ref = Arc::clone(&selection_dirty);
+        let evict_paths_ref = Arc::clone(&evict_paths);
         // These are all !Send and owned solely by this UI-thread closure: never
         // wrap them in Arc/Mutex. `last_gen` lets the closure detect a new
         // result set (generation bumped elsewhere) and reset its window state.
@@ -2193,6 +2426,7 @@ fn main() -> Result<()> {
                 last_gen: &mut last_gen,
                 selection: &selection_ref,
                 selection_dirty: &selection_dirty_ref,
+                evict_paths: &evict_paths_ref,
             });
         });
     }
@@ -3007,6 +3241,11 @@ struct LoaderTick<'a> {
     // rebuild even when the visible window is otherwise unchanged.
     selection: &'a Arc<Mutex<selection::Selection>>,
     selection_dirty: &'a Arc<AtomicBool>,
+    // Paths whose decoded grid thumbnail must be dropped from the LRU (and any
+    // in-flight marker cleared) so the next tick re-requests the freshly rebaked
+    // bytes. Drained each tick; set by the edit-accept handler after it rewrites
+    // an image's cached thumbnails.
+    evict_paths: &'a Arc<Mutex<HashSet<String>>>,
 }
 
 /// One tick of the moving-window thumbnail loader, on the UI thread.
@@ -3030,6 +3269,23 @@ fn loader_tick(t: LoaderTick<'_>) {
         *t.last_range = None;
         t.in_flight.clear();
     }
+
+    // 0. Drop any paths the edit-accept handler asked us to refresh: evict the
+    // stale decoded image from the LRU and clear its in-flight marker so step 4
+    // re-requests the freshly rebaked bytes. `evicted` forces a rebuild so the
+    // tile flips to a placeholder until the new thumbnail lands.
+    let evicted = {
+        let mut q = t.evict_paths.lock();
+        if q.is_empty() {
+            false
+        } else {
+            for path in q.drain() {
+                t.cache.pop(&path);
+                t.in_flight.remove(&path);
+            }
+            true
+        }
+    };
 
     // 1. Drain decoded bytes into the cache (drop stale generations). Track
     // whether any current-gen thumbnail landed, so an unchanged window still
@@ -3070,7 +3326,7 @@ fn loader_tick(t: LoaderTick<'_>) {
     // tick does no UI work (cheap when idle).
     let selection_changed = t.selection_dirty.swap(false, Ordering::Relaxed);
     let range_changed = t.last_range.as_ref() != Some(&range);
-    if range_changed || gen_changed || cached_new || selection_changed {
+    if range_changed || gen_changed || cached_new || selection_changed || evicted {
         let sel = t.selection.lock().set().clone();
         rebuild_window(t.window, t.state_ref, t.cache, &range, &sel);
         if range_changed || gen_changed {
@@ -3870,6 +4126,48 @@ fn load_lightbox_fullres(
             shown_fullres.store(true, Ordering::SeqCst);
             // Swap pixels only — leave zoom/fit/pan state untouched.
             w.set_lightbox_image(image_util::dynamic_to_slint_image(&img));
+        })
+        .ok();
+    });
+}
+
+/// Set the edit-mode exposure value and its formatted readout together so the
+/// slider and the "Exposure: …" label never drift apart.
+fn set_edit_exposure(w: &MainWindow, v: f32) {
+    w.set_edit_exposure(v);
+    w.set_edit_exposure_label(edits_ui::format_exposure(v).into());
+}
+
+/// Render the live edit-mode preview: apply `exposure` to the (already-decoded)
+/// unedited base and swap the pixels into the lightbox, latest-wins guarded.
+///
+/// The pixel multiply runs on a background thread so dragging the slider never
+/// janks the UI; `slint::Image` is built and set on the UI thread. A render only
+/// applies if its captured `generation` is still current, so a slow multiply for
+/// a superseded slider value is dropped. The base image is `None` outside edit
+/// mode, in which case this is a no-op.
+fn render_edit_preview(
+    weak: Weak<MainWindow>,
+    base: Arc<Mutex<Option<image::DynamicImage>>>,
+    generation: Arc<AtomicU64>,
+    exposure: f32,
+) {
+    let my_gen = generation.fetch_add(1, Ordering::SeqCst) + 1;
+    let Some(base_img) = base.lock().clone() else {
+        return;
+    };
+    std::thread::spawn(move || {
+        let edits = imgfind::edits::ImageEdits {
+            exposure: edits_ui::clamp_exposure(exposure),
+        };
+        let adjusted = imgfind::edits::apply_adjustments(base_img, &edits);
+        slint::invoke_from_event_loop(move || {
+            // Drop if a newer slider value (or an edit-mode exit) superseded us.
+            if !is_current_generation(my_gen, generation.load(Ordering::SeqCst)) {
+                return;
+            }
+            let Some(w) = weak.upgrade() else { return };
+            w.set_lightbox_image(image_util::dynamic_to_slint_image(&adjusted));
         })
         .ok();
     });

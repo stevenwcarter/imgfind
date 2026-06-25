@@ -65,6 +65,8 @@ export component MainWindow inherits Window {
     // Lightbox edit-mode (image adjustments). Wired to Rust in Task 7.
     in-out property <bool> edit-mode;
     in-out property <float> edit-exposure;
+    // Formatted EV readout (e.g. "+1.30 EV"), set by Rust via edits_ui::format_exposure.
+    in property <string> edit-exposure-label: "0.00 EV";
     callback edit-toggle();
     callback edit-exposure-changed(float);
     callback edit-reset();
@@ -271,7 +273,18 @@ export component MainWindow inherits Window {
             // lightbox image too; anything else is swallowed (modal).
             if (root.lightbox-open) {
                 if (event.text == Key.Escape) {
-                    root.lightbox-close();
+                    // In edit mode Esc discards (exits edit mode); otherwise it
+                    // closes the lightbox. Rust's edit-toggle handler discards.
+                    if (root.edit-mode) {
+                        root.edit-toggle();
+                    } else {
+                        root.lightbox-close();
+                    }
+                    return accept;
+                }
+                // `e` toggles the adjustments (edit) sidebar.
+                if (event.text == "e" || event.text == "E") {
+                    root.edit-toggle();
                     return accept;
                 }
                 if (event.text == Key.LeftArrow || event.text == "h" || event.text == "H") {
@@ -1153,7 +1166,7 @@ export component MainWindow inherits Window {
                         font-size: 16px;
                     }
                     Text {
-                        text: "Exposure: " + (round(root.edit-exposure * 100) / 100) + " EV";
+                        text: "Exposure: " + root.edit-exposure-label;
                         color: #cccccc;
                         font-size: 12px;
                     }

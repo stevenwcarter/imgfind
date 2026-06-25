@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use clipper::ClipEmbedder;
 use imgfind::config::SearchConfig;
 use imgfind::database::{Database, ImageMetadata, extract_image_metadata};
+use imgfind::edits::ImageEdits;
 use imgfind::filters::Filters;
 use imgfind::ids::ImageId;
 use imgfind::search::SearchEngine;
@@ -157,6 +158,38 @@ impl Backend {
 
     pub fn abs_path(&self, rel_path: &str) -> PathBuf {
         relative_to_abs_path(std::path::Path::new(rel_path), &self.parent_dir)
+    }
+
+    /// Stored non-destructive edits for `rel_path` (identity when none).
+    pub fn image_edits(&self, rel_path: &str) -> Result<ImageEdits> {
+        imgfind::block_on(self.db.get_image_edits(&Self::rel(rel_path)))
+            .with_context(|| format!("read edits for {rel_path}"))
+    }
+
+    /// Decode the UNEDITED original of `rel_path` at the lightbox long-edge size,
+    /// for live edit-mode preview. Reads the original file directly (never the
+    /// baked thumbnail) so applying edits on top never compounds prior edits.
+    pub fn decode_lightbox_base(&self, rel_path: &str) -> Result<image::DynamicImage> {
+        let abs = self.abs_path(rel_path);
+        let img = imgfind::decode::decode_image(&abs)
+            .with_context(|| format!("decode original for edit preview: {rel_path}"))?;
+        let px = imgfind::thumbnail::LIGHTBOX_SIZE.get();
+        Ok(img.resize(px, px, image::imageops::FilterType::Lanczos3))
+    }
+
+    /// Persist `edits` for `rel_path` and rebake every cached thumbnail size so
+    /// the grid/detail/lightbox renditions reflect the new adjustment. Returns
+    /// the number of thumbnail sizes regenerated.
+    pub fn save_edits_and_regenerate(&self, rel_path: &str, edits: &ImageEdits) -> Result<usize> {
+        let rel = Self::rel(rel_path);
+        imgfind::block_on(self.db.set_image_edits(&rel, edits))
+            .with_context(|| format!("persist edits for {rel_path}"))?;
+        let hash = imgfind::block_on(self.db.get_image_hash(&rel))
+            .with_context(|| format!("No hash for {rel_path}"))?;
+        let abs = self.abs_path(rel_path);
+        let abs_str = abs.to_string_lossy();
+        imgfind::thumbnail::regenerate_thumbnails_for_image(&self.db, &abs_str, &hash, edits)
+            .with_context(|| format!("regenerate thumbnails for {rel_path}"))
     }
 
     /// EXIF/metadata for an indexed image.
