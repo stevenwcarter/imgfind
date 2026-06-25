@@ -84,6 +84,8 @@
 - Cargo-packager config bundling launcher + gui + cli([`02fa2af`](https://github.com/stevenwcarter/imgfind/commit/02fa2af053e920cdb1bf6427857fbc359342f969))
 - Release workflow building mac/windows/linux installers + actionlint guard([`f5fd92b`](https://github.com/stevenwcarter/imgfind/commit/f5fd92bddec0365eff914cd24676779c204f605c))
 - Re-encode app icon as 8-bit RGBA for installer icon generation([`8f85a8c`](https://github.com/stevenwcarter/imgfind/commit/8f85a8ccd3cc34218e395acd607ff2c6422dbd86))
+- Git-cliff config + initial CHANGELOG([`524d823`](https://github.com/stevenwcarter/imgfind/commit/524d82326753ed56173aede1de38761ed0622741))
+- Bump-version.sh (workspace version bump) with test([`45d9b72`](https://github.com/stevenwcarter/imgfind/commit/45d9b720bea06d1a68cfc51c011115bd63e7f387))
 
 ### Documentation
 
@@ -333,40 +335,3 @@
 - *(search)* Normalize query once in SearchEngine [P4]([`3687824`](https://github.com/stevenwcarter/imgfind/commit/3687824d3ddf6418a2c8b7afe591071ab846828e))
 - *(paths)* RelativePath/AbsolutePath newtypes at DB boundaries [W50]([`040c4ee`](https://github.com/stevenwcarter/imgfind/commit/040c4eec6598339da5a66c8387c76c42c289a141))
 - *(gui)* Remove unused window.rs helpers (need_slide/viewport_height/total_rows)([`d56036b`](https://github.com/stevenwcarter/imgfind/commit/d56036b090dc573cfc8fc67329717bffcb5174e6))
-
-### Plan
-
-- *(gui)* Lightbox zoom & pan implementation plan([`6bdd2fa`](https://github.com/stevenwcarter/imgfind/commit/6bdd2fa7a963beaf3864378325b49d0fe09d24b2))
-
-### Spec
-
-- *(gui)* Lightbox zoom & pan with progressive full-res([`c1aecee`](https://github.com/stevenwcarter/imgfind/commit/c1aecee0e4974a6750b64caa55bc85ac2f5eb6a8))
-
-### Tidy
-
-- *(tests)* Assert all five BrushColor indices [T1]([`f72ceb4`](https://github.com/stevenwcarter/imgfind/commit/f72ceb4dd53d0f5ae4a95c5f14b20eb2df57a41e))
-- *(idioms)* Drop redundant trim in add_words [T2]([`705a4fb`](https://github.com/stevenwcarter/imgfind/commit/705a4fb5ce3fb6ce291c604ec3fa252f2ac195b7))
-- *(fix)* Guard detail loads against rapid-nav races [T3]([`77651e2`](https://github.com/stevenwcarter/imgfind/commit/77651e2b8445949dc2639d0e94cd6746b2ff7382))
-- *(tests)* Add range→free reset test [T4]([`3f8bcfe`](https://github.com/stevenwcarter/imgfind/commit/3f8bcfe8a76f1a6887c5b4b0fcbb3364791ebaf8))
-- *(tests)* Assert selected byte total in statusline [T5]([`5d0f6e7`](https://github.com/stevenwcarter/imgfind/commit/5d0f6e7011eb4a518dc356948edc5a16256f1404))
-- *(duplication)* Share detail-refresh tail in tag apply [T6]([`8385eba`](https://github.com/stevenwcarter/imgfind/commit/8385eba5d9dae3aa0f3a2b8ecf6a7d0f7a9db7bb))
-- *(tests)* Use set_of helper in selection tests [T7]([`1ffa02e`](https://github.com/stevenwcarter/imgfind/commit/1ffa02e92d311bf647672c2be80b182f6e7a3457))
-- *(comments)* Refresh stale tile-clicked comment [T8]([`c9e5311`](https://github.com/stevenwcarter/imgfind/commit/c9e5311c73139606b6e34650fe458926db68df4b))
-- *(fix)* Bounds-check brush index with get [T9]([`7624595`](https://github.com/stevenwcarter/imgfind/commit/7624595f50413d316d87c8e2db53d89642968938))
-
-### Typecheck
-
-- *(newtype)* ImageId/TagId/CollectionId row-id newtypes [T1]([`274382d`](https://github.com/stevenwcarter/imgfind/commit/274382da27759377755a95e20c64260c6992b1c8))
-- *(newtype)* FileSize byte newtype [T7]([`7131ed6`](https://github.com/stevenwcarter/imgfind/commit/7131ed688a278727eabd5a048ec28eb299302a0b))
-- *(illegal-states)* TagFilter sum type on Filters [T3]([`fb377f8`](https://github.com/stevenwcarter/imgfind/commit/fb377f87c39142498752569617fd25eea4053236))
-- *(illegal-states)* GpsCoords pairs lat/lon on ImageMetadata [T4]([`442d677`](https://github.com/stevenwcarter/imgfind/commit/442d677eb62f0dab39f26f40d21979016eab3a1a))
-- *(newtype)* MaxK search-cap newtype [T5]([`32736b8`](https://github.com/stevenwcarter/imgfind/commit/32736b8df61404b743a504b1ba2e7c693512e95a))
-- *(newtype)* EmbeddingDim model-dimension newtype [T6]([`1cbf4c1`](https://github.com/stevenwcarter/imgfind/commit/1cbf4c1cd89b84ba62f195e3a7624d322bfc610d))
-- *(stringly-typed)* SortOption enum for GUI selector [T2]([`6e4a620`](https://github.com/stevenwcarter/imgfind/commit/6e4a620353db8fa911a2098749ea87930036feeb))
-- *(newtype)* Grid-nav index newtypes [T10]([`4ed8ede`](https://github.com/stevenwcarter/imgfind/commit/4ed8ede4f89c4759fb81779b03768063b6058bd6))
-- *(illegal-states)* SearchState Phase enum [T12]([`73a0175`](https://github.com/stevenwcarter/imgfind/commit/73a01752c49e4612961070905d18bb19acad64d7))
-- *(newtype)* ThumbnailSize pixel newtype [T11]([`ecf9e53`](https://github.com/stevenwcarter/imgfind/commit/ecf9e5311f5bfc11309798e527df18933fe6da12))
-
-### Wip
-
-- Fixing resize timing([`7750c6d`](https://github.com/stevenwcarter/imgfind/commit/7750c6db28264c8b33b9d9da093e8115f8e3e75d))

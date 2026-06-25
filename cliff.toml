@@ -58,8 +58,14 @@ commit_parsers = [
   { message = "^chore", skip = true },
   { message = "^style", skip = true },
   { message = "^test", skip = true },
+  { message = "^plan", skip = true },
+  { message = "^spec", skip = true },
+  { message = "^tidy", skip = true },
+  { message = "^typecheck", skip = true },
+  { message = "^wip", skip = true },
 ]
-# Exclude commits that are not matched by any commit parser.
+# Include commits not matched by any parser in the changelog (under their raw type as the group).
+# Set to true to exclude unmatched commits entirely.
 filter_commits = false
 # Fail on a commit that is not matched by any commit parser.
 fail_on_unmatched_commit = false
