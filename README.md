@@ -39,6 +39,12 @@ Prebuilt installers are attached to each [GitHub Release](https://github.com/ste
 ### Build from source
 See [CLAUDE.md](CLAUDE.md). Requires the sibling `clipper` repo checked out at `../clipper`.
 
+### Cutting a release (maintainers)
+
+`just release X.Y.Z` bumps the version, regenerates `CHANGELOG.md` (git-cliff),
+creates a GPG-signed `vX.Y.Z` tag, and pushes — triggering the installer build
+and a GitHub Release. Requires `git-cliff` (`cargo install git-cliff`).
+
 ## Quick Start
 
 ### Basic Usage
