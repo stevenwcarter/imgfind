@@ -569,10 +569,7 @@ impl Database {
     /// Returns [`crate::edits::ImageEdits::identity()`] when no row exists.
     /// The returned value is `.clamped()` so out-of-range DB values cannot
     /// reach the pixel pipeline.
-    pub async fn get_image_edits(
-        &self,
-        path: &RelativePath,
-    ) -> Result<crate::edits::ImageEdits> {
+    pub async fn get_image_edits(&self, path: &RelativePath) -> Result<crate::edits::ImageEdits> {
         let conn = self.pool.get().await.context("get connection")?;
         let mut rows = conn
             .query(
@@ -3057,10 +3054,7 @@ mod tests {
         db.set_image_edits(&rel_path, &ImageEdits { exposure: -0.75 })
             .await
             .unwrap();
-        assert_eq!(
-            db.get_image_edits(&rel_path).await.unwrap().exposure,
-            -0.75
-        );
+        assert_eq!(db.get_image_edits(&rel_path).await.unwrap().exposure, -0.75);
     }
 
     #[tokio::test]

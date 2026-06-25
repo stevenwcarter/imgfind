@@ -61,7 +61,7 @@ pub fn generate_missing_thumbnails_batch(
     let writer_db = match block_on(Database::new(&db_path)) {
         Ok(db) => db,
         Err(e) => {
-            log::error!("Writer thread failed to open database: {:?}", e);
+            tracing::error!("Writer thread failed to open database: {:?}", e);
             panic!("Cannot proceed without DB access");
         }
     };
@@ -74,22 +74,22 @@ pub fn generate_missing_thumbnails_batch(
             if buf.is_empty() {
                 return;
             }
-            log::info!("Flushing {} thumbnails to database", buf.len());
+            tracing::info!("Flushing {} thumbnails to database", buf.len());
             let batch = std::mem::take(buf);
             let n = batch.len();
             match block_on(writer_db.insert_thumbnails_batch(&batch)) {
                 Ok(()) => {
                     writer_count.fetch_add(n, Ordering::SeqCst);
-                    log::debug!("Inserted {n} thumbnails");
+                    tracing::debug!("Inserted {n} thumbnails");
                 }
                 Err(e) => {
-                    log::error!("Failed to commit thumbnail batch: {:?}", e);
+                    tracing::error!("Failed to commit thumbnail batch: {:?}", e);
                 }
             }
         };
 
         for item in rx {
-            log::debug!("Writer received hash {}", item.0);
+            tracing::debug!("Writer received hash {}", item.0);
             buffer.push(item);
             if buffer.len() >= 40 {
                 flush(&mut buffer);
@@ -107,14 +107,11 @@ pub fn generate_missing_thumbnails_batch(
             .map(|(abs_path, hash)| {
                 let edits = match abs_path.to_relative(&db.parent_dir) {
                     Ok(rel) => block_on(db.get_image_edits(&rel)).unwrap_or_else(|e| {
-                        log::warn!(
-                            "failed to fetch edits for {}: {e:#}",
-                            abs_path.as_str()
-                        );
+                        tracing::warn!("failed to fetch edits for {}: {e:#}", abs_path.as_str());
                         ImageEdits::default()
                     }),
                     Err(_) => {
-                        log::warn!(
+                        tracing::warn!(
                             "could not compute relative path for {}, using identity edits",
                             abs_path.as_str()
                         );
@@ -130,21 +127,20 @@ pub fn generate_missing_thumbnails_batch(
         .par_iter()
         .for_each(|(path, hash, edits)| {
             let path_str = path.as_str();
-            if let Err(e) =
-                generate_and_store_thumbnail(path_str.as_ref(), hash, size, edits, &tx)
+            if let Err(e) = generate_and_store_thumbnail(path_str.as_ref(), hash, size, edits, &tx)
             {
-                log::warn!("Failed to generate thumbnail for {}: {:?}", path_str, e);
+                tracing::warn!("Failed to generate thumbnail for {}: {:?}", path_str, e);
             } else {
-                log::info!("Generated thumbnail for: {}", path_str);
+                tracing::info!("Generated thumbnail for: {}", path_str);
             }
         });
 
-    log::info!("All thumbnail generation tasks completed.");
+    tracing::info!("All thumbnail generation tasks completed.");
     // Close the sending side so the writer thread can finish once queue is drained.
     drop(tx);
-    log::info!("Waiting for writer thread to finish...");
+    tracing::info!("Waiting for writer thread to finish...");
     if let Err(e) = writer_handle.join() {
-        log::error!("Writer thread panicked: {:?}", e);
+        tracing::error!("Writer thread panicked: {:?}", e);
     }
 
     Ok(generated_count.load(Ordering::SeqCst))
@@ -225,12 +221,9 @@ pub fn get_or_generate_thumbnail(
     // Miss: fetch edits (identity is the fast common case), generate, persist, return.
     let abs = crate::AbsolutePath(std::path::PathBuf::from(filepath));
     let edits = match abs.to_relative(&db.parent_dir) {
-        Ok(rel) => block_on(db.get_image_edits(&rel))
-            .context("fetch image edits for thumbnail")?,
+        Ok(rel) => block_on(db.get_image_edits(&rel)).context("fetch image edits for thumbnail")?,
         Err(_) => {
-            log::warn!(
-                "could not compute relative path for {filepath}, using identity edits"
-            );
+            tracing::warn!("could not compute relative path for {filepath}, using identity edits");
             ImageEdits::default()
         }
     };
@@ -262,8 +255,9 @@ pub fn regenerate_thumbnails_for_image(
         } else {
             ThumbnailSpec::ScaleSize(ThumbnailSize(size))
         };
-        let bytes = generate_thumbnail_bytes(abs_path, spec, edits)
-            .with_context(|| format!("failed to regenerate thumbnail (spec={spec:?}) for {abs_path}"))?;
+        let bytes = generate_thumbnail_bytes(abs_path, spec, edits).with_context(|| {
+            format!("failed to regenerate thumbnail (spec={spec:?}) for {abs_path}")
+        })?;
         block_on(db.insert_thumbnail(hash, spec, &bytes))
             .with_context(|| format!("failed to store regenerated thumbnail (spec={spec:?})"))?;
         count += 1;
@@ -500,7 +494,10 @@ mod tests {
             &ImageEdits { exposure: 2.0 },
         )
         .unwrap();
-        assert_ne!(plain, bright, "exposure edit must change generated thumbnail bytes");
+        assert_ne!(
+            plain, bright,
+            "exposure edit must change generated thumbnail bytes"
+        );
 
         // And identity equals a second identity render (determinism + true no-op).
         let plain2 = generate_thumbnail_bytes(
@@ -532,21 +529,29 @@ mod tests {
 
         // Seed identity thumbnails at 64px and FullSize (size=0) so
         // get_thumbnail_sizes returns both.
-        let identity_bytes_64 =
-            generate_thumbnail_bytes(abs_path, ThumbnailSpec::ScaleSize(ThumbnailSize(64)), &ImageEdits::identity())
-                .expect("identity 64");
+        let identity_bytes_64 = generate_thumbnail_bytes(
+            abs_path,
+            ThumbnailSpec::ScaleSize(ThumbnailSize(64)),
+            &ImageEdits::identity(),
+        )
+        .expect("identity 64");
         let identity_bytes_full =
             generate_thumbnail_bytes(abs_path, ThumbnailSpec::FullSize, &ImageEdits::identity())
                 .expect("identity full");
 
-        block_on(db.insert_thumbnail(hash, ThumbnailSpec::ScaleSize(ThumbnailSize(64)), &identity_bytes_64))
-            .expect("seed 64");
+        block_on(db.insert_thumbnail(
+            hash,
+            ThumbnailSpec::ScaleSize(ThumbnailSize(64)),
+            &identity_bytes_64,
+        ))
+        .expect("seed 64");
         block_on(db.insert_thumbnail(hash, ThumbnailSpec::FullSize, &identity_bytes_full))
             .expect("seed full");
 
         // Capture what is currently stored for the 64px size.
-        let before_64 = block_on(db.get_thumbnail(hash, ThumbnailSpec::ScaleSize(ThumbnailSize(64))))
-            .expect("before 64");
+        let before_64 =
+            block_on(db.get_thumbnail(hash, ThumbnailSpec::ScaleSize(ThumbnailSize(64))))
+                .expect("before 64");
 
         // Regenerate with +2 EV — both sizes must change.
         let n = super::regenerate_thumbnails_for_image(
@@ -559,8 +564,9 @@ mod tests {
 
         assert!(n >= 1, "at least one size should have been regenerated");
 
-        let after_64 = block_on(db.get_thumbnail(hash, ThumbnailSpec::ScaleSize(ThumbnailSize(64))))
-            .expect("after 64");
+        let after_64 =
+            block_on(db.get_thumbnail(hash, ThumbnailSpec::ScaleSize(ThumbnailSize(64))))
+                .expect("after 64");
         assert_ne!(
             before_64, after_64,
             "64px thumbnail bytes must change after +2 EV edit"
