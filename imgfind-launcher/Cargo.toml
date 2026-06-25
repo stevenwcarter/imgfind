@@ -8,7 +8,9 @@ repository = "https://github.com/stevenwcarter/imgfind"
 readme = "../README.md"
 
 [dependencies]
-imgfind = { path = ".." }
+# default-features = false drops imgfind's `tui` feature (which pulls
+# ratatui-image → the system lib `chafa`); the launcher uses only the library.
+imgfind = { path = "..", default-features = false }
 slint = "1.16"
 rfd = "0.15"
 clap = { version = "4.0", features = ["derive"] }
