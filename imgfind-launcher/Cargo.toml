@@ -40,7 +40,10 @@ product-name = "imgfind"
 identifier = "plus.javapl.imgfind"
 description = "CLIP-based semantic image search"
 authors = ["Steven Carter"]
-icons = ["../packaging/icon.png"]
+# .icns first so macOS uses the prebuilt icon directly (cargo-packager's
+# PNG->icns generation fails with "No matching IconType"); Windows generates
+# its .ico from the .png.
+icons = ["../packaging/icon.icns", "../packaging/icon.png"]
 
 # Main binary is the launcher; GUI and CLI ride alongside it as siblings.
 # `path` values are bare binary names (no extension); cargo-packager resolves
