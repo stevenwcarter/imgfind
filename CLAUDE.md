@@ -35,6 +35,16 @@ cargo run -p imgfind-gui -- [--dir DIR]  # or run the GUI crate directly
 # -d/--dir resolves the DB via the same walk-up/global logic as the CLI
 ```
 
+## Packaging / Release
+
+Installers are built by `.github/workflows/release.yml` on `v*` tags (or a
+`workflow_dispatch` dry-run): macOS `.dmg` and Windows `.msi` via `cargo-packager`
+(config in `imgfind-launcher/Cargo.toml` `[package.metadata.packager]`, unsigned),
+and a Linux tarball of prebuilt binaries + `install.sh`. CI checks out the public
+`clipper-rs` repo as the `../clipper` sibling. All three binaries are bundled in
+one directory so the launcher's `resolve_sibling_binary` finds them. See
+`docs/superpowers/specs/2026-06-24-cross-platform-installers-design.md`.
+
 ## CLI commands
 
 `index` (default recursive), `search` (recursive from the cwd by default; `--all` searches the whole DB), `metadata`, `tui`, `gui`, `thumbnails`, `clean`, `status`, `config {show|add-ignore|remove-ignore|reset}`. See `USAGE.md` and `src/main.rs` for flags. Notable: `index --root` forces a DB in the cwd; `search --short` prints bare paths for piping; `search --display`/`tui` render images inline in supporting terminals; `gui [ARGS]` is a passthrough launcher (`Commands::Gui`, `trailing_var_arg`) that spawns `imgfind-gui` with `ARGS` (block model, exit-code propagated; binary resolved sibling-of-`current_exe` then PATH). `thumbnails` now accepts repeatable `--size <N>` and a `--gui-sizes` flag that expands to the canonical GUI sizes (300, 512, 2048); use `--gui-sizes` to pre-generate thumbnails so first-view decoding is instant; `--all` loops batches of `--count` until no missing thumbnails remain for the requested sizes.

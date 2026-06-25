@@ -24,3 +24,39 @@ tempfile = "3"
 
 [build-dependencies]
 slint-build = "1.16"
+
+# ---------------------------------------------------------------------------
+# cargo-packager metadata (v0.11.x schema)
+# Run with: cargo packager --release --formats dmg   (macOS CI)
+#           cargo packager --release --formats wix   (Windows CI)
+# All three binaries land in the same install directory so that
+# imgfind::resolve_sibling_binary finds imgfind-gui and imgfind beside the
+# launcher at runtime.
+# ---------------------------------------------------------------------------
+[package.metadata.packager]
+product-name = "imgfind"
+identifier = "plus.javapl.imgfind"
+description = "CLIP-based semantic image search"
+authors = ["Steven Carter"]
+icons = ["../packaging/icon.png"]
+
+# Main binary is the launcher; GUI and CLI ride alongside it as siblings.
+# `path` values are bare binary names (no extension); cargo-packager resolves
+# them from the release build output directory.
+binaries = [
+    { path = "imgfind-launcher", main = true },
+    { path = "imgfind-gui" },
+    { path = "imgfind" },
+]
+
+[package.metadata.packager.macos]
+minimum-system-version = "10.15"
+
+# WiX (MSI) config for Windows.
+# fragment_paths injects a WXS component that appends [INSTALLDIR] to the
+# system PATH, making `imgfind` and `imgfind-gui` callable from any shell.
+# cargo-packager has no built-in append-to-path flag; a custom WXS fragment
+# is the documented mechanism (wix.fragment_paths → Vec<PathBuf>).
+[package.metadata.packager.wix]
+fragment-paths = ["../packaging/wix-path-env.wxs"]
+component-group-refs = ["SetPathEnvGroup"]

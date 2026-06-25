@@ -10,12 +10,17 @@ echo "================================"
 
 # Get the current directory (assumes we're in the project root)
 PROJECT_DIR=$(pwd)
-BINARY_PATH="$PROJECT_DIR/target/release/imgfind"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Check if release binary exists
-if [ ! -f "$BINARY_PATH" ]; then
-    echo "❌ Release binary not found at $BINARY_PATH"
-    echo "Please run 'cargo build --release --workspace' first."
+# Resolve where the prebuilt binaries live: a local release build, or — for the
+# downloaded release tarball — right next to this script.
+if [ -f "$PROJECT_DIR/target/release/imgfind" ]; then
+    SRC_DIR="$PROJECT_DIR/target/release"
+elif [ -f "$SCRIPT_DIR/imgfind" ]; then
+    SRC_DIR="$SCRIPT_DIR"
+else
+    echo "❌ imgfind binary not found in $PROJECT_DIR/target/release or $SCRIPT_DIR"
+    echo "Build first ('cargo build --release --workspace') or run this from an extracted release tarball."
     exit 1
 fi
 
@@ -25,11 +30,11 @@ mkdir -p "$LOCAL_BIN"
 
 # Copy CLI binary to local bin
 echo "📦 Installing imgfind to $LOCAL_BIN..."
-cp "$BINARY_PATH" "$LOCAL_BIN/imgfind"
+cp "$SRC_DIR/imgfind" "$LOCAL_BIN/imgfind"
 chmod +x "$LOCAL_BIN/imgfind"
 
 # Copy GUI binary if present
-GUI_BINARY="$PROJECT_DIR/target/release/imgfind-gui"
+GUI_BINARY="$SRC_DIR/imgfind-gui"
 if [ -f "$GUI_BINARY" ]; then
     echo "📦 Installing imgfind-gui to $LOCAL_BIN..."
     cp "$GUI_BINARY" "$LOCAL_BIN/imgfind-gui"
@@ -37,7 +42,7 @@ if [ -f "$GUI_BINARY" ]; then
 fi
 
 # Copy launcher binary if present
-LAUNCHER_BINARY="$PROJECT_DIR/target/release/imgfind-launcher"
+LAUNCHER_BINARY="$SRC_DIR/imgfind-launcher"
 if [ -f "$LAUNCHER_BINARY" ]; then
     echo "📦 Installing imgfind-launcher to $LOCAL_BIN..."
     cp "$LAUNCHER_BINARY" "$LOCAL_BIN/imgfind-launcher"
@@ -48,7 +53,7 @@ if [ -f "$LAUNCHER_BINARY" ]; then
     if [ "$(uname -s)" = "Linux" ]; then
         DESKTOP_DIR="$HOME/.local/share/applications"
         mkdir -p "$DESKTOP_DIR"
-        DESKTOP_SRC="$PROJECT_DIR/packaging/imgfind-launcher.desktop"
+        DESKTOP_SRC="$SCRIPT_DIR/packaging/imgfind-launcher.desktop"
         if [ -f "$DESKTOP_SRC" ]; then
             echo "🖥  Installing desktop entry to $DESKTOP_DIR..."
             sed "s|^Exec=imgfind-launcher\$|Exec=$LOCAL_BIN/imgfind-launcher|" \

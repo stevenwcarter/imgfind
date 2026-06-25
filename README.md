@@ -17,21 +17,29 @@ The project ships as a **3-crate workspace**: a core `imgfind` binary (CLI + rat
 - **Native GUI**: Slint desktop app — virtualized thumbnail grid, detail panel, lightbox, filter bar (size/type/GPS/tags), keyboard navigation, and a keyboard-driven tagging system with color brushes; map view not yet ported
 - **Shell Completions**: Generate completion scripts for bash, zsh, and fish
 
+## Installation
+
+Prebuilt installers are attached to each [GitHub Release](https://github.com/stevenwcarter/imgfind/releases).
+
+### macOS (`.dmg`)
+1. Download `imgfind-<version>-macos-universal.dmg`, open it, drag **imgfind** to Applications.
+2. The app is **unsigned**, so the first launch is blocked by Gatekeeper. Right-click the app → **Open** → **Open** (only needed once), or run `xattr -dr com.apple.quarantine /Applications/imgfind.app`.
+3. (Optional) put the CLI on your PATH:
+   `sudo ln -sf /Applications/imgfind.app/Contents/MacOS/imgfind /usr/local/bin/imgfind`
+
+### Windows (`.msi`)
+1. Download `imgfind-<version>-windows-x86_64.msi` and run it.
+2. SmartScreen may warn (unsigned): **More info → Run anyway**.
+3. The installer adds imgfind to your PATH, so `imgfind`, `imgfind-gui`, and `imgfind-launcher` work from a terminal; the launcher also appears in the Start menu.
+
+### Linux (tarball)
+1. Download `imgfind-<version>-linux-x86_64.tar.gz`, extract it, and run `./install.sh`.
+2. It installs the three binaries to `~/.local/bin` and a desktop entry to `~/.local/share/applications`. Ensure `~/.local/bin` is on your PATH.
+
+### Build from source
+See [CLAUDE.md](CLAUDE.md). Requires the sibling `clipper` repo checked out at `../clipper`.
+
 ## Quick Start
-
-### Installation
-
-1. **Build from source:**
-
-   ```bash
-   cargo build --release --workspace
-   ```
-
-2. **Install locally (both binaries):**
-
-   ```bash
-   ./install.sh
-   ```
 
 ### Basic Usage
 

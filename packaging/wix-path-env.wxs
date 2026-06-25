@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WiX fragment: add the imgfind install directory to the system PATH.
+
+  cargo-packager (wix.fragment-paths) merges this fragment into the generated
+  MSI installer.  The ComponentGroup is pulled in via wix.component-group-refs
+  in imgfind-launcher/Cargo.toml, which causes the WiX linker to reference
+  SetPathEnvGroup from cargo-packager's generated Feature element.
+
+  The Environment element appends [INSTALLDIR] to the system-level PATH on
+  install and removes the entry on uninstall (Permanent="no").
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <DirectoryRef Id="INSTALLDIR">
+      <Component Id="SetPathEnv" Guid="4e41b861-d59d-438f-a4c3-5d3b5e666776" KeyPath="yes">
+        <Environment
+          Id="PATH"
+          Name="PATH"
+          Value="[INSTALLDIR]"
+          Permanent="no"
+          Part="last"
+          Action="set"
+          System="yes"
+        />
+      </Component>
+    </DirectoryRef>
+
+    <ComponentGroup Id="SetPathEnvGroup">
+      <ComponentRef Id="SetPathEnv" />
+    </ComponentGroup>
+  </Fragment>
+</Wix>
