@@ -29,6 +29,7 @@ pub fn block_on<F: Future>(fut: F) -> F::Output {
 pub mod config;
 pub mod database;
 pub mod decode;
+pub mod edits;
 pub mod filters;
 pub mod ids;
 pub mod indexing;
