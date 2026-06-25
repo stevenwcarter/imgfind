@@ -105,10 +105,22 @@ pub fn generate_missing_thumbnails_batch(
         images_without_thumbnails
             .into_iter()
             .map(|(abs_path, hash)| {
-                let rel = abs_path.to_relative(&db.parent_dir).unwrap_or_else(|_| {
-                    crate::RelativePath(abs_path.0.clone())
-                });
-                let edits = block_on(db.get_image_edits(&rel)).unwrap_or_default();
+                let edits = match abs_path.to_relative(&db.parent_dir) {
+                    Ok(rel) => block_on(db.get_image_edits(&rel)).unwrap_or_else(|e| {
+                        log::warn!(
+                            "failed to fetch edits for {}: {e:#}",
+                            abs_path.as_str()
+                        );
+                        ImageEdits::default()
+                    }),
+                    Err(_) => {
+                        log::warn!(
+                            "could not compute relative path for {}, using identity edits",
+                            abs_path.as_str()
+                        );
+                        ImageEdits::default()
+                    }
+                };
                 (abs_path, hash, edits)
             })
             .collect();
@@ -212,10 +224,16 @@ pub fn get_or_generate_thumbnail(
 
     // Miss: fetch edits (identity is the fast common case), generate, persist, return.
     let abs = crate::AbsolutePath(std::path::PathBuf::from(filepath));
-    let rel = abs
-        .to_relative(&db.parent_dir)
-        .unwrap_or_else(|_| crate::RelativePath(abs.0.clone()));
-    let edits = block_on(db.get_image_edits(&rel)).unwrap_or_default();
+    let edits = match abs.to_relative(&db.parent_dir) {
+        Ok(rel) => block_on(db.get_image_edits(&rel))
+            .context("fetch image edits for thumbnail")?,
+        Err(_) => {
+            log::warn!(
+                "could not compute relative path for {filepath}, using identity edits"
+            );
+            ImageEdits::default()
+        }
+    };
     let bytes = generate_thumbnail_bytes(filepath, spec, &edits)?;
     block_on(db.insert_thumbnail(hash, spec, &bytes))
         .context("Failed to store thumbnail in database")?;
