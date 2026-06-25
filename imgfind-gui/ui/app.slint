@@ -62,6 +62,14 @@ export component MainWindow inherits Window {
     callback lightbox-zoom-wheel(float, length, length, length, length);
     callback lightbox-zoom-step(int);     // +1 = zoom in, -1 = zoom out
 
+    // Lightbox edit-mode (image adjustments). Wired to Rust in Task 7.
+    in-out property <bool> edit-mode;
+    in-out property <float> edit-exposure;
+    callback edit-toggle();
+    callback edit-exposure-changed(float);
+    callback edit-reset();
+    callback edit-accept();
+
     // Detail panel state set from Rust.
     in property <bool> detail-open: false;
     in property <image> detail-image;
@@ -917,10 +925,12 @@ export component MainWindow inherits Window {
             }
 
             // Content area between the 36px top bar and 80px bottom bar.
+            // When edit-mode is on the area shrinks by the sidebar width (240px)
+            // so the image is never hidden behind the adjustments panel.
             content := Rectangle {
                 x: 0;
                 y: 36px;
-                width: parent.width;
+                width: parent.width - (root.edit-mode ? 240px : 0px);
                 height: parent.height - 36px - 80px;
                 clip: true;
 
@@ -1090,6 +1100,23 @@ export component MainWindow inherits Window {
                             }
                         }
                     }
+                    // Edit toggle: highlighted when edit-mode is active.
+                    edit-touch := TouchArea {
+                        width: 60px;
+                        clicked => { root.edit-toggle(); }
+                        Rectangle {
+                            background: root.edit-mode
+                                ? #4a7fc1cc
+                                : (edit-touch.has-hover ? #ffffff22 : #ffffff11);
+                            border-radius: 4px;
+                            Text {
+                                text: "Edit";
+                                color: white;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
                     zoom-slider := Slider {
                         minimum: 0.1;
                         maximum: 8.0;
@@ -1104,6 +1131,50 @@ export component MainWindow inherits Window {
                         color: white;
                         vertical-alignment: center;
                         width: 56px;
+                    }
+                }
+            }
+
+            // Adjustments sidebar: visible only in edit-mode.
+            // Anchored to the right edge; the content area (above) shrinks by
+            // the same 240px when edit-mode is on so the image stays fully visible.
+            if root.edit-mode: Rectangle {
+                x: parent.width - self.width;
+                y: 36px;
+                width: 240px;
+                height: parent.height - 36px - 80px;
+                background: #1e1e1eee;
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 12px;
+                    Text {
+                        text: "Adjustments";
+                        color: white;
+                        font-size: 16px;
+                    }
+                    Text {
+                        text: "Exposure: " + (round(root.edit-exposure * 100) / 100) + " EV";
+                        color: #cccccc;
+                        font-size: 12px;
+                    }
+                    Slider {
+                        minimum: -3.0;
+                        maximum: 3.0;
+                        value: root.edit-exposure;
+                        changed(v) => { root.edit-exposure-changed(v); }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Button {
+                            text: "Reset";
+                            clicked => { root.edit-reset(); }
+                        }
+                    }
+                    // Flexible spacer pushes "Accept Edits" to the bottom.
+                    Rectangle { vertical-stretch: 1; }
+                    Button {
+                        text: "Accept Edits";
+                        clicked => { root.edit-accept(); }
                     }
                 }
             }
