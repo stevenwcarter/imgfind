@@ -52,8 +52,12 @@ jobs:
         working-directory: imgfind
         run: |
           rustup target add x86_64-apple-darwin aarch64-apple-darwin
-          cargo build --release --target x86_64-apple-darwin -p imgfind-launcher -p imgfind-gui -p imgfind
-          cargo build --release --target aarch64-apple-darwin -p imgfind-launcher -p imgfind-gui -p imgfind
+          # --no-default-features drops imgfind's `tui` feature, whose
+          # ratatui-image dep needs the system lib `chafa` (pkg-config) that
+          # isn't present on the runners. The installers ship the GUI + CLI;
+          # the terminal TUI is not part of the packaged build.
+          cargo build --release --no-default-features --target x86_64-apple-darwin -p imgfind-launcher -p imgfind-gui -p imgfind
+          cargo build --release --no-default-features --target aarch64-apple-darwin -p imgfind-launcher -p imgfind-gui -p imgfind
           mkdir -p target/release
           for b in imgfind-launcher imgfind-gui imgfind; do
             lipo -create -output target/release/$b \
@@ -67,14 +71,14 @@ jobs:
         working-directory: imgfind
         shell: bash
         run: |
-          cargo build --release -p imgfind-launcher -p imgfind-gui -p imgfind
+          cargo build --release --no-default-features -p imgfind-launcher -p imgfind-gui -p imgfind
           cargo packager --release --formats wix -p imgfind-launcher
 
       - name: Build + tarball (Linux)
         if: matrix.artifact == 'linux'
         working-directory: imgfind
         run: |
-          cargo build --release -p imgfind-launcher -p imgfind-gui -p imgfind
+          cargo build --release --no-default-features -p imgfind-launcher -p imgfind-gui -p imgfind
           SAFE_REF="${GITHUB_REF_NAME//\//-}"
           STAGE=imgfind-${SAFE_REF}-linux-x86_64
           mkdir -p "$STAGE/packaging"
