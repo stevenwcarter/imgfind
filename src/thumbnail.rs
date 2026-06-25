@@ -548,10 +548,12 @@ mod tests {
         block_on(db.insert_thumbnail(hash, ThumbnailSpec::FullSize, &identity_bytes_full))
             .expect("seed full");
 
-        // Capture what is currently stored for the 64px size.
+        // Capture what is currently stored for both seeded sizes.
         let before_64 =
             block_on(db.get_thumbnail(hash, ThumbnailSpec::ScaleSize(ThumbnailSize(64))))
                 .expect("before 64");
+        let before_full =
+            block_on(db.get_thumbnail(hash, ThumbnailSpec::FullSize)).expect("before full");
 
         // Regenerate with +2 EV — both sizes must change.
         let n = super::regenerate_thumbnails_for_image(
@@ -562,7 +564,7 @@ mod tests {
         )
         .expect("regenerate");
 
-        assert!(n >= 1, "at least one size should have been regenerated");
+        assert_eq!(n, 2, "both seeded sizes should be regenerated");
 
         let after_64 =
             block_on(db.get_thumbnail(hash, ThumbnailSpec::ScaleSize(ThumbnailSize(64))))
@@ -570,6 +572,13 @@ mod tests {
         assert_ne!(
             before_64, after_64,
             "64px thumbnail bytes must change after +2 EV edit"
+        );
+
+        let after_full =
+            block_on(db.get_thumbnail(hash, ThumbnailSpec::FullSize)).expect("after full");
+        assert_ne!(
+            before_full, after_full,
+            "FullSize thumbnail bytes must change after +2 EV edit"
         );
 
         let _ = std::fs::remove_dir_all(parent_dir);

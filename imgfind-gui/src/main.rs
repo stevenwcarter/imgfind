@@ -1435,6 +1435,9 @@ fn main() -> Result<()> {
                 edit_gen_ref.fetch_add(1, Ordering::SeqCst);
                 w.set_edit_mode(false);
                 if let Some(rel) = rel {
+                    // Reset so load_lightbox_image doesn't self-drop (it no-ops
+                    // when shown_fullres is true, matching the open/nav idiom).
+                    shown_fullres_ref.store(false, Ordering::SeqCst);
                     load_lightbox_image(
                         weak.clone(),
                         backend_edit.clone(),
@@ -1583,6 +1586,9 @@ fn main() -> Result<()> {
                     // Refresh the grid (LRU evict + re-request) and detail panel.
                     evict_a.lock().insert(rel.clone());
                     detail_cache::remove(&rel);
+                    // Reset so load_lightbox_image doesn't self-drop (it no-ops
+                    // when shown_fullres is true, matching the open/nav idiom).
+                    shown_fullres_a.store(false, Ordering::SeqCst);
                     // Reload the now-baked lightbox rendition.
                     load_lightbox_image(
                         weak_a.clone(),
