@@ -45,6 +45,20 @@ and a Linux tarball of prebuilt binaries + `install.sh`. CI checks out the publi
 one directory so the launcher's `resolve_sibling_binary` finds them. See
 `docs/superpowers/specs/2026-06-24-cross-platform-installers-design.md`.
 
+## Releasing
+
+Cut a release with `just release X.Y.Z`: it bumps the workspace version
+(`scripts/bump-version.sh`, all three crates together — the `clipper` dep is
+left alone), regenerates `CHANGELOG.md` with **git-cliff** (config `cliff.toml`,
+from Conventional Commits), makes a signed `chore(release)` commit, creates a
+**GPG-signed** tag `vX.Y.Z` (`git tag -s` — `tag.gpgsign` is unset so signing is
+explicit), and pushes. The tag triggers `.github/workflows/release.yml`, which
+builds the installers and publishes a GitHub Release whose notes are that tag's
+`CHANGELOG.md` section (via `orhun/git-cliff-action`). `just changelog`
+regenerates the changelog without releasing. The tag shows "Verified" on GitHub
+only if the signing public key (`3AECC1A61E1C08A7`) is uploaded to the GitHub
+account. Needs `git-cliff` (`cargo install git-cliff`). No crates.io publishing.
+
 ## CLI commands
 
 `index` (default recursive), `search` (recursive from the cwd by default; `--all` searches the whole DB), `metadata`, `tui`, `gui`, `thumbnails`, `clean`, `status`, `config {show|add-ignore|remove-ignore|reset}`. See `USAGE.md` and `src/main.rs` for flags. Notable: `index --root` forces a DB in the cwd; `search --short` prints bare paths for piping; `search --display`/`tui` render images inline in supporting terminals; `gui [ARGS]` is a passthrough launcher (`Commands::Gui`, `trailing_var_arg`) that spawns `imgfind-gui` with `ARGS` (block model, exit-code propagated; binary resolved sibling-of-`current_exe` then PATH). `thumbnails` now accepts repeatable `--size <N>` and a `--gui-sizes` flag that expands to the canonical GUI sizes (300, 512, 2048); use `--gui-sizes` to pre-generate thumbnails so first-view decoding is instant; `--all` loops batches of `--count` until no missing thumbnails remain for the requested sizes.
