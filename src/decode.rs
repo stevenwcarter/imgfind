@@ -166,6 +166,61 @@ fn decode_raw_full(path: &Path) -> Result<image::DynamicImage> {
     }
 }
 
+/// Decode `path` to a linear-light RGB image for high-fidelity editing.
+///
+/// RAW files are demosaiced from the **sensor** (ignoring the embedded preview)
+/// via a custom `RawDevelop` that omits the final sRGB gamma step, so highlight
+/// headroom above the camera-JPEG white point is preserved. Non-RAW files are
+/// decoded normally and converted sRGB -> linear. EXIF orientation is applied.
+pub fn decode_linear(path: &Path) -> Result<crate::edits::LinearRgb> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    if is_raw_extension(&ext) {
+        decode_raw_linear(path)
+    } else {
+        let img = decode_image(path)?; // already EXIF-oriented sRGB
+        Ok(crate::edits::LinearRgb::from_srgb8(&img.to_rgb8()))
+    }
+}
+
+fn decode_raw_linear(path: &Path) -> Result<crate::edits::LinearRgb> {
+    use rawler::decoders::RawDecodeParams;
+    use rawler::imgop::develop::{ProcessingStep, RawDevelop};
+    use rawler::rawsource::RawSource;
+
+    let source =
+        RawSource::new(path).with_context(|| format!("opening RAW file {}", path.display()))?;
+    let decoder = rawler::get_decoder(&source)
+        .with_context(|| format!("no RAW decoder for {}", path.display()))?;
+    let params = RawDecodeParams::default();
+    let raw = decoder
+        .raw_image(&source, &params, false)
+        .with_context(|| format!("decoding RAW sensor data for {}", path.display()))?;
+
+    // Develop to LINEAR: same steps as the default pipeline minus the final SRgb gamma.
+    let develop = RawDevelop {
+        steps: vec![
+            ProcessingStep::Rescale,
+            ProcessingStep::Demosaic,
+            ProcessingStep::CropActiveArea,
+            ProcessingStep::WhiteBalance,
+            ProcessingStep::Calibrate,
+            ProcessingStep::CropDefault,
+        ],
+    };
+    let intermediate = develop
+        .develop_intermediate(&raw)
+        .with_context(|| format!("developing RAW image (linear) {}", path.display()))?;
+    let mut dynimg = intermediate
+        .to_dynamic_image()
+        .with_context(|| format!("rawler intermediate produced no image for {}", path.display()))?;
+    apply_exif_orientation(&mut dynimg, path);
+    Ok(crate::edits::LinearRgb::from_linear_u16(&dynimg.to_rgb16()))
+}
+
 /// Decode a RAW file via rawler: try the largest embedded preview (camera-rendered
 /// JPEG) first for speed, then fall back to full demosaic of the sensor data.
 fn decode_raw(path: &Path) -> Result<image::DynamicImage> {
@@ -203,6 +258,39 @@ fn decode_raw(path: &Path) -> Result<image::DynamicImage> {
     intermediate
         .to_dynamic_image()
         .with_context(|| format!("converting developed RAW to image for {}", path.display()))
+}
+
+#[cfg(test)]
+mod linear_decode_tests {
+    use super::*;
+
+    #[test]
+    fn decode_linear_nonraw_roundtrips_at_zero_ev() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.png");
+        let mut img = image::RgbImage::new(4, 4);
+        for p in img.pixels_mut() {
+            *p = image::Rgb([40, 130, 210]);
+        }
+        img.save(&path).unwrap();
+
+        let lin = decode_linear(&path).unwrap();
+        let out = lin.render(&crate::edits::ImageEdits { exposure: 0.0 });
+        let p = out.get_pixel(0, 0);
+        for c in 0..3 {
+            assert!((p[c] as i32 - img.get_pixel(0, 0)[c] as i32).abs() <= 1);
+        }
+    }
+
+    #[test]
+    fn decode_linear_raw_fixture_nonempty() {
+        let p = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/sample.dng"
+        ));
+        let lin = decode_linear(p).expect("decode_linear on sample.dng");
+        assert!(lin.0.width() > 0 && lin.0.height() > 0);
+    }
 }
 
 #[cfg(test)]
