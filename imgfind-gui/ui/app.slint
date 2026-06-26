@@ -67,6 +67,11 @@ export component MainWindow inherits Window {
     in-out property <float> edit-exposure;
     // Formatted EV readout (e.g. "+1.30 EV"), set by Rust via edits_ui::format_exposure.
     in property <string> edit-exposure-label: "0.00 EV";
+    // Busy spinner: true while a slow background operation (base decode or
+    // thumbnail regeneration) is in progress. The sidebar spinner is shown and
+    // the Reset/Accept buttons are disabled while this is set.
+    in property <bool> edit-busy;
+    in property <string> edit-busy-label: "Working...";
     callback edit-toggle();
     callback edit-exposure-changed(float);
     callback edit-reset();
@@ -1170,10 +1175,13 @@ export component MainWindow inherits Window {
                         color: #cccccc;
                         font-size: 12px;
                     }
+                    // Two-way binding so a Rust write to `edit-exposure` (e.g. Reset
+                    // setting it to 0.0) reseats the thumb. The `changed` callback
+                    // fires only on user interaction, so this creates no feedback loop.
                     Slider {
                         minimum: -3.0;
                         maximum: 3.0;
-                        value: root.edit-exposure;
+                        value <=> root.edit-exposure;
                         changed(v) => { root.edit-exposure-changed(v); }
                     }
                     HorizontalLayout {
@@ -1181,35 +1189,112 @@ export component MainWindow inherits Window {
                         reset-touch := TouchArea {
                             width: 80px;
                             height: 32px;
-                            clicked => { root.edit-reset(); }
+                            // Disabled while busy: gate click and dim the button.
+                            clicked => {
+                                if (!root.edit-busy) { root.edit-reset(); }
+                            }
                             Rectangle {
-                                background: reset-touch.has-hover ? #ffffff22 : #ffffff11;
+                                background: root.edit-busy
+                                    ? #ffffff08
+                                    : (reset-touch.has-hover ? #ffffff22 : #ffffff11);
                                 border-radius: 4px;
                                 Text {
                                     text: "Reset";
-                                    color: white;
+                                    color: root.edit-busy ? #666666 : white;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
                                 }
                             }
                         }
                     }
+                    // Busy indicator: shown (and animated) while edit-busy is true.
+                    // Three dots pulse in sequence (ASCII-safe, no glyph characters).
+                    // Each dot animates its opacity continuously; the 300ms offsets
+                    // between them create a rolling wave that indicates background work.
+                    if root.edit-busy: VerticalLayout {
+                        spacing: 6px;
+                        alignment: center;
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 6px;
+                            // Dot 1 — leads the pulse wave.
+                            dot1 := Rectangle {
+                                width: 8px;
+                                height: 8px;
+                                border-radius: 4px;
+                                background: #e0e0e0;
+                                opacity: dot1-pulse.v;
+                            }
+                            // Dot 2 — follows 300ms behind dot 1.
+                            dot2 := Rectangle {
+                                width: 8px;
+                                height: 8px;
+                                border-radius: 4px;
+                                background: #e0e0e0;
+                                opacity: dot2-pulse.v;
+                            }
+                            // Dot 3 — follows 300ms behind dot 2.
+                            dot3 := Rectangle {
+                                width: 8px;
+                                height: 8px;
+                                border-radius: 4px;
+                                background: #e0e0e0;
+                                opacity: dot3-pulse.v;
+                            }
+                        }
+                        Text {
+                            text: root.edit-busy-label;
+                            color: #cccccc;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                        }
+                    }
                     // Flexible spacer pushes "Accept Edits" to the bottom.
                     Rectangle { vertical-stretch: 1; }
                     accept-touch := TouchArea {
                         height: 32px;
-                        clicked => { root.edit-accept(); }
+                        // Disabled while busy: gate click and dim the button.
+                        clicked => {
+                            if (!root.edit-busy) { root.edit-accept(); }
+                        }
                         Rectangle {
-                            background: accept-touch.has-hover ? #ffffff22 : #ffffff11;
+                            background: root.edit-busy
+                                ? #ffffff08
+                                : (accept-touch.has-hover ? #ffffff22 : #ffffff11);
                             border-radius: 4px;
                             Text {
                                 text: "Accept Edits";
-                                color: white;
+                                color: root.edit-busy ? #666666 : white;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
                             }
                         }
                     }
+                }
+                // Pulse-animation drivers for the three-dot busy indicator.
+                // Declared as siblings to the VerticalLayout so they persist
+                // whether or not the `if edit-busy` branch is shown; Slint
+                // keeps animating the properties regardless of visibility.
+                // Each driver runs from 0.25→1.0→0.25 over 900ms, repeating
+                // infinitely (iteration-count: -1). The 300ms stagger between
+                // drivers gives the rolling-wave effect.
+                dot1-pulse := Rectangle {
+                    property <float> v: 0.25;
+                    width: 0; height: 0;
+                    animate v { duration: 900ms; iteration-count: -1; easing: ease-in-out; }
+                    init => { self.v = 1.0; }
+                }
+                dot2-pulse := Rectangle {
+                    property <float> v: 1.0;
+                    width: 0; height: 0;
+                    animate v { duration: 900ms; iteration-count: -1; easing: ease-in-out; }
+                    init => { self.v = 0.25; }
+                }
+                dot3-pulse := Rectangle {
+                    property <float> v: 0.25;
+                    width: 0; height: 0;
+                    animate v { duration: 900ms; iteration-count: -1; easing: ease-in-out; }
+                    init => { self.v = 1.0; }
                 }
             }
         }

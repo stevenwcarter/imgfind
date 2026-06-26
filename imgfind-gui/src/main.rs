@@ -1466,6 +1466,9 @@ fn main() -> Result<()> {
             // Clear any prior base so a stale render can't read it before the new
             // decode completes; the render is kicked from the decode thread.
             *edit_base_ref.lock() = None;
+            // Show the busy spinner while the (potentially slow) RAW decode runs.
+            w.set_edit_busy(true);
+            w.set_edit_busy_label("Preparing...".into());
 
             // Decode the unedited original off-thread, then store + render.
             let backend_d = backend_edit.clone();
@@ -1478,6 +1481,13 @@ fn main() -> Result<()> {
                     Ok(img) => img,
                     Err(e) => {
                         tracing::warn!("edit-mode: failed to decode base for {rel_d}: {e:#}");
+                        // Clear the busy flag even on error so the spinner can't
+                        // get stuck. The edit mode may or may not still be open.
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(w) = weak_d.upgrade() {
+                                w.set_edit_busy(false);
+                            }
+                        });
                         return;
                     }
                 };
@@ -1485,10 +1495,13 @@ fn main() -> Result<()> {
                     let Some(w) = weak_d.upgrade() else { return };
                     // Bail if the user already left edit mode while we decoded.
                     if !w.get_edit_mode() {
+                        w.set_edit_busy(false);
                         return;
                     }
                     *base_d.lock() = Some(img);
                     render_edit_preview(weak_d.clone(), base_d, gen_d, w.get_edit_exposure());
+                    // Clear the spinner now that the base is stored and preview queued.
+                    w.set_edit_busy(false);
                 });
             });
         });
@@ -1513,14 +1526,20 @@ fn main() -> Result<()> {
         });
     }
 
-    // --- edit-reset callback: revert the slider to the last-accepted exposure ---
+    // --- edit-reset callback: reset the slider to neutral 0 EV ---
+    //
+    // Resets to a fixed 0.0 (not the last-accepted value) so the user can
+    // audition a flat, un-exposed image regardless of what was previously saved.
+    // Goes through the same `render_edit_preview` generation-guard path as the
+    // slider so a slow in-flight multiply can't land after the reset. The
+    // two-way `value <=> root.edit-exposure` binding in the Slint Slider means
+    // the thumb physically reseats when `set_edit_exposure` writes `edit-exposure`.
     {
         let weak = window.as_weak();
         let edit_base_ref = Arc::clone(&lb_edit_base);
         let edit_gen_ref = Arc::clone(&lb_edit_generation);
-        let last_accepted_ref = Arc::clone(&lb_last_accepted_exposure);
         window.on_edit_reset(move || {
-            let v = *last_accepted_ref.lock();
+            let v = 0.0_f32;
             if let Some(w) = weak.upgrade() {
                 set_edit_exposure(&w, v);
             }
@@ -1561,6 +1580,10 @@ fn main() -> Result<()> {
                 .map(|r| r.path.clone());
             let Some(rel) = rel else { return };
             let exposure = edits_ui::clamp_exposure(w.get_edit_exposure());
+            // Show the busy spinner while the (potentially slow) thumbnail
+            // regeneration runs on the background thread.
+            w.set_edit_busy(true);
+            w.set_edit_busy_label("Saving...".into());
 
             let backend_a = backend_accept.clone();
             let weak_a = weak.clone();
@@ -1575,6 +1598,12 @@ fn main() -> Result<()> {
                 let edits = imgfind::edits::ImageEdits { exposure };
                 if let Err(e) = backend_a.save_edits_and_regenerate(&rel, &edits) {
                     tracing::warn!("edit-accept: failed to save/regenerate for {rel}: {e:#}");
+                    // Clear the busy flag on error so the spinner is not stuck.
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(w) = weak_a.upgrade() {
+                            w.set_edit_busy(false);
+                        }
+                    });
                     return;
                 }
                 let _ = slint::invoke_from_event_loop(move || {
@@ -1582,6 +1611,7 @@ fn main() -> Result<()> {
                     *last_accepted_a.lock() = exposure;
                     *edit_base_a.lock() = None;
                     edit_gen_a.fetch_add(1, Ordering::SeqCst);
+                    w.set_edit_busy(false);
                     w.set_edit_mode(false);
                     // Refresh the grid (LRU evict + re-request) and detail panel.
                     evict_a.lock().insert(rel.clone());
