@@ -582,6 +582,7 @@ impl Database {
         match rows.next().await? {
             Some(row) => Ok(crate::edits::ImageEdits {
                 exposure: col_f64(&row, 0, "exposure")? as f32,
+                ..crate::edits::ImageEdits::identity()
             }
             .clamped()),
             None => Ok(crate::edits::ImageEdits::identity()),
@@ -3046,14 +3047,26 @@ mod tests {
         // Absent => identity
         assert!(db.get_image_edits(&rel_path).await.unwrap().is_identity());
         // Insert
-        db.set_image_edits(&rel_path, &ImageEdits { exposure: 1.5 })
-            .await
-            .unwrap();
+        db.set_image_edits(
+            &rel_path,
+            &ImageEdits {
+                exposure: 1.5,
+                ..ImageEdits::identity()
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(db.get_image_edits(&rel_path).await.unwrap().exposure, 1.5);
         // Update same row (no duplicate)
-        db.set_image_edits(&rel_path, &ImageEdits { exposure: -0.75 })
-            .await
-            .unwrap();
+        db.set_image_edits(
+            &rel_path,
+            &ImageEdits {
+                exposure: -0.75,
+                ..ImageEdits::identity()
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(db.get_image_edits(&rel_path).await.unwrap().exposure, -0.75);
     }
 

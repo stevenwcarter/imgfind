@@ -1,33 +1,62 @@
-//! Per-image, non-destructive adjustments (currently exposure in EV stops).
+//! Per-image, non-destructive adjustments (exposure, saturation, blacks, whites, brightness, contrast).
 //!
 //! Edits live only in the DB and are baked into thumbnails at the generation
 //! seam; the original file is never modified. See
 //! `docs/superpowers/specs/2026-06-24-lightbox-image-adjustments-design.md`.
 
-/// Adjustments applied to a single image. Identity (`exposure == 0`) is a no-op.
+/// Adjustments applied to a single image. Identity (all fields 0) is a no-op.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ImageEdits {
-    /// Exposure in photographic EV stops; output channel = input * 2^exposure.
+    /// Exposure in photographic EV stops; linear gain = 2^exposure.
     pub exposure: f32,
+    /// Saturation, -100..=100 (0 neutral; -100 grayscale, +100 doubles chroma).
+    pub saturation: f32,
+    /// Blacks, -100..=100 (shadow-weighted lift/drop).
+    pub blacks: f32,
+    /// Whites, -100..=100 (highlight-weighted lift/drop).
+    pub whites: f32,
+    /// Brightness, -100..=100 (midtone gamma lift).
+    pub brightness: f32,
+    /// Contrast, -100..=100 (S-pivot at mid-gray).
+    pub contrast: f32,
 }
 
 impl ImageEdits {
     pub const EXPOSURE_MIN: f32 = -3.0;
     pub const EXPOSURE_MAX: f32 = 3.0;
+    pub const ADJ_MIN: f32 = -100.0;
+    pub const ADJ_MAX: f32 = 100.0;
 
     pub fn identity() -> Self {
-        Self { exposure: 0.0 }
+        Self {
+            exposure: 0.0,
+            saturation: 0.0,
+            blacks: 0.0,
+            whites: 0.0,
+            brightness: 0.0,
+            contrast: 0.0,
+        }
     }
 
     /// True when no adjustment would alter the image.
     pub fn is_identity(&self) -> bool {
         self.exposure.abs() < f32::EPSILON
+            && self.saturation.abs() < f32::EPSILON
+            && self.blacks.abs() < f32::EPSILON
+            && self.whites.abs() < f32::EPSILON
+            && self.brightness.abs() < f32::EPSILON
+            && self.contrast.abs() < f32::EPSILON
     }
 
-    /// Clamp exposure into the supported range.
+    /// Clamp all controls into their supported ranges.
     pub fn clamped(self) -> Self {
         Self {
             exposure: self.exposure.clamp(Self::EXPOSURE_MIN, Self::EXPOSURE_MAX),
+            saturation: self.saturation.clamp(Self::ADJ_MIN, Self::ADJ_MAX),
+            blacks: self.blacks.clamp(Self::ADJ_MIN, Self::ADJ_MAX),
+            whites: self.whites.clamp(Self::ADJ_MIN, Self::ADJ_MAX),
+            brightness: self.brightness.clamp(Self::ADJ_MIN, Self::ADJ_MAX),
+            contrast: self.contrast.clamp(Self::ADJ_MIN, Self::ADJ_MAX),
         }
     }
 }
@@ -190,8 +219,14 @@ mod linear_tests {
             *p = image::Rgb([0.2, 0.2, 0.2]);
         }
         let lin = LinearRgb(buf);
-        let dark = lin.render(&ImageEdits { exposure: 0.0 });
-        let bright = lin.render(&ImageEdits { exposure: 1.0 });
+        let dark = lin.render(&ImageEdits {
+            exposure: 0.0,
+            ..ImageEdits::identity()
+        });
+        let bright = lin.render(&ImageEdits {
+            exposure: 1.0,
+            ..ImageEdits::identity()
+        });
         assert!(bright.get_pixel(0, 0)[0] > dark.get_pixel(0, 0)[0]);
     }
 
@@ -208,11 +243,76 @@ mod linear_tests {
         // sRGB8 -> linear -> render(0 EV) returns approximately the input pixels.
         let mut img = image::RgbImage::new(1, 1);
         img.put_pixel(0, 0, image::Rgb([50, 128, 200]));
-        let out = LinearRgb::from_srgb8(&img).render(&ImageEdits { exposure: 0.0 });
+        let out = LinearRgb::from_srgb8(&img).render(&ImageEdits {
+            exposure: 0.0,
+            ..ImageEdits::identity()
+        });
         let p = out.get_pixel(0, 0);
         for c in 0..3 {
             assert!((p[c] as i32 - img.get_pixel(0, 0)[c] as i32).abs() <= 1);
         }
     }
-}
 
+    #[test]
+    fn all_neutral_is_identity() {
+        assert!(ImageEdits::identity().is_identity());
+        assert!(
+            ImageEdits {
+                exposure: 0.0,
+                saturation: 0.0,
+                blacks: 0.0,
+                whites: 0.0,
+                brightness: 0.0,
+                contrast: 0.0,
+            }
+            .is_identity()
+        );
+    }
+
+    #[test]
+    fn any_nonzero_control_is_not_identity() {
+        for e in [
+            ImageEdits {
+                saturation: 10.0,
+                ..ImageEdits::identity()
+            },
+            ImageEdits {
+                blacks: -5.0,
+                ..ImageEdits::identity()
+            },
+            ImageEdits {
+                whites: 5.0,
+                ..ImageEdits::identity()
+            },
+            ImageEdits {
+                brightness: 1.0,
+                ..ImageEdits::identity()
+            },
+            ImageEdits {
+                contrast: -1.0,
+                ..ImageEdits::identity()
+            },
+        ] {
+            assert!(!e.is_identity());
+        }
+    }
+
+    #[test]
+    fn clamp_bounds_each_control() {
+        let c = ImageEdits {
+            exposure: 9.0,
+            saturation: 999.0,
+            blacks: -999.0,
+            whites: 999.0,
+            brightness: -999.0,
+            contrast: 999.0,
+        }
+        .clamped();
+        assert_eq!(c.exposure, 3.0);
+        assert_eq!(c.saturation, 100.0);
+        assert_eq!(c.blacks, -100.0);
+        assert_eq!(c.whites, 100.0);
+        assert_eq!(c.brightness, -100.0);
+        assert_eq!(c.contrast, 100.0);
+    }
+}

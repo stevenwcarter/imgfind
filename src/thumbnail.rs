@@ -502,10 +502,16 @@ mod tests {
         let resized = img.resize(64, 64, image::imageops::FilterType::Lanczos3);
         let mut want = Vec::new();
         resized
-            .write_to(&mut std::io::Cursor::new(&mut want), image::ImageFormat::Jpeg)
+            .write_to(
+                &mut std::io::Cursor::new(&mut want),
+                image::ImageFormat::Jpeg,
+            )
             .unwrap();
 
-        assert_eq!(via_seam, want, "identity must be byte-identical to the fast path");
+        assert_eq!(
+            via_seam, want,
+            "identity must be byte-identical to the fast path"
+        );
     }
 
     #[test]
@@ -524,7 +530,10 @@ mod tests {
         let bytes = generate_thumbnail_bytes(
             path.to_str().unwrap(),
             ThumbnailSpec::ScaleSize(ThumbnailSize(64)),
-            &ImageEdits { exposure: 2.0 },
+            &ImageEdits {
+                exposure: 2.0,
+                ..ImageEdits::identity()
+            },
         )
         .unwrap();
         let decoded = image::load_from_memory(&bytes).unwrap().to_rgb8();
@@ -550,7 +559,10 @@ mod tests {
         let bright = generate_thumbnail_bytes(
             p,
             ThumbnailSpec::ScaleSize(ThumbnailSize(64)),
-            &ImageEdits { exposure: 2.0 },
+            &ImageEdits {
+                exposure: 2.0,
+                ..ImageEdits::identity()
+            },
         )
         .unwrap();
         assert_ne!(
@@ -619,7 +631,10 @@ mod tests {
             &db,
             abs_path,
             hash,
-            &ImageEdits { exposure: 2.0 },
+            &ImageEdits {
+                exposure: 2.0,
+                ..ImageEdits::identity()
+            },
         )
         .expect("regenerate");
 
