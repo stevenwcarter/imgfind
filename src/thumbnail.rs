@@ -1,4 +1,4 @@
-use crate::{ThumbnailSize, ThumbnailSpec, database::Database, get_db_path};
+use crate::{ThumbnailSize, ThumbnailSpec, database::Database, edits::ImageEdits, get_db_path};
 use anyhow::{Context, Result};
 
 /// Long-edge target for the GUI lightbox/preview cached render.
@@ -61,7 +61,7 @@ pub fn generate_missing_thumbnails_batch(
     let writer_db = match block_on(Database::new(&db_path)) {
         Ok(db) => db,
         Err(e) => {
-            log::error!("Writer thread failed to open database: {:?}", e);
+            tracing::error!("Writer thread failed to open database: {:?}", e);
             panic!("Cannot proceed without DB access");
         }
     };
@@ -74,22 +74,22 @@ pub fn generate_missing_thumbnails_batch(
             if buf.is_empty() {
                 return;
             }
-            log::info!("Flushing {} thumbnails to database", buf.len());
+            tracing::info!("Flushing {} thumbnails to database", buf.len());
             let batch = std::mem::take(buf);
             let n = batch.len();
             match block_on(writer_db.insert_thumbnails_batch(&batch)) {
                 Ok(()) => {
                     writer_count.fetch_add(n, Ordering::SeqCst);
-                    log::debug!("Inserted {n} thumbnails");
+                    tracing::debug!("Inserted {n} thumbnails");
                 }
                 Err(e) => {
-                    log::error!("Failed to commit thumbnail batch: {:?}", e);
+                    tracing::error!("Failed to commit thumbnail batch: {:?}", e);
                 }
             }
         };
 
         for item in rx {
-            log::debug!("Writer received hash {}", item.0);
+            tracing::debug!("Writer received hash {}", item.0);
             buffer.push(item);
             if buffer.len() >= 40 {
                 flush(&mut buffer);
@@ -99,24 +99,48 @@ pub fn generate_missing_thumbnails_batch(
         flush(&mut buffer);
     });
 
+    // Fetch edits for each image on the coordinating thread before handing off to rayon
+    // workers.  The async DB call must not run inside a rayon task.
+    let images_with_edits: Vec<(crate::AbsolutePath, String, ImageEdits)> =
+        images_without_thumbnails
+            .into_iter()
+            .map(|(abs_path, hash)| {
+                let edits = match abs_path.to_relative(&db.parent_dir) {
+                    Ok(rel) => block_on(db.get_image_edits(&rel)).unwrap_or_else(|e| {
+                        tracing::warn!("failed to fetch edits for {}: {e:#}", abs_path.as_str());
+                        ImageEdits::default()
+                    }),
+                    Err(_) => {
+                        tracing::warn!(
+                            "could not compute relative path for {}, using identity edits",
+                            abs_path.as_str()
+                        );
+                        ImageEdits::default()
+                    }
+                };
+                (abs_path, hash, edits)
+            })
+            .collect();
+
     // Parallel generation of thumbnails (CPU-bound); each task sends bytes to single writer.
-    images_without_thumbnails
+    images_with_edits
         .par_iter()
-        .for_each(|(path, hash)| {
-            let path = path.as_str();
-            if let Err(e) = generate_and_store_thumbnail(path.as_ref(), hash, size, &tx) {
-                log::warn!("Failed to generate thumbnail for {}: {:?}", path, e);
+        .for_each(|(path, hash, edits)| {
+            let path_str = path.as_str();
+            if let Err(e) = generate_and_store_thumbnail(path_str.as_ref(), hash, size, edits, &tx)
+            {
+                tracing::warn!("Failed to generate thumbnail for {}: {:?}", path_str, e);
             } else {
-                log::info!("Generated thumbnail for: {}", path);
+                tracing::info!("Generated thumbnail for: {}", path_str);
             }
         });
 
-    log::info!("All thumbnail generation tasks completed.");
+    tracing::info!("All thumbnail generation tasks completed.");
     // Close the sending side so the writer thread can finish once queue is drained.
     drop(tx);
-    log::info!("Waiting for writer thread to finish...");
+    tracing::info!("Waiting for writer thread to finish...");
     if let Err(e) = writer_handle.join() {
-        log::error!("Writer thread panicked: {:?}", e);
+        tracing::error!("Writer thread panicked: {:?}", e);
     }
 
     Ok(generated_count.load(Ordering::SeqCst))
@@ -125,17 +149,27 @@ pub fn generate_missing_thumbnails_batch(
 // Generate JPEG bytes for a thumbnail rendition (pure aside from file IO).
 // `ScaleSize` downscales via the fast decode path; `FullSize` uses the
 // RAW-aware full-resolution decode and encodes at native dimensions.
-fn generate_thumbnail_bytes(filepath: &str, spec: ThumbnailSpec) -> Result<Vec<u8>> {
+// `edits` are applied after decode and before resize/encode; identity edits
+// short-circuit with no copy (see `apply_adjustments`).
+fn generate_thumbnail_bytes(
+    filepath: &str,
+    spec: ThumbnailSpec,
+    edits: &ImageEdits,
+) -> Result<Vec<u8>> {
     let path = std::path::Path::new(filepath);
     let out_image = match spec {
         ThumbnailSpec::ScaleSize(size) => {
-            let image = crate::decode::decode_image(path)
+            let img = crate::decode::decode_image(path)
                 .with_context(|| format!("Failed to decode image: {}", filepath))?;
+            let img = crate::edits::apply_adjustments(img, edits);
             let px = size.get();
-            image.resize(px, px, image::imageops::FilterType::Lanczos3)
+            img.resize(px, px, image::imageops::FilterType::Lanczos3)
         }
-        ThumbnailSpec::FullSize => crate::decode::decode_full_image(path)
-            .with_context(|| format!("Failed to decode full image: {}", filepath))?,
+        ThumbnailSpec::FullSize => {
+            let img = crate::decode::decode_full_image(path)
+                .with_context(|| format!("Failed to decode full image: {}", filepath))?;
+            crate::edits::apply_adjustments(img, edits)
+        }
     };
 
     let mut bytes: Vec<u8> = Vec::new();
@@ -150,9 +184,10 @@ fn generate_and_store_thumbnail(
     filepath: &str,
     hash: &str,
     size: ThumbnailSize,
+    edits: &ImageEdits,
     tx: &Sender<(String, u32, Vec<u8>)>,
 ) -> Result<()> {
-    let bytes = generate_thumbnail_bytes(filepath, ThumbnailSpec::ScaleSize(size))?;
+    let bytes = generate_thumbnail_bytes(filepath, ThumbnailSpec::ScaleSize(size), edits)?;
     tx.send((hash.to_string(), size.get(), bytes))
         .context("Failed to send thumbnail bytes over channel")?;
     Ok(())
@@ -183,11 +218,51 @@ pub fn get_or_generate_thumbnail(
         return Ok(thumbnail_data);
     }
 
-    // Miss: generate, persist, return.
-    let bytes = generate_thumbnail_bytes(filepath, spec)?;
+    // Miss: fetch edits (identity is the fast common case), generate, persist, return.
+    let abs = crate::AbsolutePath(std::path::PathBuf::from(filepath));
+    let edits = match abs.to_relative(&db.parent_dir) {
+        Ok(rel) => block_on(db.get_image_edits(&rel)).context("fetch image edits for thumbnail")?,
+        Err(_) => {
+            tracing::warn!("could not compute relative path for {filepath}, using identity edits");
+            ImageEdits::default()
+        }
+    };
+    let bytes = generate_thumbnail_bytes(filepath, spec, &edits)?;
     block_on(db.insert_thumbnail(hash, spec, &bytes))
         .context("Failed to store thumbnail in database")?;
     block_on(db.get_thumbnail(hash, spec)).context("Failed to retrieve newly generated thumbnail")
+}
+
+/// Regenerate all cached thumbnail sizes for a single image with new edits applied.
+///
+/// For each size currently stored under `hash`, decodes the original file at
+/// `abs_path`, applies `edits`, and overwrites the blob via `insert_thumbnail`.
+/// Returns the count of sizes regenerated.
+///
+/// The caller is responsible for ensuring `abs_path` still points to the
+/// original file (edits are non-destructive; originals are never modified).
+pub fn regenerate_thumbnails_for_image(
+    db: &Database,
+    abs_path: &str,
+    hash: &str,
+    edits: &ImageEdits,
+) -> anyhow::Result<usize> {
+    let sizes = block_on(db.get_thumbnail_sizes(hash))?;
+    let mut count = 0;
+    for size in sizes {
+        let spec = if size == 0 {
+            ThumbnailSpec::FullSize
+        } else {
+            ThumbnailSpec::ScaleSize(ThumbnailSize(size))
+        };
+        let bytes = generate_thumbnail_bytes(abs_path, spec, edits).with_context(|| {
+            format!("failed to regenerate thumbnail (spec={spec:?}) for {abs_path}")
+        })?;
+        block_on(db.insert_thumbnail(hash, spec, &bytes))
+            .with_context(|| format!("failed to store regenerated thumbnail (spec={spec:?})"))?;
+        count += 1;
+    }
+    Ok(count)
 }
 
 /// Abstraction over "how many thumbnails are missing" and "generate one batch",
@@ -395,6 +470,117 @@ mod tests {
 
         // Persisted under size=0 and retrievable as FullSize.
         assert!(block_on(db.get_thumbnail(hash, ThumbnailSpec::FullSize)).is_ok());
+        let _ = std::fs::remove_dir_all(parent_dir);
+    }
+
+    #[test]
+    fn edited_thumbnail_differs_from_unedited() {
+        // Build a small temp image file, generate at 64px with identity vs +2 EV.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.png");
+        image::RgbImage::from_pixel(80, 80, image::Rgb([100, 100, 100]))
+            .save(&path)
+            .unwrap();
+        let p = path.to_str().unwrap();
+        let plain = generate_thumbnail_bytes(
+            p,
+            ThumbnailSpec::ScaleSize(ThumbnailSize(64)),
+            &ImageEdits::identity(),
+        )
+        .unwrap();
+        let bright = generate_thumbnail_bytes(
+            p,
+            ThumbnailSpec::ScaleSize(ThumbnailSize(64)),
+            &ImageEdits { exposure: 2.0 },
+        )
+        .unwrap();
+        assert_ne!(
+            plain, bright,
+            "exposure edit must change generated thumbnail bytes"
+        );
+
+        // And identity equals a second identity render (determinism + true no-op).
+        let plain2 = generate_thumbnail_bytes(
+            p,
+            ThumbnailSpec::ScaleSize(ThumbnailSize(64)),
+            &ImageEdits::identity(),
+        )
+        .unwrap();
+        assert_eq!(plain, plain2);
+    }
+
+    /// `regenerate_thumbnails_for_image` overwrites every cached size with the
+    /// new edits baked in — the stored bytes change for a non-identity edit.
+    #[test]
+    fn regenerate_overwrites_existing_sizes_with_edits() {
+        use crate::{ThumbnailSpec, edits::ImageEdits};
+
+        let db_path = temp_db_path();
+        let db = block_on(Database::new(&db_path)).expect("create test db");
+        let parent_dir = db_path.parent().unwrap().parent().unwrap();
+
+        // A small but real decodable image (80×80 mid-grey).
+        let img_path = parent_dir.join("regen_fixture.png");
+        image::RgbImage::from_pixel(80, 80, image::Rgb([120, 120, 120]))
+            .save(&img_path)
+            .expect("save fixture");
+        let abs_path = img_path.to_str().unwrap();
+        let hash = "regen_test_hash";
+
+        // Seed identity thumbnails at 64px and FullSize (size=0) so
+        // get_thumbnail_sizes returns both.
+        let identity_bytes_64 = generate_thumbnail_bytes(
+            abs_path,
+            ThumbnailSpec::ScaleSize(ThumbnailSize(64)),
+            &ImageEdits::identity(),
+        )
+        .expect("identity 64");
+        let identity_bytes_full =
+            generate_thumbnail_bytes(abs_path, ThumbnailSpec::FullSize, &ImageEdits::identity())
+                .expect("identity full");
+
+        block_on(db.insert_thumbnail(
+            hash,
+            ThumbnailSpec::ScaleSize(ThumbnailSize(64)),
+            &identity_bytes_64,
+        ))
+        .expect("seed 64");
+        block_on(db.insert_thumbnail(hash, ThumbnailSpec::FullSize, &identity_bytes_full))
+            .expect("seed full");
+
+        // Capture what is currently stored for both seeded sizes.
+        let before_64 =
+            block_on(db.get_thumbnail(hash, ThumbnailSpec::ScaleSize(ThumbnailSize(64))))
+                .expect("before 64");
+        let before_full =
+            block_on(db.get_thumbnail(hash, ThumbnailSpec::FullSize)).expect("before full");
+
+        // Regenerate with +2 EV — both sizes must change.
+        let n = super::regenerate_thumbnails_for_image(
+            &db,
+            abs_path,
+            hash,
+            &ImageEdits { exposure: 2.0 },
+        )
+        .expect("regenerate");
+
+        assert_eq!(n, 2, "both seeded sizes should be regenerated");
+
+        let after_64 =
+            block_on(db.get_thumbnail(hash, ThumbnailSpec::ScaleSize(ThumbnailSize(64))))
+                .expect("after 64");
+        assert_ne!(
+            before_64, after_64,
+            "64px thumbnail bytes must change after +2 EV edit"
+        );
+
+        let after_full =
+            block_on(db.get_thumbnail(hash, ThumbnailSpec::FullSize)).expect("after full");
+        assert_ne!(
+            before_full, after_full,
+            "FullSize thumbnail bytes must change after +2 EV edit"
+        );
+
         let _ = std::fs::remove_dir_all(parent_dir);
     }
 }

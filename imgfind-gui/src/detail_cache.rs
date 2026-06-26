@@ -39,3 +39,12 @@ pub fn insert(key: String, image: Image) {
         c.put(key, image);
     });
 }
+
+/// Drop the cached image for `key` so the next detail-panel view re-decodes it.
+/// Used after an edit is accepted and the rebaked thumbnail must replace the
+/// stale decoded copy. UI thread only.
+pub fn remove(key: &str) {
+    DETAIL_IMAGE_CACHE.with_borrow_mut(|c| {
+        c.pop(key);
+    });
+}

@@ -77,6 +77,11 @@ fn col_opt_text(row: &turso::Row, idx: usize) -> Result<Option<String>> {
     })
 }
 
+/// Read an `f64` from row column `idx`, with `ctx` as the error context.
+fn col_f64(row: &turso::Row, idx: usize, ctx: &str) -> Result<f64> {
+    col_opt_f64(row, idx)?.with_context(|| format!("expected real for {ctx}"))
+}
+
 impl Database {
     pub async fn new(db_path: &Path) -> Result<Self> {
         let parent_path = db_path.parent().context("DB path has no parent")?;
@@ -555,6 +560,72 @@ impl Database {
         let mut out = Vec::new();
         while let Some(row) = rows.next().await? {
             out.push(RelativePath(PathBuf::from(col_text(&row, 0, "path")?)));
+        }
+        Ok(out)
+    }
+
+    /// Return the stored non-destructive edits for `path`.
+    ///
+    /// Returns [`crate::edits::ImageEdits::identity()`] when no row exists.
+    /// The returned value is `.clamped()` so out-of-range DB values cannot
+    /// reach the pixel pipeline.
+    pub async fn get_image_edits(&self, path: &RelativePath) -> Result<crate::edits::ImageEdits> {
+        let conn = self.pool.get().await.context("get connection")?;
+        let mut rows = conn
+            .query(
+                "SELECT e.exposure FROM image_edits e
+                 JOIN images i ON i.id = e.image_id
+                 WHERE i.path = ?1",
+                (path.as_str().into_owned(),),
+            )
+            .await?;
+        match rows.next().await? {
+            Some(row) => Ok(crate::edits::ImageEdits {
+                exposure: col_f64(&row, 0, "exposure")? as f32,
+            }
+            .clamped()),
+            None => Ok(crate::edits::ImageEdits::identity()),
+        }
+    }
+
+    /// Persist non-destructive edits for `path`, creating or replacing the row.
+    ///
+    /// The stored exposure is `.clamped()` to `[-3.0, 3.0]` before writing so
+    /// the DB cannot hold an out-of-range value even if the caller skips
+    /// clamping.
+    pub async fn set_image_edits(
+        &self,
+        path: &RelativePath,
+        edits: &crate::edits::ImageEdits,
+    ) -> Result<()> {
+        let edits = edits.clamped();
+        let conn = self.pool.get().await.context("get connection")?;
+        conn.execute(
+            "INSERT INTO image_edits (image_id, exposure, updated_at)
+             SELECT i.id, ?2, CURRENT_TIMESTAMP FROM images i WHERE i.path = ?1
+             ON CONFLICT(image_id) DO UPDATE SET exposure = excluded.exposure,
+             updated_at = CURRENT_TIMESTAMP",
+            (path.as_str().into_owned(), edits.exposure as f64),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Return the distinct thumbnail `size` values stored for `image_hash`.
+    ///
+    /// Useful for checking which renditions are already cached before
+    /// generating missing ones.
+    pub async fn get_thumbnail_sizes(&self, image_hash: &str) -> Result<Vec<u32>> {
+        let conn = self.pool.get().await.context("get connection")?;
+        let mut rows = conn
+            .query(
+                "SELECT DISTINCT size FROM thumbnails WHERE image_hash = ?1",
+                (image_hash.to_string(),),
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push(col_i64(&row, 0, "size")? as u32);
         }
         Ok(out)
     }
@@ -2953,5 +3024,50 @@ mod tests {
         );
 
         cleanup(&db_path);
+    }
+
+    /// One-image fixture returning `(db, relative_path)`.
+    async fn test_db_with_one_image() -> (Database, RelativePath) {
+        let (db, _path) = test_db_with_images(&["a.jpg"]).await;
+        (db, rel("a.jpg"))
+    }
+
+    /// One-image fixture returning `(db, relative_path, hash)`.
+    async fn test_db_with_one_image_hash() -> (Database, RelativePath, String) {
+        let (db, _path) = test_db_with_images(&["a.jpg"]).await;
+        // test_db_with_rows inserts hash = format!("h{id}") with id=1 => "h1"
+        (db, rel("a.jpg"), "h1".to_string())
+    }
+
+    #[tokio::test]
+    async fn image_edits_upsert_and_read() {
+        use crate::edits::ImageEdits;
+        let (db, rel_path) = test_db_with_one_image().await;
+        // Absent => identity
+        assert!(db.get_image_edits(&rel_path).await.unwrap().is_identity());
+        // Insert
+        db.set_image_edits(&rel_path, &ImageEdits { exposure: 1.5 })
+            .await
+            .unwrap();
+        assert_eq!(db.get_image_edits(&rel_path).await.unwrap().exposure, 1.5);
+        // Update same row (no duplicate)
+        db.set_image_edits(&rel_path, &ImageEdits { exposure: -0.75 })
+            .await
+            .unwrap();
+        assert_eq!(db.get_image_edits(&rel_path).await.unwrap().exposure, -0.75);
+    }
+
+    #[tokio::test]
+    async fn thumbnail_sizes_lists_distinct() {
+        let (db, _rel_path, hash) = test_db_with_one_image_hash().await;
+        db.insert_thumbnail(&hash, ThumbnailSize(300), &[1, 2, 3])
+            .await
+            .unwrap();
+        db.insert_thumbnail(&hash, ThumbnailSize(512), &[4, 5, 6])
+            .await
+            .unwrap();
+        let mut sizes = db.get_thumbnail_sizes(&hash).await.unwrap();
+        sizes.sort_unstable();
+        assert_eq!(sizes, vec![300, 512]);
     }
 }

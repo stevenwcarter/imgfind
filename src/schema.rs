@@ -17,7 +17,7 @@ use anyhow::{Context, Result};
 use crate::EmbeddingDim;
 
 /// The highest migration version applied by this module.
-pub const LATEST_MIGRATION_VERSION: i32 = 3;
+pub const LATEST_MIGRATION_VERSION: i32 = 4;
 
 /// Derive a safe SQL identifier from a model name.
 ///
@@ -118,6 +118,11 @@ pub async fn run_migrations(conn: &turso::Connection) -> Result<()> {
         migration_003_ui_state(conn)
             .await
             .context("migration 3 (ui_state)")?;
+    }
+    if current < 4 {
+        migration_004_image_edits(conn)
+            .await
+            .context("migration 4 (image_edits)")?;
     }
     if current < LATEST_MIGRATION_VERSION {
         conn.execute(
@@ -362,6 +367,21 @@ async fn migration_003_ui_state(conn: &turso::Connection) -> Result<()> {
     Ok(())
 }
 
+/// Migration 4: image edits table for brightness/exposure adjustments.
+async fn migration_004_image_edits(conn: &turso::Connection) -> Result<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS image_edits (\
+            image_id   INTEGER PRIMARY KEY REFERENCES images(id) ON DELETE CASCADE, \
+            exposure   REAL NOT NULL DEFAULT 0.0, \
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP\
+        )",
+        (),
+    )
+    .await
+    .context("create image_edits")?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,6 +420,7 @@ mod tests {
             "collection_images",
             "models",
             "ui_state",
+            "image_edits",
             "schema_meta",
         ] {
             assert!(table_exists(&conn, t).await, "missing table {t}");
