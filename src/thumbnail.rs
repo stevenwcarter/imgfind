@@ -147,29 +147,36 @@ pub fn generate_missing_thumbnails_batch(
 }
 
 // Generate JPEG bytes for a thumbnail rendition (pure aside from file IO).
-// `ScaleSize` downscales via the fast decode path; `FullSize` uses the
-// RAW-aware full-resolution decode and encodes at native dimensions.
-// `edits` are applied after decode and before resize/encode; identity edits
-// short-circuit with no copy (see `apply_adjustments`).
+// Identity edits take the fast path (decode_image/decode_full_image → resize);
+// non-identity edits go through the linear pipeline for highlight-preserving
+// tonemapping (decode_linear → downscale → render).
 fn generate_thumbnail_bytes(
     filepath: &str,
     spec: ThumbnailSpec,
     edits: &ImageEdits,
 ) -> Result<Vec<u8>> {
     let path = std::path::Path::new(filepath);
-    let out_image = match spec {
-        ThumbnailSpec::ScaleSize(size) => {
-            let img = crate::decode::decode_image(path)
-                .with_context(|| format!("Failed to decode image: {}", filepath))?;
-            let img = crate::edits::apply_adjustments(img, edits);
-            let px = size.get();
-            img.resize(px, px, image::imageops::FilterType::Lanczos3)
+    let out_image: image::DynamicImage = if edits.is_identity() {
+        // Fast path (unchanged): no demosaic, no tonemap.
+        match spec {
+            ThumbnailSpec::ScaleSize(size) => {
+                let img = crate::decode::decode_image(path)
+                    .with_context(|| format!("Failed to decode image: {filepath}"))?;
+                let px = size.get();
+                img.resize(px, px, image::imageops::FilterType::Lanczos3)
+            }
+            ThumbnailSpec::FullSize => crate::decode::decode_full_image(path)
+                .with_context(|| format!("Failed to decode full image: {filepath}"))?,
         }
-        ThumbnailSpec::FullSize => {
-            let img = crate::decode::decode_full_image(path)
-                .with_context(|| format!("Failed to decode full image: {}", filepath))?;
-            crate::edits::apply_adjustments(img, edits)
-        }
+    } else {
+        // High-fidelity path: linear decode -> downscale in linear -> tonemap.
+        let linear = crate::decode::decode_linear(path)
+            .with_context(|| format!("Failed to decode (linear) image: {filepath}"))?;
+        let sized = match spec {
+            ThumbnailSpec::ScaleSize(size) => linear.downscale(size.get()),
+            ThumbnailSpec::FullSize => linear,
+        };
+        image::DynamicImage::ImageRgb8(sized.render(edits))
     };
 
     let mut bytes: Vec<u8> = Vec::new();
@@ -471,6 +478,58 @@ mod tests {
         // Persisted under size=0 and retrievable as FullSize.
         assert!(block_on(db.get_thumbnail(hash, ThumbnailSpec::FullSize)).is_ok());
         let _ = std::fs::remove_dir_all(parent_dir);
+    }
+
+    #[test]
+    fn identity_thumbnail_matches_plain_decode() {
+        // Identity edits must take the fast path: bytes equal a direct decode+resize+encode.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.png");
+        image::RgbImage::from_pixel(80, 80, image::Rgb([90, 90, 90]))
+            .save(&path)
+            .unwrap();
+        let p = path.to_str().unwrap();
+
+        let via_seam = generate_thumbnail_bytes(
+            p,
+            ThumbnailSpec::ScaleSize(ThumbnailSize(64)),
+            &ImageEdits::identity(),
+        )
+        .unwrap();
+
+        // Reference: the exact fast-path operations.
+        let img = crate::decode::decode_image(std::path::Path::new(p)).unwrap();
+        let resized = img.resize(64, 64, image::imageops::FilterType::Lanczos3);
+        let mut want = Vec::new();
+        resized
+            .write_to(&mut std::io::Cursor::new(&mut want), image::ImageFormat::Jpeg)
+            .unwrap();
+
+        assert_eq!(via_seam, want, "identity must be byte-identical to the fast path");
+    }
+
+    #[test]
+    fn highlight_edit_preserves_more_than_hard_clamp() {
+        // A bright image pushed +2 EV through the linear path must NOT be a single
+        // flat 255 block — decode the regenerated JPEG and assert it isn't all 255.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bright.png");
+        // A gradient near white so a hard clamp would flatten it.
+        let mut img = image::RgbImage::new(64, 1);
+        for (x, _y, px) in img.enumerate_pixels_mut() {
+            let v = 200 + (x * 55 / 63) as u8; // 200..=255
+            *px = image::Rgb([v, v, v]);
+        }
+        img.save(&path).unwrap();
+        let bytes = generate_thumbnail_bytes(
+            path.to_str().unwrap(),
+            ThumbnailSpec::ScaleSize(ThumbnailSize(64)),
+            &ImageEdits { exposure: 2.0 },
+        )
+        .unwrap();
+        let decoded = image::load_from_memory(&bytes).unwrap().to_rgb8();
+        let all_white = decoded.pixels().all(|p| p[0] == 255);
+        assert!(!all_white, "highlights flattened to pure white (blowout)");
     }
 
     #[test]
