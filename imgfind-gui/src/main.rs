@@ -362,9 +362,10 @@ fn main() -> Result<()> {
     // Held in an Arc<Mutex<_>> so the background decode can store it and the
     // exposure-changed handler can read it.
     let lb_edit_base: Arc<Mutex<Option<imgfind::edits::LinearRgb>>> = Arc::new(Mutex::new(None));
-    // Last-accepted exposure for the current image (Reset target and discard
-    // restore value). Seeded from the DB when edit mode opens, updated on Accept.
-    let lb_last_accepted_exposure: Arc<Mutex<f32>> = Arc::new(Mutex::new(0.0));
+    // Last-accepted edits for the current image (discard-restore value and
+    // the Accept target). Seeded from the DB when edit mode opens, updated on Accept.
+    let lb_last_accepted_edits: Arc<Mutex<imgfind::edits::ImageEdits>> =
+        Arc::new(Mutex::new(imgfind::edits::ImageEdits::identity()));
     // Monotonic guard for the live-preview render: each exposure change / base
     // decode claims the next value, and a render only applies if it is still the
     // latest, so a slow off-thread multiply can't clobber a newer slider value.
@@ -1409,7 +1410,7 @@ fn main() -> Result<()> {
         let state_ref = Arc::clone(&state);
         let lb_ref = Arc::clone(&lb_index);
         let edit_base_ref = Arc::clone(&lb_edit_base);
-        let last_accepted_ref = Arc::clone(&lb_last_accepted_exposure);
+        let last_accepted_ref = Arc::clone(&lb_last_accepted_edits);
         let edit_gen_ref = Arc::clone(&lb_edit_generation);
         let gen_ref = Arc::clone(&lb_generation);
         let shown_fullres_ref = Arc::clone(&lb_shown_fullres);
@@ -1427,9 +1428,18 @@ fn main() -> Result<()> {
                 .map(|r| r.path.clone());
 
             if w.get_edit_mode() {
-                // EXIT (discard): revert slider, clear base, restore baked image.
+                // EXIT (discard): restore all six sliders from last-accepted,
+                // clear the base, invalidate in-flight previews.
                 let restore = *last_accepted_ref.lock();
-                set_edit_exposure(&w, restore);
+                {
+                    use edits_ui::EditControl::*;
+                    set_edit_control(&w, Exposure, restore.exposure);
+                    set_edit_control(&w, Saturation, restore.saturation);
+                    set_edit_control(&w, Blacks, restore.blacks);
+                    set_edit_control(&w, Whites, restore.whites);
+                    set_edit_control(&w, Brightness, restore.brightness);
+                    set_edit_control(&w, Contrast, restore.contrast);
+                }
                 *edit_base_ref.lock() = None;
                 // Invalidate any in-flight preview render so a late one can't land.
                 edit_gen_ref.fetch_add(1, Ordering::SeqCst);
@@ -1454,14 +1464,21 @@ fn main() -> Result<()> {
             let Some(rel) = rel else { return };
             let stored = backend_edit
                 .image_edits(&rel)
-                .map(|e| e.exposure)
                 .unwrap_or_else(|e| {
                     tracing::warn!("edit-mode: failed to read edits for {rel}: {e:#}");
-                    0.0
-                });
-            let exposure = edits_ui::clamp_exposure(stored);
-            *last_accepted_ref.lock() = exposure;
-            set_edit_exposure(&w, exposure);
+                    imgfind::edits::ImageEdits::identity()
+                })
+                .clamped();
+            *last_accepted_ref.lock() = stored;
+            {
+                use edits_ui::EditControl::*;
+                set_edit_control(&w, Exposure, stored.exposure);
+                set_edit_control(&w, Saturation, stored.saturation);
+                set_edit_control(&w, Blacks, stored.blacks);
+                set_edit_control(&w, Whites, stored.whites);
+                set_edit_control(&w, Brightness, stored.brightness);
+                set_edit_control(&w, Contrast, stored.contrast);
+            }
             w.set_edit_mode(true);
             // Clear any prior base so a stale render can't read it before the new
             // decode completes; the render is kicked from the decode thread.
@@ -1499,7 +1516,7 @@ fn main() -> Result<()> {
                         return;
                     }
                     *base_d.lock() = Some(img);
-                    render_edit_preview(weak_d.clone(), base_d, gen_d, w.get_edit_exposure());
+                    render_edit_preview(weak_d.clone(), base_d, gen_d, edits_from_window(&w));
                     // Clear the spinner now that the base is stored and preview queued.
                     w.set_edit_busy(false);
                 });
@@ -1507,48 +1524,71 @@ fn main() -> Result<()> {
         });
     }
 
-    // --- edit-exposure-changed callback: live-preview a new slider value ---
+    // --- edit-control-changed: live-preview a slider move for any control ---
     {
         let weak = window.as_weak();
         let edit_base_ref = Arc::clone(&lb_edit_base);
         let edit_gen_ref = Arc::clone(&lb_edit_generation);
-        window.on_edit_exposure_changed(move |v| {
-            let v = edits_ui::clamp_exposure(v);
+        window.on_edit_control_changed(move |idx, v| {
+            let Some(control) = edits_ui::EditControl::from_i32(idx) else {
+                return;
+            };
+            let v = control.clamp(v);
             if let Some(w) = weak.upgrade() {
-                set_edit_exposure(&w, v);
+                set_edit_control(&w, control, v);
+                render_edit_preview(
+                    weak.clone(),
+                    Arc::clone(&edit_base_ref),
+                    Arc::clone(&edit_gen_ref),
+                    edits_from_window(&w),
+                );
             }
-            render_edit_preview(
-                weak.clone(),
-                Arc::clone(&edit_base_ref),
-                Arc::clone(&edit_gen_ref),
-                v,
-            );
         });
     }
 
-    // --- edit-reset callback: reset the slider to neutral 0 EV ---
+    // --- edit-control-reset: reset one control to neutral, then re-render ---
     //
-    // Resets to a fixed 0.0 (not the last-accepted value) so the user can
-    // audition a flat, un-exposed image regardless of what was previously saved.
-    // Goes through the same `render_edit_preview` generation-guard path as the
-    // slider so a slow in-flight multiply can't land after the reset. The
-    // two-way `value <=> root.edit-exposure` binding in the Slint Slider means
-    // the thumb physically reseats when `set_edit_exposure` writes `edit-exposure`.
+    // The two-way `value <=> root.<prop>` binding in each AdjustRow means
+    // `set_edit_control` physically reseats the Slider thumb. Goes through the
+    // same `render_edit_preview` generation-guard path as the slider.
     {
         let weak = window.as_weak();
         let edit_base_ref = Arc::clone(&lb_edit_base);
         let edit_gen_ref = Arc::clone(&lb_edit_generation);
-        window.on_edit_reset(move || {
-            let v = 0.0_f32;
+        window.on_edit_control_reset(move |idx| {
+            let Some(control) = edits_ui::EditControl::from_i32(idx) else {
+                return;
+            };
             if let Some(w) = weak.upgrade() {
-                set_edit_exposure(&w, v);
+                set_edit_control(&w, control, control.neutral());
+                render_edit_preview(
+                    weak.clone(),
+                    Arc::clone(&edit_base_ref),
+                    Arc::clone(&edit_gen_ref),
+                    edits_from_window(&w),
+                );
             }
-            render_edit_preview(
-                weak.clone(),
-                Arc::clone(&edit_base_ref),
-                Arc::clone(&edit_gen_ref),
-                v,
-            );
+        });
+    }
+
+    // --- edit-reset-all: every control to neutral, then re-render ---
+    {
+        let weak = window.as_weak();
+        let edit_base_ref = Arc::clone(&lb_edit_base);
+        let edit_gen_ref = Arc::clone(&lb_edit_generation);
+        window.on_edit_reset_all(move || {
+            if let Some(w) = weak.upgrade() {
+                use edits_ui::EditControl::*;
+                for c in [Exposure, Saturation, Blacks, Whites, Brightness, Contrast] {
+                    set_edit_control(&w, c, c.neutral());
+                }
+                render_edit_preview(
+                    weak.clone(),
+                    Arc::clone(&edit_base_ref),
+                    Arc::clone(&edit_gen_ref),
+                    edits_from_window(&w),
+                );
+            }
         });
     }
 
@@ -1563,7 +1603,7 @@ fn main() -> Result<()> {
         let state_ref = Arc::clone(&state);
         let lb_ref = Arc::clone(&lb_index);
         let edit_base_ref = Arc::clone(&lb_edit_base);
-        let last_accepted_ref = Arc::clone(&lb_last_accepted_exposure);
+        let last_accepted_ref = Arc::clone(&lb_last_accepted_edits);
         let edit_gen_ref = Arc::clone(&lb_edit_generation);
         let gen_ref = Arc::clone(&lb_generation);
         let shown_fullres_ref = Arc::clone(&lb_shown_fullres);
@@ -1579,7 +1619,8 @@ fn main() -> Result<()> {
                 .get(lb_idx.unwrap_or(0))
                 .map(|r| r.path.clone());
             let Some(rel) = rel else { return };
-            let exposure = edits_ui::clamp_exposure(w.get_edit_exposure());
+            // Gather the full set of edits from the window (all six controls).
+            let edits = edits_from_window(&w);
             // Show the busy spinner while the (potentially slow) thumbnail
             // regeneration runs on the background thread.
             w.set_edit_busy(true);
@@ -1595,7 +1636,6 @@ fn main() -> Result<()> {
             let fit_scale_a = Arc::clone(&fit_scale_ref);
             let evict_a = Arc::clone(&evict_ref);
             std::thread::spawn(move || {
-                let edits = imgfind::edits::ImageEdits { exposure };
                 if let Err(e) = backend_a.save_edits_and_regenerate(&rel, &edits) {
                     tracing::warn!("edit-accept: failed to save/regenerate for {rel}: {e:#}");
                     // Clear the busy flag on error so the spinner is not stuck.
@@ -1608,7 +1648,7 @@ fn main() -> Result<()> {
                 }
                 let _ = slint::invoke_from_event_loop(move || {
                     let Some(w) = weak_a.upgrade() else { return };
-                    *last_accepted_a.lock() = exposure;
+                    *last_accepted_a.lock() = edits;
                     *edit_base_a.lock() = None;
                     edit_gen_a.fetch_add(1, Ordering::SeqCst);
                     w.set_edit_busy(false);
@@ -4167,36 +4207,73 @@ fn load_lightbox_fullres(
     });
 }
 
-/// Set the edit-mode exposure value and its formatted readout together so the
-/// slider and the "Exposure: …" label never drift apart.
-fn set_edit_exposure(w: &MainWindow, v: f32) {
-    w.set_edit_exposure(v);
-    w.set_edit_exposure_label(edits_ui::format_exposure(v).into());
+/// Set one edit control's slider value and formatted label together so the
+/// thumb and readout never drift apart.
+fn set_edit_control(w: &MainWindow, control: edits_ui::EditControl, v: f32) {
+    use edits_ui::EditControl::*;
+    let label: slint::SharedString = control.format(v).into();
+    match control {
+        Exposure => {
+            w.set_edit_exposure(v);
+            w.set_edit_exposure_label(label);
+        }
+        Saturation => {
+            w.set_edit_saturation(v);
+            w.set_edit_saturation_label(label);
+        }
+        Blacks => {
+            w.set_edit_blacks(v);
+            w.set_edit_blacks_label(label);
+        }
+        Whites => {
+            w.set_edit_whites(v);
+            w.set_edit_whites_label(label);
+        }
+        Brightness => {
+            w.set_edit_brightness(v);
+            w.set_edit_brightness_label(label);
+        }
+        Contrast => {
+            w.set_edit_contrast(v);
+            w.set_edit_contrast_label(label);
+        }
+    }
 }
 
-/// Render the live edit-mode preview: apply `exposure` to the (already-decoded)
+/// Gather the current slider state from the window into a full `ImageEdits`,
+/// clamping each control to its valid range.
+fn edits_from_window(w: &MainWindow) -> imgfind::edits::ImageEdits {
+    imgfind::edits::ImageEdits {
+        exposure: w.get_edit_exposure(),
+        saturation: w.get_edit_saturation(),
+        blacks: w.get_edit_blacks(),
+        whites: w.get_edit_whites(),
+        brightness: w.get_edit_brightness(),
+        contrast: w.get_edit_contrast(),
+    }
+    .clamped()
+}
+
+/// Render the live edit-mode preview: apply `edits` to the (already-decoded)
 /// unedited base and swap the pixels into the lightbox, latest-wins guarded.
 ///
-/// The pixel multiply runs on a background thread so dragging the slider never
-/// janks the UI; `slint::Image` is built and set on the UI thread. A render only
-/// applies if its captured `generation` is still current, so a slow multiply for
-/// a superseded slider value is dropped. The base image is `None` outside edit
-/// mode, in which case this is a no-op.
+/// The render runs on a background thread so dragging a slider never janks the
+/// UI; `slint::Image` is built and set on the UI thread. A render only applies
+/// if its captured `generation` is still current, so a slow in-flight multiply
+/// for a superseded slider value is dropped. The base image is `None` outside
+/// edit mode, in which case this is a no-op.
 fn render_edit_preview(
     weak: Weak<MainWindow>,
     base: Arc<Mutex<Option<imgfind::edits::LinearRgb>>>,
     generation: Arc<AtomicU64>,
-    exposure: f32,
+    edits: imgfind::edits::ImageEdits,
 ) {
     let my_gen = generation.fetch_add(1, Ordering::SeqCst) + 1;
     let Some(base_img) = base.lock().clone() else {
         return;
     };
     std::thread::spawn(move || {
-        let edits = imgfind::edits::ImageEdits {
-            exposure: edits_ui::clamp_exposure(exposure),
-        };
-        let rgb = base_img.render(&edits);
+        let rgb = base_img.render(&edits.clamped());
         let adjusted = image::DynamicImage::ImageRgb8(rgb);
         slint::invoke_from_event_loop(move || {
             // Drop if a newer slider value (or an edit-mode exit) superseded us.

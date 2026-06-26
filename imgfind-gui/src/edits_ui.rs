@@ -19,20 +19,11 @@ pub enum EditControl {
 }
 
 impl EditControl {
-    /// Convert to a control index (0=Exposure, 1=Saturation, 2=Blacks, 3=Whites, 4=Brightness, 5=Contrast).
-    /// These indices MUST match the Slint callback dispatch order.
-    pub fn to_i32(self) -> i32 {
-        match self {
-            EditControl::Exposure => 0,
-            EditControl::Saturation => 1,
-            EditControl::Blacks => 2,
-            EditControl::Whites => 3,
-            EditControl::Brightness => 4,
-            EditControl::Contrast => 5,
-        }
-    }
-
-    /// Reconstruct a control from its index, or None if the index is out of range.
+    /// Reconstruct a control from its Slint callback index (0=Exposure … 5=Contrast),
+    /// or `None` if the index is out of range.
+    ///
+    /// Index assignment MUST match the `edit-control-changed` / `edit-control-reset`
+    /// dispatch in `app.slint` (AdjustRow indices 0-5).
     pub fn from_i32(i: i32) -> Option<Self> {
         Some(match i {
             0 => EditControl::Exposure,
@@ -77,11 +68,6 @@ impl EditControl {
     }
 }
 
-/// Clamp an exposure value to [`ImageEdits::EXPOSURE_MIN`, `ImageEdits::EXPOSURE_MAX`].
-pub fn clamp_exposure(v: f32) -> f32 {
-    EditControl::Exposure.clamp(v)
-}
-
 /// Format an exposure value as a signed EV readout, e.g. `"+1.30 EV"`,
 /// `"0.00 EV"`, `"-0.75 EV"`. Negative values already carry their sign.
 pub fn format_exposure(v: f32) -> String {
@@ -100,9 +86,10 @@ mod tests {
 
     #[test]
     fn clamp_to_range() {
-        assert_eq!(clamp_exposure(9.0), 3.0);
-        assert_eq!(clamp_exposure(-9.0), -3.0);
-        assert_eq!(clamp_exposure(1.2), 1.2);
+        // Exposure is clamped to [-3, +3].
+        assert_eq!(EditControl::Exposure.clamp(9.0), 3.0);
+        assert_eq!(EditControl::Exposure.clamp(-9.0), -3.0);
+        assert_eq!(EditControl::Exposure.clamp(1.2), 1.2);
     }
 
     #[test]
@@ -114,15 +101,17 @@ mod tests {
 
     #[test]
     fn control_index_roundtrip() {
-        for c in [
-            EditControl::Exposure,
-            EditControl::Saturation,
-            EditControl::Blacks,
-            EditControl::Whites,
-            EditControl::Brightness,
-            EditControl::Contrast,
+        // Explicit index → variant mapping that must match the Slint AdjustRow
+        // `index:` fields in app.slint and the dispatch in main.rs callbacks.
+        for (i, c) in [
+            (0, EditControl::Exposure),
+            (1, EditControl::Saturation),
+            (2, EditControl::Blacks),
+            (3, EditControl::Whites),
+            (4, EditControl::Brightness),
+            (5, EditControl::Contrast),
         ] {
-            assert_eq!(EditControl::from_i32(c.to_i32()), Some(c));
+            assert_eq!(EditControl::from_i32(i), Some(c));
         }
         assert_eq!(EditControl::from_i32(99), None);
     }

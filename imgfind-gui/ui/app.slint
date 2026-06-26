@@ -25,6 +25,58 @@ export struct BrushRow {
     joined: string,
 }
 
+// One row in the adjustments sidebar: label, value readout, slider, per-control
+// reset button. The `value <=> root.value` two-way binding lets a Rust write
+// (per-control reset or Reset All) physically reseat the thumb. The reset button
+// uses ASCII "0" — symbol glyphs tofu in Slint's default font (§1 of slint skill).
+component AdjustRow inherits HorizontalLayout {
+    in property <int> index;
+    in property <string> label;
+    in property <string> value-label;
+    in property <float> minimum;
+    in property <float> maximum;
+    in-out property <float> value;
+    in property <bool> busy;
+    callback changed(float);
+    callback reset();
+    spacing: 8px;
+    reset-btn := TouchArea {
+        width: 30px;
+        clicked => {
+            if (!root.busy) {
+                root.reset();
+            }
+        }
+        Rectangle {
+            background: root.busy ? #ffffff08 : (reset-btn.has-hover ? #ffffff22 : #ffffff11);
+            border-radius: 4px;
+            Text {
+                text: "0";
+                color: root.busy ? #666666 : white;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+    VerticalLayout {
+        spacing: 2px;
+        horizontal-stretch: 1;
+        Text {
+            text: root.label + ": " + root.value-label;
+            color: #cccccc;
+            font-size: 12px;
+        }
+        Slider {
+            minimum: root.minimum;
+            maximum: root.maximum;
+            value <=> root.value;
+            changed(v) => {
+                root.changed(v);
+            }
+        }
+    }
+}
+
 export component MainWindow inherits Window {
     title: "imgfind";
     preferred-width: 1100px;
@@ -62,19 +114,29 @@ export component MainWindow inherits Window {
     callback lightbox-zoom-wheel(float, length, length, length, length);
     callback lightbox-zoom-step(int);     // +1 = zoom in, -1 = zoom out
 
-    // Lightbox edit-mode (image adjustments). Wired to Rust in Task 7.
+    // Lightbox edit-mode (image adjustments).
     in-out property <bool> edit-mode;
     in-out property <float> edit-exposure;
-    // Formatted EV readout (e.g. "+1.30 EV"), set by Rust via edits_ui::format_exposure.
+    in-out property <float> edit-saturation;
+    in-out property <float> edit-blacks;
+    in-out property <float> edit-whites;
+    in-out property <float> edit-brightness;
+    in-out property <float> edit-contrast;
     in property <string> edit-exposure-label: "0.00 EV";
+    in property <string> edit-saturation-label: "0";
+    in property <string> edit-blacks-label: "0";
+    in property <string> edit-whites-label: "0";
+    in property <string> edit-brightness-label: "0";
+    in property <string> edit-contrast-label: "0";
     // Busy spinner: true while a slow background operation (base decode or
     // thumbnail regeneration) is in progress. The sidebar spinner is shown and
-    // the Reset/Accept buttons are disabled while this is set.
+    // all controls are disabled while this is set.
     in property <bool> edit-busy;
     in property <string> edit-busy-label: "Working...";
     callback edit-toggle();
-    callback edit-exposure-changed(float);
-    callback edit-reset();
+    callback edit-control-changed(int, float);
+    callback edit-control-reset(int);
+    callback edit-reset-all();
     callback edit-accept();
 
     // Detail panel state set from Rust.
@@ -280,8 +342,12 @@ export component MainWindow inherits Window {
                 if (event.text == Key.Escape) {
                     // In edit mode Esc discards (exits edit mode); otherwise it
                     // closes the lightbox. Rust's edit-toggle handler discards.
+                    // After leaving edit mode, restore focus to app-keys so the
+                    // next Esc closes the lightbox (without this, removing the
+                    // sidebar/Slider from the tree drops focus to null).
                     if (root.edit-mode) {
                         root.edit-toggle();
+                        app-keys.focus();
                     } else {
                         root.lightbox-close();
                     }
@@ -943,12 +1009,12 @@ export component MainWindow inherits Window {
             }
 
             // Content area between the 36px top bar and 80px bottom bar.
-            // When edit-mode is on the area shrinks by the sidebar width (240px)
+            // When edit-mode is on the area shrinks by the sidebar width (280px)
             // so the image is never hidden behind the adjustments panel.
             content := Rectangle {
                 x: 0;
                 y: 36px;
-                width: parent.width - (root.edit-mode ? 240px : 0px);
+                width: parent.width - (root.edit-mode ? 280px : 0px);
                 height: parent.height - 36px - 80px;
                 clip: true;
 
@@ -1155,11 +1221,11 @@ export component MainWindow inherits Window {
 
             // Adjustments sidebar: visible only in edit-mode.
             // Anchored to the right edge; the content area (above) shrinks by
-            // the same 240px when edit-mode is on so the image stays fully visible.
+            // the same 280px when edit-mode is on so the image stays fully visible.
             if root.lightbox-open && root.edit-mode: Rectangle {
                 x: parent.width - self.width;
                 y: 36px;
-                width: 240px;
+                width: 280px;
                 height: parent.height - 36px - 80px;
                 background: #1e1e1eee;
                 VerticalLayout {
@@ -1170,36 +1236,115 @@ export component MainWindow inherits Window {
                         color: white;
                         font-size: 16px;
                     }
-                    Text {
-                        text: "Exposure: " + root.edit-exposure-label;
-                        color: #cccccc;
-                        font-size: 12px;
-                    }
-                    // Two-way binding so a Rust write to `edit-exposure` (e.g. Reset
-                    // setting it to 0.0) reseats the thumb. The `changed` callback
-                    // fires only on user interaction, so this creates no feedback loop.
-                    Slider {
+                    // Six adjustment rows. Each uses a two-way `value <=> root.*`
+                    // binding so a Rust write (per-control reset or Reset All)
+                    // reseats the Slider thumb. Indices 0-5 match EditControl::to_i32.
+                    AdjustRow {
+                        index: 0;
+                        label: "Exposure";
+                        value-label: root.edit-exposure-label;
                         minimum: -3.0;
                         maximum: 3.0;
                         value <=> root.edit-exposure;
-                        changed(v) => { root.edit-exposure-changed(v); }
+                        busy: root.edit-busy;
+                        changed(v) => {
+                            root.edit-control-changed(0, v);
+                        }
+                        reset => {
+                            root.edit-control-reset(0);
+                        }
                     }
+                    AdjustRow {
+                        index: 1;
+                        label: "Saturation";
+                        value-label: root.edit-saturation-label;
+                        minimum: -100.0;
+                        maximum: 100.0;
+                        value <=> root.edit-saturation;
+                        busy: root.edit-busy;
+                        changed(v) => {
+                            root.edit-control-changed(1, v);
+                        }
+                        reset => {
+                            root.edit-control-reset(1);
+                        }
+                    }
+                    AdjustRow {
+                        index: 2;
+                        label: "Blacks";
+                        value-label: root.edit-blacks-label;
+                        minimum: -100.0;
+                        maximum: 100.0;
+                        value <=> root.edit-blacks;
+                        busy: root.edit-busy;
+                        changed(v) => {
+                            root.edit-control-changed(2, v);
+                        }
+                        reset => {
+                            root.edit-control-reset(2);
+                        }
+                    }
+                    AdjustRow {
+                        index: 3;
+                        label: "Whites";
+                        value-label: root.edit-whites-label;
+                        minimum: -100.0;
+                        maximum: 100.0;
+                        value <=> root.edit-whites;
+                        busy: root.edit-busy;
+                        changed(v) => {
+                            root.edit-control-changed(3, v);
+                        }
+                        reset => {
+                            root.edit-control-reset(3);
+                        }
+                    }
+                    AdjustRow {
+                        index: 4;
+                        label: "Brightness";
+                        value-label: root.edit-brightness-label;
+                        minimum: -100.0;
+                        maximum: 100.0;
+                        value <=> root.edit-brightness;
+                        busy: root.edit-busy;
+                        changed(v) => {
+                            root.edit-control-changed(4, v);
+                        }
+                        reset => {
+                            root.edit-control-reset(4);
+                        }
+                    }
+                    AdjustRow {
+                        index: 5;
+                        label: "Contrast";
+                        value-label: root.edit-contrast-label;
+                        minimum: -100.0;
+                        maximum: 100.0;
+                        value <=> root.edit-contrast;
+                        busy: root.edit-busy;
+                        changed(v) => {
+                            root.edit-control-changed(5, v);
+                        }
+                        reset => {
+                            root.edit-control-reset(5);
+                        }
+                    }
+                    // Global reset: all controls to neutral 0.
                     HorizontalLayout {
-                        spacing: 8px;
-                        reset-touch := TouchArea {
-                            width: 80px;
-                            height: 32px;
-                            // Disabled while busy: gate click and dim the button.
+                        reset-all-touch := TouchArea {
+                            height: 28px;
                             clicked => {
-                                if (!root.edit-busy) { root.edit-reset(); }
+                                if (!root.edit-busy) {
+                                    root.edit-reset-all();
+                                }
                             }
                             Rectangle {
                                 background: root.edit-busy
                                     ? #ffffff08
-                                    : (reset-touch.has-hover ? #ffffff22 : #ffffff11);
+                                    : (reset-all-touch.has-hover ? #ffffff22 : #ffffff11);
                                 border-radius: 4px;
                                 Text {
-                                    text: "Reset";
+                                    text: "Reset All";
                                     color: root.edit-busy ? #666666 : white;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
