@@ -166,15 +166,14 @@ impl Backend {
             .with_context(|| format!("read edits for {rel_path}"))
     }
 
-    /// Decode the UNEDITED original of `rel_path` at the lightbox long-edge size,
-    /// for live edit-mode preview. Reads the original file directly (never the
-    /// baked thumbnail) so applying edits on top never compounds prior edits.
-    pub fn decode_lightbox_base(&self, rel_path: &str) -> Result<image::DynamicImage> {
+    /// Decode the UNEDITED original of `rel_path` to a LINEAR base at the lightbox
+    /// long-edge size, for live edit-mode preview. RAW files demosaic the sensor
+    /// (slow) so the preview shows the same highlight headroom the baked thumbnails will.
+    pub fn decode_lightbox_base(&self, rel_path: &str) -> Result<imgfind::edits::LinearRgb> {
         let abs = self.abs_path(rel_path);
-        let img = imgfind::decode::decode_image(&abs)
-            .with_context(|| format!("decode original for edit preview: {rel_path}"))?;
-        let px = imgfind::thumbnail::LIGHTBOX_SIZE.get();
-        Ok(img.resize(px, px, image::imageops::FilterType::Lanczos3))
+        let linear = imgfind::decode::decode_linear(&abs)
+            .with_context(|| format!("decode (linear) original for edit preview: {rel_path}"))?;
+        Ok(linear.downscale(imgfind::thumbnail::LIGHTBOX_SIZE.get()))
     }
 
     /// Persist `edits` for `rel_path` and rebake every cached thumbnail size so

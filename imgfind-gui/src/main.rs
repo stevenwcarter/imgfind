@@ -357,11 +357,11 @@ fn main() -> Result<()> {
     // Current lightbox index. None when the lightbox is closed.
     let lb_index: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
 
-    // Unedited base image (lightbox-size) decoded on entering edit mode; the live
-    // exposure preview is `apply_adjustments(base.clone(), …)`. `None` when not
-    // in edit mode. Held in an Arc<Mutex<_>> so the background decode can store it
-    // and the exposure-changed handler can read it.
-    let lb_edit_base: Arc<Mutex<Option<image::DynamicImage>>> = Arc::new(Mutex::new(None));
+    // Unedited linear base (lightbox-size) decoded on entering edit mode; the live
+    // exposure preview is `base.render(&ImageEdits{..})`. `None` when not in edit mode.
+    // Held in an Arc<Mutex<_>> so the background decode can store it and the
+    // exposure-changed handler can read it.
+    let lb_edit_base: Arc<Mutex<Option<imgfind::edits::LinearRgb>>> = Arc::new(Mutex::new(None));
     // Last-accepted exposure for the current image (Reset target and discard
     // restore value). Seeded from the DB when edit mode opens, updated on Accept.
     let lb_last_accepted_exposure: Arc<Mutex<f32>> = Arc::new(Mutex::new(0.0));
@@ -4154,7 +4154,7 @@ fn set_edit_exposure(w: &MainWindow, v: f32) {
 /// mode, in which case this is a no-op.
 fn render_edit_preview(
     weak: Weak<MainWindow>,
-    base: Arc<Mutex<Option<image::DynamicImage>>>,
+    base: Arc<Mutex<Option<imgfind::edits::LinearRgb>>>,
     generation: Arc<AtomicU64>,
     exposure: f32,
 ) {
@@ -4166,7 +4166,8 @@ fn render_edit_preview(
         let edits = imgfind::edits::ImageEdits {
             exposure: edits_ui::clamp_exposure(exposure),
         };
-        let adjusted = imgfind::edits::apply_adjustments(base_img, &edits);
+        let rgb = base_img.render(&edits);
+        let adjusted = image::DynamicImage::ImageRgb8(rgb);
         slint::invoke_from_event_loop(move || {
             // Drop if a newer slider value (or an edit-mode exit) superseded us.
             if !is_current_generation(my_gen, generation.load(Ordering::SeqCst)) {
