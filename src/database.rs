@@ -596,9 +596,9 @@ impl Database {
 
     /// Persist non-destructive edits for `path`, creating or replacing the row.
     ///
-    /// The stored exposure is `.clamped()` to `[-3.0, 3.0]` before writing so
-    /// the DB cannot hold an out-of-range value even if the caller skips
-    /// clamping.
+    /// All six adjustment fields are `.clamped()` before writing (exposure to
+    /// `[-3.0, 3.0]`, the other five to `[-100.0, 100.0]`) so the DB cannot hold
+    /// an out-of-range value even if the caller skips clamping.
     pub async fn set_image_edits(
         &self,
         path: &RelativePath,
