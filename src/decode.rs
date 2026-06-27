@@ -214,9 +214,12 @@ fn decode_raw_linear(path: &Path) -> Result<crate::edits::LinearRgb> {
     let intermediate = develop
         .develop_intermediate(&raw)
         .with_context(|| format!("developing RAW image (linear) {}", path.display()))?;
-    let mut dynimg = intermediate
-        .to_dynamic_image()
-        .with_context(|| format!("rawler intermediate produced no image for {}", path.display()))?;
+    let mut dynimg = intermediate.to_dynamic_image().with_context(|| {
+        format!(
+            "rawler intermediate produced no image for {}",
+            path.display()
+        )
+    })?;
     apply_exif_orientation(&mut dynimg, path);
     Ok(crate::edits::LinearRgb::from_linear_u16(&dynimg.to_rgb16()))
 }
@@ -275,7 +278,10 @@ mod linear_decode_tests {
         img.save(&path).unwrap();
 
         let lin = decode_linear(&path).unwrap();
-        let out = lin.render(&crate::edits::ImageEdits { exposure: 0.0 });
+        let out = lin.render(&crate::edits::ImageEdits {
+            exposure: 0.0,
+            ..crate::edits::ImageEdits::identity()
+        });
         let p = out.get_pixel(0, 0);
         for c in 0..3 {
             assert!((p[c] as i32 - img.get_pixel(0, 0)[c] as i32).abs() <= 1);

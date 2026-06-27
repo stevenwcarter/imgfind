@@ -17,7 +17,7 @@ use anyhow::{Context, Result};
 use crate::EmbeddingDim;
 
 /// The highest migration version applied by this module.
-pub const LATEST_MIGRATION_VERSION: i32 = 4;
+pub const LATEST_MIGRATION_VERSION: i32 = 5;
 
 /// Derive a safe SQL identifier from a model name.
 ///
@@ -123,6 +123,11 @@ pub async fn run_migrations(conn: &turso::Connection) -> Result<()> {
         migration_004_image_edits(conn)
             .await
             .context("migration 4 (image_edits)")?;
+    }
+    if current < 5 {
+        migration_005_edit_controls(conn)
+            .await
+            .context("migration 5 (edit control columns)")?;
     }
     if current < LATEST_MIGRATION_VERSION {
         conn.execute(
@@ -367,6 +372,19 @@ async fn migration_003_ui_state(conn: &turso::Connection) -> Result<()> {
     Ok(())
 }
 
+/// Migration 5: add the five extra adjustment columns to image_edits.
+async fn migration_005_edit_controls(conn: &turso::Connection) -> Result<()> {
+    for col in ["contrast", "brightness", "blacks", "whites", "saturation"] {
+        conn.execute(
+            &format!("ALTER TABLE image_edits ADD COLUMN {col} REAL NOT NULL DEFAULT 0.0"),
+            (),
+        )
+        .await
+        .with_context(|| format!("add column {col} to image_edits"))?;
+    }
+    Ok(())
+}
+
 /// Migration 4: image edits table for brightness/exposure adjustments.
 async fn migration_004_image_edits(conn: &turso::Connection) -> Result<()> {
     conn.execute(
@@ -400,6 +418,32 @@ mod tests {
             .await
             .unwrap();
         rows.next().await.unwrap().is_some()
+    }
+
+    async fn column_exists(conn: &turso::Connection, table: &str, col: &str) -> bool {
+        let mut rows = conn
+            .query(&format!("PRAGMA table_info({table})"), ())
+            .await
+            .unwrap();
+        while let Some(row) = rows.next().await.unwrap() {
+            let name: String = row.get_value(1).unwrap().as_text().unwrap().clone();
+            if name == col {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn migration_005_adds_edit_control_columns() {
+        let conn = mem().await;
+        run_migrations(&conn).await.unwrap();
+        for c in ["contrast", "brightness", "blacks", "whites", "saturation"] {
+            assert!(
+                column_exists(&conn, "image_edits", c).await,
+                "missing column {c}"
+            );
+        }
     }
 
     #[tokio::test]

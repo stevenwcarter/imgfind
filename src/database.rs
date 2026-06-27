@@ -573,7 +573,8 @@ impl Database {
         let conn = self.pool.get().await.context("get connection")?;
         let mut rows = conn
             .query(
-                "SELECT e.exposure FROM image_edits e
+                "SELECT e.exposure, e.saturation, e.blacks, e.whites, e.brightness, e.contrast
+                 FROM image_edits e
                  JOIN images i ON i.id = e.image_id
                  WHERE i.path = ?1",
                 (path.as_str().into_owned(),),
@@ -582,6 +583,11 @@ impl Database {
         match rows.next().await? {
             Some(row) => Ok(crate::edits::ImageEdits {
                 exposure: col_f64(&row, 0, "exposure")? as f32,
+                saturation: col_f64(&row, 1, "saturation")? as f32,
+                blacks: col_f64(&row, 2, "blacks")? as f32,
+                whites: col_f64(&row, 3, "whites")? as f32,
+                brightness: col_f64(&row, 4, "brightness")? as f32,
+                contrast: col_f64(&row, 5, "contrast")? as f32,
             }
             .clamped()),
             None => Ok(crate::edits::ImageEdits::identity()),
@@ -590,9 +596,9 @@ impl Database {
 
     /// Persist non-destructive edits for `path`, creating or replacing the row.
     ///
-    /// The stored exposure is `.clamped()` to `[-3.0, 3.0]` before writing so
-    /// the DB cannot hold an out-of-range value even if the caller skips
-    /// clamping.
+    /// All six adjustment fields are `.clamped()` before writing (exposure to
+    /// `[-3.0, 3.0]`, the other five to `[-100.0, 100.0]`) so the DB cannot hold
+    /// an out-of-range value even if the caller skips clamping.
     pub async fn set_image_edits(
         &self,
         path: &RelativePath,
@@ -601,11 +607,27 @@ impl Database {
         let edits = edits.clamped();
         let conn = self.pool.get().await.context("get connection")?;
         conn.execute(
-            "INSERT INTO image_edits (image_id, exposure, updated_at)
-             SELECT i.id, ?2, CURRENT_TIMESTAMP FROM images i WHERE i.path = ?1
-             ON CONFLICT(image_id) DO UPDATE SET exposure = excluded.exposure,
-             updated_at = CURRENT_TIMESTAMP",
-            (path.as_str().into_owned(), edits.exposure as f64),
+            "INSERT INTO image_edits \
+                (image_id, exposure, saturation, blacks, whites, brightness, contrast, updated_at)
+             SELECT i.id, ?2, ?3, ?4, ?5, ?6, ?7, CURRENT_TIMESTAMP \
+             FROM images i WHERE i.path = ?1
+             ON CONFLICT(image_id) DO UPDATE SET
+               exposure = excluded.exposure,
+               saturation = excluded.saturation,
+               blacks = excluded.blacks,
+               whites = excluded.whites,
+               brightness = excluded.brightness,
+               contrast = excluded.contrast,
+               updated_at = CURRENT_TIMESTAMP",
+            (
+                path.as_str().into_owned(),
+                edits.exposure as f64,
+                edits.saturation as f64,
+                edits.blacks as f64,
+                edits.whites as f64,
+                edits.brightness as f64,
+                edits.contrast as f64,
+            ),
         )
         .await?;
         Ok(())
@@ -3045,15 +3067,37 @@ mod tests {
         let (db, rel_path) = test_db_with_one_image().await;
         // Absent => identity
         assert!(db.get_image_edits(&rel_path).await.unwrap().is_identity());
-        // Insert
-        db.set_image_edits(&rel_path, &ImageEdits { exposure: 1.5 })
-            .await
-            .unwrap();
-        assert_eq!(db.get_image_edits(&rel_path).await.unwrap().exposure, 1.5);
+        // Insert — all six fields round-trip
+        db.set_image_edits(
+            &rel_path,
+            &ImageEdits {
+                exposure: 1.5,
+                saturation: 40.0,
+                blacks: -20.0,
+                whites: 15.0,
+                brightness: 10.0,
+                contrast: -5.0,
+            },
+        )
+        .await
+        .unwrap();
+        let got = db.get_image_edits(&rel_path).await.unwrap();
+        assert_eq!(got.exposure, 1.5);
+        assert_eq!(got.saturation, 40.0);
+        assert_eq!(got.blacks, -20.0);
+        assert_eq!(got.whites, 15.0);
+        assert_eq!(got.brightness, 10.0);
+        assert_eq!(got.contrast, -5.0);
         // Update same row (no duplicate)
-        db.set_image_edits(&rel_path, &ImageEdits { exposure: -0.75 })
-            .await
-            .unwrap();
+        db.set_image_edits(
+            &rel_path,
+            &ImageEdits {
+                exposure: -0.75,
+                ..ImageEdits::identity()
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(db.get_image_edits(&rel_path).await.unwrap().exposure, -0.75);
     }
 
