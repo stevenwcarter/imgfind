@@ -300,10 +300,37 @@ export component MainWindow inherits Window {
         }
     }
 
+    // Whenever edit mode ends (via ANY path — Esc, `e`, the Edit button,
+    // prev/next discard, or Accept), the `if edit-mode` adjustments sidebar is
+    // torn down. The std-widgets `Slider`s in that sidebar grab keyboard focus
+    // while editing, so destroying the sidebar leaves focus null — and with no
+    // focused descendant, app-keys' capture-key-pressed receives nothing until
+    // the next click. Re-focusing app-keys synchronously here would race the
+    // teardown (the focus pulse gets clobbered in the same event-loop turn), so
+    // a 1ms single-shot Timer defers the re-focus to the next tick, AFTER the
+    // sidebar is gone, restoring the global keyboard owner reliably.
+    changed edit-mode => {
+        if (!root.edit-mode) {
+            refocus-timer.running = true;
+        }
+    }
+
     app-keys := FocusScope {
         // Hold focus from startup so key events flow; capture-key-pressed then
         // intercepts them for the whole subtree regardless of inner focus.
         init => { self.focus(); }
+
+        // Single-shot: started by the `changed edit-mode` handler above to
+        // reclaim focus one tick after the edit sidebar (and its focus-stealing
+        // Slider) is removed. `running` defaults to true, so it must start false.
+        refocus-timer := Timer {
+            interval: 1ms;
+            running: false;
+            triggered => {
+                self.running = false;
+                app-keys.focus();
+            }
+        }
 
         capture-key-pressed(event) => {
             // While the search field is being typed in, let it have the keys
@@ -342,12 +369,13 @@ export component MainWindow inherits Window {
                 if (event.text == Key.Escape) {
                     // In edit mode Esc discards (exits edit mode); otherwise it
                     // closes the lightbox. Rust's edit-toggle handler discards.
-                    // After leaving edit mode, restore focus to app-keys so the
-                    // next Esc closes the lightbox (without this, removing the
-                    // sidebar/Slider from the tree drops focus to null).
+                    // Focus restoration after leaving edit mode is handled
+                    // centrally by the `changed edit-mode` -> refocus-timer hook
+                    // (deferred past the sidebar teardown), so a second Esc then
+                    // closes the lightbox. Do NOT re-focus here: a synchronous
+                    // pulse in this same turn races the teardown and is dropped.
                     if (root.edit-mode) {
                         root.edit-toggle();
-                        app-keys.focus();
                     } else {
                         root.lightbox-close();
                     }
