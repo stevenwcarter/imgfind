@@ -496,7 +496,7 @@ fn index_directory(
         pb.set_style(
             ProgressStyle::default_bar()
                 .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta}) {msg}")
-                .unwrap()
+                .expect("progress bar template is a valid constant")
                 .progress_chars("#>-"),
         );
         pb

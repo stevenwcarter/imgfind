@@ -38,16 +38,6 @@ _(none)_
 
 ## Low
 
-### B28. Indexing progress-bar template `.unwrap()` on a constant string: `index_directory` (src/main.rs:496)
-- Category: api-surface
-- Impact: 1 (severity 1 × blast-radius 1)
-- Effort: S
-- Risk: low
-- Evidence: `ProgressStyle::default_bar().template(...).unwrap()` on a hardcoded template — valid today, but a future edit that breaks the template string panics the index command instead of degrading. Near-cosmetic; listed for completeness.
-- Blast radius: src/main.rs:492-500
-- Proposed fix: `.expect("progress bar template is a valid constant")` for a clear message, or fall back to the default style on parse error.
-- [x] execute   [ ] skip
-
 ## Skip (do not re-flag in future runs)
 - `SearchState.results` unbounded `Vec<RowMeta>` at imgfind-gui/src/state.rs:19 — search results are 100 by default and only "relevance" is in-memory sorted; O(100) is fine.
 - ANSI escape codes in file logs via `with_ansi(true)` at src/logging.rs:29 (B9) — skipped 2026-06-28.
