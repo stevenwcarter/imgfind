@@ -1,3 +1,8 @@
+## [0.2.4] - 2026-06-28
+
+### Bug Fixes
+
+- *(packaging)* Declare winresource build-dep for imgfind-gui([`149817d`](https://github.com/stevenwcarter/imgfind/commit/149817d0bacb94ab3fd8f89dd22268a871afd1b2))
 ## [0.2.2] - 2026-06-28
 
 ### Bug Fixes
