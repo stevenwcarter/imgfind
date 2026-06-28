@@ -55,9 +55,31 @@ if [ -f "$LAUNCHER_BINARY" ]; then
         mkdir -p "$DESKTOP_DIR"
         DESKTOP_SRC="$SCRIPT_DIR/packaging/imgfind-launcher.desktop"
         if [ -f "$DESKTOP_SRC" ]; then
+            # Install the app icon and point the desktop entry at it by absolute
+            # path. An absolute Icon= is the most reliable choice for a ~/.local
+            # install: it needs no icon-theme cache refresh or size-named theme
+            # directory. If the icon isn't shipped, leave the themed name so a
+            # system-wide icon (e.g. /usr/share/pixmaps/imgfind.png) can resolve.
+            ICON_SRC="$SCRIPT_DIR/packaging/icon.png"
+            ICON_LINE="Icon=imgfind"
+            if [ -f "$ICON_SRC" ]; then
+                ICON_DIR="$HOME/.local/share/icons"
+                mkdir -p "$ICON_DIR"
+                echo "🎨 Installing app icon to $ICON_DIR/imgfind.png..."
+                cp "$ICON_SRC" "$ICON_DIR/imgfind.png"
+                ICON_LINE="Icon=$ICON_DIR/imgfind.png"
+            fi
+
             echo "🖥  Installing desktop entry to $DESKTOP_DIR..."
-            sed "s|^Exec=imgfind-launcher\$|Exec=$LOCAL_BIN/imgfind-launcher|" \
+            sed -e "s|^Exec=imgfind-launcher\$|Exec=$LOCAL_BIN/imgfind-launcher|" \
+                -e "s|^Icon=imgfind\$|$ICON_LINE|" \
                 "$DESKTOP_SRC" > "$DESKTOP_DIR/imgfind-launcher.desktop"
+
+            # Best-effort: refresh the desktop database so the entry appears
+            # promptly. Harmless if the tool is absent.
+            if command -v update-desktop-database >/dev/null 2>&1; then
+                update-desktop-database "$DESKTOP_DIR" >/dev/null 2>&1 || true
+            fi
         fi
     fi
 fi

@@ -85,6 +85,8 @@ jobs:
           cp target/release/imgfind target/release/imgfind-gui target/release/imgfind-launcher "$STAGE/"
           cp install.sh "$STAGE/"
           cp packaging/imgfind-launcher.desktop "$STAGE/packaging/"
+          # Ship the app icon so install.sh can place it for the .desktop entry.
+          cp packaging/icon.png "$STAGE/packaging/"
           cp README.md USAGE.md "$STAGE/" 2>/dev/null || true
           tar czf "$STAGE.tar.gz" "$STAGE"
 
