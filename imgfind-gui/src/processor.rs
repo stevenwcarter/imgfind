@@ -2,9 +2,6 @@
 //!
 //! Drives the three-phase post-index pipeline on a dedicated thread that is
 //! separate from the interactive [`crate::loader`] thumbnail-worker:
-// Task 7 wires every public item in this module into the Slint UI progress
-// pill; until then all of them appear unused to rustc's dead-code lint.
-#![allow(dead_code)]
 //!
 //! 1. **Thumbnails (300 px)** — prerequisite for CLIP embedding.
 //! 2. **Embeddings** — CLIP-vectorise each image from its 300 px thumbnail.
@@ -282,8 +279,16 @@ mod tests {
 
     #[test]
     fn overall_progress_done_total() {
-        let baseline = ProcessCounts { thumbs300: 10, embeddings: 10, full_thumbs: 20 };
-        let now = ProcessCounts { thumbs300: 0, embeddings: 4, full_thumbs: 20 };
+        let baseline = ProcessCounts {
+            thumbs300: 10,
+            embeddings: 10,
+            full_thumbs: 20,
+        };
+        let now = ProcessCounts {
+            thumbs300: 0,
+            embeddings: 4,
+            full_thumbs: 20,
+        };
         // total = 40; remaining now = 24; done = 16
         assert_eq!(overall(&now, &baseline), (16, 40));
 
@@ -291,7 +296,11 @@ mod tests {
         assert_eq!(overall(&baseline, &baseline), (0, 40));
 
         // now all-zero → all work complete
-        let zero = ProcessCounts { thumbs300: 0, embeddings: 0, full_thumbs: 0 };
+        let zero = ProcessCounts {
+            thumbs300: 0,
+            embeddings: 0,
+            full_thumbs: 0,
+        };
         assert_eq!(overall(&zero, &baseline), (40, 40));
     }
 }

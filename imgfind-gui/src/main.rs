@@ -38,6 +38,7 @@ use backend::Backend;
 use detail::{DetailState, filename_of, format_metadata, select};
 use imgfind::filters::{Filters, GpsFilter, TagMatch};
 use imgfind::ids::ImageId;
+use imgfind::processing::{ProcessCounts, ProcessPhase};
 use imgfind::sort::{RowMeta, Sort, SortDir, SortKey};
 use imgfind::ui_state::{PersistedMode, UiState};
 use imgfind::units::{FileSize, ThumbnailSize};
@@ -205,6 +206,92 @@ fn format_statusline(sel: &selection::Selection, results: &[RowMeta]) -> String 
     } else {
         base
     }
+}
+
+/// Seed the process-status properties from the startup `baseline` so the pill
+/// and panel show the full totals before the worker's first batch completes.
+fn seed_process_ui(w: &MainWindow, baseline: &ProcessCounts) {
+    w.set_process_thumbs300_total(baseline.thumbs300 as i32);
+    w.set_process_embed_total(baseline.embeddings as i32);
+    w.set_process_full_total(baseline.full_thumbs as i32);
+    w.set_process_overall_total(baseline.total_remaining() as i32);
+    w.set_process_state("Running".into());
+    w.set_process_pill_text(format!("Indexing 0/{}", baseline.total_remaining()).into());
+    if baseline.embeddings > 0 {
+        w.set_process_indexing_hint(format!("{} still indexing", baseline.embeddings).into());
+    }
+}
+
+/// Apply a worker progress snapshot to the Slint process-status properties.
+///
+/// Runs on the UI thread (called from the drain timer). `baseline` is the
+/// remaining-work snapshot captured when the worker started; per-phase `done` is
+/// `baseline - now`. `model_ready` separates the "Waiting for model..." display
+/// state from plain "Running" during the Embeddings phase — the worker reports
+/// `Running` even while the CLIP model is still loading, so we derive the clearer
+/// label here from counts + `Backend::model_ready()` (no change to `processor.rs`).
+fn apply_process_progress(
+    w: &MainWindow,
+    p: &processor::ProcessProgress,
+    baseline: &ProcessCounts,
+    model_ready: bool,
+) {
+    let now = &p.counts;
+    let t_done = baseline.thumbs300.saturating_sub(now.thumbs300);
+    let e_done = baseline.embeddings.saturating_sub(now.embeddings);
+    let f_done = baseline.full_thumbs.saturating_sub(now.full_thumbs);
+    let (o_done, o_total) = processor::overall(now, baseline);
+
+    w.set_process_thumbs300_done(t_done as i32);
+    w.set_process_thumbs300_total(baseline.thumbs300 as i32);
+    w.set_process_embed_done(e_done as i32);
+    w.set_process_embed_total(baseline.embeddings as i32);
+    w.set_process_full_done(f_done as i32);
+    w.set_process_full_total(baseline.full_thumbs as i32);
+    w.set_process_overall_done(o_done as i32);
+    w.set_process_overall_total(o_total as i32);
+
+    let paused = matches!(p.state, processor::WorkerState::Paused);
+    let idle = matches!(p.state, processor::WorkerState::Idle);
+    w.set_process_paused(paused);
+
+    let waiting_for_model = matches!(p.state, processor::WorkerState::Running)
+        && now.next_phase() == Some(ProcessPhase::Embeddings)
+        && !model_ready;
+
+    // State line: name the active phase while running so the panel is informative.
+    let state_text = if idle {
+        "Idle".to_string()
+    } else if paused {
+        "Paused".to_string()
+    } else if waiting_for_model {
+        "Waiting for model...".to_string()
+    } else {
+        match now.next_phase() {
+            Some(phase) => format!("Running - {}", processor::phase_label(phase)),
+            None => "Running".to_string(),
+        }
+    };
+    w.set_process_state(state_text.into());
+
+    // Pill text (ASCII only — Slint default-font glyph safety).
+    let pill = if idle {
+        "Done".to_string()
+    } else if paused {
+        format!("Paused {o_done}/{o_total}")
+    } else {
+        format!("Indexing {o_done}/{o_total}")
+    };
+    w.set_process_pill_text(pill.into());
+
+    // Search hint: surface remaining embeddings while that phase is in progress
+    // (those images are indexed but not yet semantically searchable).
+    let hint = if baseline.embeddings > 0 && e_done < baseline.embeddings {
+        format!("{} still indexing", now.embeddings)
+    } else {
+        String::new()
+    };
+    w.set_process_indexing_hint(hint.into());
 }
 
 /// Status-line message shown when launching the OS image viewer fails.
@@ -2521,11 +2608,89 @@ fn main() -> Result<()> {
         });
     }
 
-    // Keep the model, debounce, and loader timers alive for the event loop.
+    // --- Background processing worker ---
+    //
+    // Mirrors the loader's channel + UI-thread-timer drain (see `loader.rs`): the
+    // worker thread (`processor.rs`) does all the heavy DB/CLIP work and sends
+    // `ProcessProgress` snapshots on an mpsc channel; a UI-thread `Timer` drains
+    // them and writes the Slint properties. Properties are NEVER set from the
+    // worker thread. The shared `Arc<AtomicBool>` lets the Pause/Resume button
+    // signal the worker without blocking either side.
+    let process_paused = Arc::new(AtomicBool::new(false));
+    let process_controller = processor::ProcessController::new(Arc::clone(&process_paused));
+    let process_timer = Timer::default();
+    {
+        let db = backend.db_clone();
+        match imgfind::block_on(imgfind::processing::counts(&db)) {
+            Ok(baseline) if baseline.total_remaining() > 0 => {
+                let (prog_tx, prog_rx) = mpsc::channel::<processor::ProcessProgress>();
+                processor::spawn_process_worker(
+                    backend.clone(),
+                    Arc::clone(&process_paused),
+                    prog_tx,
+                );
+                // Seed the totals so the pill/panel show meaningful numbers from
+                // the first frame, before the worker's first batch lands.
+                seed_process_ui(&window, &baseline);
+
+                let weak = window.as_weak();
+                let backend_drain = backend.clone();
+                process_timer.start(TimerMode::Repeated, Duration::from_millis(200), move || {
+                    let Some(w) = weak.upgrade() else { return };
+                    // `model_ready()` distinguishes "Waiting for model..." from
+                    // plain "Running" during the Embeddings phase.
+                    let model_ready = backend_drain.model_ready();
+                    while let Ok(p) = prog_rx.try_recv() {
+                        apply_process_progress(&w, &p, &baseline, model_ready);
+                    }
+                });
+            }
+            Ok(_) => {
+                // Nothing to process at startup: show a caught-up pill/state.
+                window.set_process_state("Idle".into());
+                window.set_process_pill_text("Done".into());
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "startup: processing counts query failed; background worker not started: {e:#}"
+                );
+            }
+        }
+    }
+
+    // --- toggle-process-panel callback (also bound to the `\` key + pill click) ---
+    {
+        let weak = window.as_weak();
+        window.on_toggle_process_panel(move || {
+            if let Some(w) = weak.upgrade() {
+                w.set_process_panel_open(!w.get_process_panel_open());
+            }
+        });
+    }
+
+    // --- toggle-process-pause callback: route Pause/Resume through the controller ---
+    {
+        let weak = window.as_weak();
+        window.on_toggle_process_pause(move || {
+            if process_controller.is_paused() {
+                process_controller.resume();
+            } else {
+                process_controller.pause();
+            }
+            // Flip the button label immediately; the worker confirms the state on
+            // its next snapshot (within ~200 ms).
+            if let Some(w) = weak.upgrade() {
+                w.set_process_paused(process_controller.is_paused());
+            }
+        });
+    }
+
+    // Keep the model, debounce, loader, and process timers alive for the event loop.
     let _ = model_timer;
     let _ = debounce_timer;
     let _ = loader_timer;
     let _ = chord_timer;
+    let _ = process_timer;
 
     // T20: Startup gate — restore the persisted session if one exists, else
     // fall back to the T19 default browse-all. A malformed blob reads as
