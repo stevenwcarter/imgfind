@@ -2851,7 +2851,13 @@ fn restore_session(st: UiState, ctx: RestoreCtx<'_>) {
 
     // 1. Result list — rehydrate by id (verbatim display order), install into
     //    SearchState as a completed "search" so view_state() == Results.
-    let rows = ctx.backend.rehydrate(&st.result_ids).unwrap_or_default();
+    let rows = match ctx.backend.rehydrate(&st.result_ids) {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!("failed to restore session results: {e:#}");
+            Vec::new()
+        }
+    };
     let results_len = rows.len();
     let is_search = mode_is_search(&st.mode);
     {

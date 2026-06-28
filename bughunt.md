@@ -58,16 +58,6 @@ _(none)_
 - Proposed fix: reject a relative path containing `Component::ParentDir`/`RootDir` when reading rows (or in `to_absolute`), returning a clear error rather than silently resolving outside the root.
 - [x] execute   [ ] skip
 
-### B24. Session-restore rehydrate failure is swallowed — user sees a blank grid with no log: `restore_session` (imgfind-gui/src/main.rs:2854)
-- Category: observability
-- Impact: 3 (severity 3 × blast-radius 1)
-- Effort: S
-- Risk: low
-- Evidence: startup calls `backend.rehydrate(&st.result_ids).unwrap_or_default()`; if rehydrate fails (stale ids, DB issue) the error is dropped and `rows` falls back to empty. The previous session's results vanish silently on launch with no `warn`/`error` breadcrumb.
-- Blast radius: imgfind-gui/src/main.rs:2843-2862
-- Proposed fix: match on the result and `tracing::warn!("failed to restore session results: {e:#}")` before the empty-Vec fallback (keep the graceful fallback; just make the loss visible).
-- [x] execute   [ ] skip
-
 ### B25. `SearchConfig` re-allocated per search to carry two hardcoded constants (GUI + TUI): `Backend::search`/`search_similar`, TUI search handler (imgfind-gui/src/backend.rs:90)
 - Category: caching
 - Impact: 2 (severity 1 × blast-radius 2)
