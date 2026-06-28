@@ -27,6 +27,12 @@ tempfile = "3"
 [build-dependencies]
 slint-build = "1.16"
 
+# Windows-only: embed the app icon into the .exe resources (see build.rs).
+# Host-gated — included only when building on a Windows host (our Windows
+# artifacts are built natively in CI); a non-Windows host skips it.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
 # ---------------------------------------------------------------------------
 # cargo-packager metadata (v0.11.x schema)
 # Run with: cargo packager --release --formats dmg   (macOS CI)
@@ -40,10 +46,14 @@ product-name = "imgfind"
 identifier = "plus.javapl.imgfind"
 description = "CLIP-based semantic image search"
 authors = ["Steven Carter"]
-# .icns first so macOS uses the prebuilt icon directly (cargo-packager's
-# PNG->icns generation fails with "No matching IconType"); Windows generates
-# its .ico from the .png.
-icons = ["../packaging/icon.icns", "../packaging/icon.png"]
+# Prebuilt platform icons: .icns for macOS (cargo-packager's PNG->icns
+# generation fails with "No matching IconType") and a real multi-size .ico for
+# Windows (so the MSI shortcut / Add-Remove-Programs entry uses a crisp icon).
+# The .png is kept as a fallback. NOTE: the .ico here only covers installer
+# chrome — the app icon the user sees on the running .exe is embedded into the
+# binary by build.rs (winresource), since cargo-packager bundles the prebuilt
+# exe as-is and can't add an exe resource.
+icons = ["../packaging/icon.icns", "../packaging/icon.ico", "../packaging/icon.png"]
 
 # Main binary is the launcher; GUI and CLI ride alongside it as siblings.
 # `path` values are bare binary names (no extension); cargo-packager resolves
