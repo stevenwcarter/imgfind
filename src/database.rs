@@ -2,7 +2,7 @@ use crate::filters::{Filters, build_filter_clause_turso};
 use crate::ids::{CollectionId, ImageId, TagId};
 use crate::ui_state::UiState;
 use crate::{
-    AbsolutePath, EmbeddingDim, MaxK, RelativePath, ThumbnailSize, ThumbnailSpec, db_pool,
+    AbsolutePath, EmbeddingDim, GeoRect, MaxK, RelativePath, ThumbnailSize, ThumbnailSpec, db_pool,
     get_db_parent_dir,
 };
 use anyhow::{Context, Result};
@@ -1325,15 +1325,12 @@ impl Database {
     /// Get images within geographic bounds.
     pub async fn get_images_by_bounds(
         &self,
-        north: f64,
-        south: f64,
-        east: f64,
-        west: f64,
+        rect: GeoRect,
     ) -> Result<(Vec<ImageWithMetadata>, usize)> {
-        let lat_low = north.min(south);
-        let lat_high = north.max(south);
-        let long_low = east.min(west);
-        let long_high = east.max(west);
+        let lat_low = rect.lat_low();
+        let lat_high = rect.lat_high();
+        let long_low = rect.long_low();
+        let long_high = rect.long_high();
 
         let conn = self
             .pool

@@ -92,6 +92,46 @@ impl From<ThumbnailSize> for ThumbnailSpec {
     }
 }
 
+/// An axis-aligned geographic query rectangle (degrees latitude/longitude). A
+/// struct so the four edges of a map-view bounds query can't be transposed
+/// positionally the way four adjacent `f64` params can. Corner order is
+/// normalized lazily by the `*_low`/`*_high` accessors, so callers may pass the
+/// edges in either order.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GeoRect {
+    pub north: f64,
+    pub south: f64,
+    pub east: f64,
+    pub west: f64,
+}
+
+impl GeoRect {
+    pub const fn new(north: f64, south: f64, east: f64, west: f64) -> Self {
+        Self {
+            north,
+            south,
+            east,
+            west,
+        }
+    }
+    /// Lower latitude bound (min of north/south).
+    pub fn lat_low(self) -> f64 {
+        self.north.min(self.south)
+    }
+    /// Upper latitude bound (max of north/south).
+    pub fn lat_high(self) -> f64 {
+        self.north.max(self.south)
+    }
+    /// Lower longitude bound (min of east/west).
+    pub fn long_low(self) -> f64 {
+        self.east.min(self.west)
+    }
+    /// Upper longitude bound (max of east/west).
+    pub fn long_high(self) -> f64 {
+        self.east.max(self.west)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,5 +179,17 @@ mod tests {
     fn thumbnail_size_converts_to_scale_spec() {
         let spec: ThumbnailSpec = ThumbnailSize(300).into();
         assert_eq!(spec, ThumbnailSpec::ScaleSize(ThumbnailSize(300)));
+    }
+
+    #[test]
+    fn geo_rect_accessors_normalize_corner_order() {
+        // Pass the edges "wrong way round": north < south, east < west.
+        let rect = GeoRect::new(10.0, 40.0, -120.0, -80.0);
+        assert_eq!(rect.lat_low(), 10.0);
+        assert_eq!(rect.lat_high(), 40.0);
+        assert_eq!(rect.long_low(), -120.0);
+        assert_eq!(rect.long_high(), -80.0);
+        assert!(rect.lat_low() < rect.lat_high());
+        assert!(rect.long_low() < rect.long_high());
     }
 }
