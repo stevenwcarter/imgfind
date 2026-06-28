@@ -143,7 +143,7 @@ Note: the map view is not yet ported to the GUI.
 
 ### 6. Generate Thumbnails
 
-Generate thumbnails in batches (also done automatically during indexing unless `--no-thumbnails`):
+Generate thumbnails in batches (outside the GUI, or to pre-generate sizes before first launch — note `imgfind index` no longer generates thumbnails; use `imgfind process` or the GUI background job for that):
 ```bash
 imgfind thumbnails                           # generate missing 300px thumbnails (default, batch of 50)
 imgfind thumbnails --size 300 --size 512 --size 2048  # one or more explicit sizes
