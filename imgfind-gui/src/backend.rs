@@ -7,7 +7,7 @@ use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result};
 use clipper::ClipEmbedder;
-use imgfind::config::SearchConfig;
+use imgfind::config;
 use imgfind::database::{Database, ImageMetadata, extract_image_metadata};
 use imgfind::edits::ImageEdits;
 use imgfind::filters::Filters;
@@ -90,14 +90,13 @@ impl Backend {
         let embedding = embedder
             .get_text_embedding(query)
             .context("Failed to embed query")?;
-        let sc = SearchConfig::default();
         let engine = SearchEngine::new(&self.db);
         let rows = imgfind::block_on(engine.search_meta(
             embedding,
             SEARCH_LIMIT,
             0,
-            sc.distance_threshold,
-            sc.max_k,
+            config::default_distance_threshold(),
+            config::default_max_k(),
             filters,
         ))
         .context("Search failed")?;
@@ -256,13 +255,12 @@ impl Backend {
     /// Images similar to `rel_path`, using its stored embedding. The seed itself
     /// is filtered out of the results.
     pub fn search_similar(&self, rel_path: &str, filters: &Filters) -> Result<Vec<RowMeta>> {
-        let sc = SearchConfig::default();
         let rows = imgfind::block_on(self.db.find_similar_to_path(
             &Self::rel(rel_path),
             SEARCH_LIMIT,
             0,
-            sc.distance_threshold,
-            sc.max_k,
+            config::default_distance_threshold(),
+            config::default_max_k(),
             filters,
         ))
         .with_context(|| format!("Similar search failed for {rel_path}"))?;

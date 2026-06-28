@@ -5,7 +5,7 @@ use ratatui_image::thread::{ResizeRequest, ThreadProtocol};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tracing::{debug, error};
 
-use crate::{search::SearchEngine, tui::app::App};
+use crate::{config, search::SearchEngine, tui::app::App};
 
 /// Search result from background task
 #[derive(Clone)]
@@ -156,15 +156,14 @@ impl App {
 
                 // Search database (SearchEngine normalizes the query internally).
                 // Defaults preserve the prior hardcoded behavior (distance <= 1.3, k ceiling 100).
-                let sc = crate::config::SearchConfig::default();
                 let search_engine = SearchEngine::new(&db);
                 let all_results = search_engine
                     .search_with_thumbnails_raw(
                         &query_embedding,
                         99,
                         0,
-                        sc.distance_threshold,
-                        sc.max_k,
+                        config::default_distance_threshold(),
+                        config::default_max_k(),
                     )
                     .await?;
 

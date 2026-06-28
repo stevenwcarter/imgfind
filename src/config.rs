@@ -38,7 +38,11 @@ pub struct SearchConfig {
     pub max_k: MaxK,
 }
 
-fn default_distance_threshold() -> DistanceThreshold {
+/// Canonical default cosine-distance ceiling for KNN search (`1.3`).
+///
+/// Exposed so UIs that don't surface search tuning can pass the default
+/// directly to a search call without materializing a whole [`SearchConfig`].
+pub fn default_distance_threshold() -> DistanceThreshold {
     DistanceThreshold(1.3)
 }
 
@@ -61,7 +65,10 @@ fn validate_search_config(search: &SearchConfig) -> Result<()> {
     Ok(())
 }
 
-fn default_max_k() -> MaxK {
+/// Canonical default KNN result ceiling (`100`).
+///
+/// Exposed alongside [`default_distance_threshold`] for the same reason.
+pub fn default_max_k() -> MaxK {
     MaxK(100)
 }
 

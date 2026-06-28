@@ -48,16 +48,6 @@ _(none)_
 
 ## Low
 
-### B25. `SearchConfig` re-allocated per search to carry two hardcoded constants (GUI + TUI): `Backend::search`/`search_similar`, TUI search handler (imgfind-gui/src/backend.rs:90)
-- Category: caching
-- Impact: 2 (severity 1 × blast-radius 2)
-- Effort: S
-- Risk: low
-- Evidence: each GUI search/"search similar" and each TUI query builds a fresh `SearchConfig` solely to read fixed `distance_threshold=1.3`/`max_k=100` (neither UI exposes tuning). Genuinely minor — a search is user-initiated, not per-frame — so this is a clarity/cleanliness nit, not a real perf problem.
-- Blast radius: imgfind-gui/src/backend.rs:90,256; src/tui/app/search.rs:159
-- Proposed fix: pass the two values directly (or module consts) instead of materializing the struct; or keep the struct but build it once. Pairs naturally with B19's validation if `DistanceThreshold` gains a constructor.
-- [x] execute   [ ] skip
-
 ### B27. `thumbnails --size` accepts an unbounded `u32` → OOM/extreme slowness: `resolve_thumbnail_sizes` (src/main.rs:1040)
 - Category: api-surface
 - Impact: 2 (severity 2 × blast-radius 1)
