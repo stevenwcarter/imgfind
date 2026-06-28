@@ -1,4 +1,4 @@
-## [unreleased]
+## [0.2.0] - 2026-06-28
 
 ### Bug Fixes
 
@@ -74,6 +74,26 @@
 - *(launcher)* Record library in recents when opened via "Open other folder…"([`8b6e9a7`](https://github.com/stevenwcarter/imgfind/commit/8b6e9a7771238e7a7f7c8fae04e9245cfb7e0426))
 - *(packaging)* Correct WiX PATH fragment merge structure + real component GUID([`1468016`](https://github.com/stevenwcarter/imgfind/commit/146801642e47da42bbc5427664ab442639e46c33))
 - *(ci)* Sanitize slashes in GITHUB_REF_NAME for dry-run artifact names([`014810a`](https://github.com/stevenwcarter/imgfind/commit/014810a3b5809eb8d2bae853297865b9e961b7e1))
+- *(changelog)* Skip internal commit types (plan/spec/tidy/typecheck/wip)([`f9a4bc8`](https://github.com/stevenwcarter/imgfind/commit/f9a4bc88035bdc35555f79e27784d57a15d11a92))
+- *(ci)* Build release installers without the tui feature (chafa)([`0d686fe`](https://github.com/stevenwcarter/imgfind/commit/0d686fe699d05830c283a0c34a9fefe4c66fb7c2))
+- *(gui)* Depend on imgfind with default-features=false (drop tui/chafa)([`8b565fe`](https://github.com/stevenwcarter/imgfind/commit/8b565feb19ab431c560b0e7ae16d354f0b21db0f))
+- *(packaging)* Ship a prebuilt .icns for the macOS installer icon([`43bec08`](https://github.com/stevenwcarter/imgfind/commit/43bec083402d0a4c9966043676acc69a61ddc869))
+- *(thumbnail)* Propagate edits-fetch DB errors instead of poisoning cache([`f4f246a`](https://github.com/stevenwcarter/imgfind/commit/f4f246a5ac41fe303a6b7baf7aa490c9fd345279))
+- *(gui)* Reset shown_fullres before edit-mode lightbox reloads; tighten regenerate test([`7de44dc`](https://github.com/stevenwcarter/imgfind/commit/7de44dc580d57924946a329aa13847c058e22a7f))
+- *(gui)* Restore global key focus on every edit-mode exit([`0ae86af`](https://github.com/stevenwcarter/imgfind/commit/0ae86af747ca6997e79c3ee3c8290271e2006b15))
+- *(api-surface)* Propagate thumbnail writer-thread panic as Err [B12]([`2f08dd5`](https://github.com/stevenwcarter/imgfind/commit/2f08dd5ef9305371bdda93500fd3832db8da88e7))
+- *(api-surface)* Show statusline error when external open fails [B15]([`b8fdb85`](https://github.com/stevenwcarter/imgfind/commit/b8fdb85f8fe8f12a19d2ec65c272334ebb46c95b))
+- *(frontend)* Recover meta_cache mutex from poison instead of crashing UI [B18]([`4c67e67`](https://github.com/stevenwcarter/imgfind/commit/4c67e67c0d17ba09df4da492f534564b44a4f604))
+- *(api-surface)* Validate distance_threshold at the config boundary [B19]([`2c13709`](https://github.com/stevenwcarter/imgfind/commit/2c137094eddbb44e58bb275a258c07eb01e3cd4e))
+- *(caching)* Collapse find_similar_to_path to a single JOIN query [B21]([`bd69528`](https://github.com/stevenwcarter/imgfind/commit/bd69528209b4d7c2bc9502d685ce5fa865474dde))
+- *(observability)* Log CLIP model-load success [B23]([`b057a9f`](https://github.com/stevenwcarter/imgfind/commit/b057a9f5dbcfdeeb7751c5e27f228cd11b1c0407))
+- *(observability)* Warn when session-restore rehydrate fails [B24]([`d7d933c`](https://github.com/stevenwcarter/imgfind/commit/d7d933c0f47ebb3854a6951a32530d5ab9baddb6))
+- *(api-surface)* Return Err instead of panicking when writer DB open fails [B26]([`7f33bfe`](https://github.com/stevenwcarter/imgfind/commit/7f33bfe1505276513cb715edae45e167187d0a2f))
+- *(api-surface)* Add checked try_to_absolute guarding against ../ escape [B22]([`a6e2f11`](https://github.com/stevenwcarter/imgfind/commit/a6e2f11bf6dc866c35f8c2dae3df06041b677f8f))
+- *(caching)* Stop building a throwaway SearchConfig per search [B25]([`9143419`](https://github.com/stevenwcarter/imgfind/commit/914341923691d0292f2b007454a1c25c0f83cf4b))
+- *(observability)* Log index walk errors at debug instead of silently skipping [B20]([`fbb0dbf`](https://github.com/stevenwcarter/imgfind/commit/fbb0dbfd3a3ad13c518d803632a8be828d70c48c))
+- *(api-surface)* Cap thumbnail --size to guard against OOM [B27]([`fedc355`](https://github.com/stevenwcarter/imgfind/commit/fedc355b41a229c8dee6cb41f1526c06cf7beb7f))
+- *(api-surface)* Give the progress-bar template unwrap a clear expect message [B28]([`d30e069`](https://github.com/stevenwcarter/imgfind/commit/d30e0691fd43b92de22b8929fae660369517e6ef))
 
 ### Build & CI
 
@@ -86,6 +106,8 @@
 - Re-encode app icon as 8-bit RGBA for installer icon generation([`8f85a8c`](https://github.com/stevenwcarter/imgfind/commit/8f85a8ccd3cc34218e395acd607ff2c6422dbd86))
 - Git-cliff config + initial CHANGELOG([`524d823`](https://github.com/stevenwcarter/imgfind/commit/524d82326753ed56173aede1de38761ed0622741))
 - Bump-version.sh (workspace version bump) with test([`45d9b72`](https://github.com/stevenwcarter/imgfind/commit/45d9b720bea06d1a68cfc51c011115bd63e7f387))
+- Just release recipe (signed tag) + git-cliff changelog recipe([`14110ac`](https://github.com/stevenwcarter/imgfind/commit/14110aca825aa7b974972009bb66b0f3c0e8c784))
+- Source GitHub Release notes from git-cliff (drop generate_release_notes)([`94327a0`](https://github.com/stevenwcarter/imgfind/commit/94327a081f1a9f26fb5de8dd74684cc8aa8e4f66))
 
 ### Documentation
 
@@ -173,6 +195,16 @@
 - Per-OS install instructions + packaging/release note([`5730119`](https://github.com/stevenwcarter/imgfind/commit/57301197b1f8b70c1d696274a5d2866b819e3768))
 - Spec for CHANGELOG generation + signed tagged release([`7e0c6d2`](https://github.com/stevenwcarter/imgfind/commit/7e0c6d20d4a2e59e3b852f87081397810d3d3750))
 - Implementation plan for CHANGELOG + signed tagged release([`ff9268c`](https://github.com/stevenwcarter/imgfind/commit/ff9268c6a02d4fa81309bcb5ebfcc754acf4d7c6))
+- Document the just release / changelog workflow([`7713f90`](https://github.com/stevenwcarter/imgfind/commit/7713f90c9b8f016b1a3df34160ac6ad094c3fb45))
+- *(spec)* Lightbox image adjustments (exposure)([`60b565a`](https://github.com/stevenwcarter/imgfind/commit/60b565a584e983c200d5edd6a67e7144465ddb83))
+- *(plan)* Lightbox image adjustments implementation plan([`747143f`](https://github.com/stevenwcarter/imgfind/commit/747143f29d4772c1d3cf0998fd139ec442c731de))
+- Document lightbox exposure adjustments feature([`7aac02b`](https://github.com/stevenwcarter/imgfind/commit/7aac02bf78446b17fecb2b1c1ec6c591050ea288))
+- *(spec)* Higher-fidelity exposure (linear RAW pipeline) + edit-UX polish([`fdd82b6`](https://github.com/stevenwcarter/imgfind/commit/fdd82b69ca7ebd912b0f1d3b0e199e0f9c47e3ca))
+- *(plan)* Higher-fidelity exposure (linear RAW) + edit-UX polish([`e05e9c9`](https://github.com/stevenwcarter/imgfind/commit/e05e9c94d31b6410c4d1f9a5adcd399e997f4da8))
+- Linear high-fidelity exposure pipeline, RAW demosaic, spinner, reset-to-neutral([`bdb7983`](https://github.com/stevenwcarter/imgfind/commit/bdb798328aa9f9446c8166966a4e908534f366e3))
+- Spec for expanded lightbox adjustment controls + Esc-twice fix([`eda09d7`](https://github.com/stevenwcarter/imgfind/commit/eda09d7a76a8b623892c6bb89838dbefd3cfcdda))
+- Implementation plan for lightbox adjustment controls([`d0922da`](https://github.com/stevenwcarter/imgfind/commit/d0922da203707988cc24389c36ff9c2a7b2d266f))
+- Document six-control adjustments + Esc-twice lightbox close([`8b1f5f1`](https://github.com/stevenwcarter/imgfind/commit/8b1f5f188a8ecbc07ca8d2dc75d7741d627f0bd1))
 
 ### Features
 
@@ -317,6 +349,23 @@
 - *(launcher)* Recents store (load/prune/record/save) with tests([`a853047`](https://github.com/stevenwcarter/imgfind/commit/a853047cc5221b7456cd44067c8c532e005e5151))
 - *(launcher)* Index plan builder + streaming child-process runner([`f488364`](https://github.com/stevenwcarter/imgfind/commit/f488364054ef7e16cc4e98b7207a5d359780326a))
 - *(launcher)* Two-view UI -- open recent/other library, index a folder with live log([`2caa15a`](https://github.com/stevenwcarter/imgfind/commit/2caa15a51ff93c79a100c5343a2ac2c7ea77996d))
+- *(edits)* ImageEdits type and apply_adjustments exposure transform([`d1b7125`](https://github.com/stevenwcarter/imgfind/commit/d1b7125b9ce2a67d7286356778594af439f440fe))
+- *(schema)* Migration 004 adds image_edits table([`a23ab2b`](https://github.com/stevenwcarter/imgfind/commit/a23ab2bff06c34dc35291b1d61178e4c8a3e28cf))
+- *(db)* Get/set image edits and list thumbnail sizes([`e59ffee`](https://github.com/stevenwcarter/imgfind/commit/e59ffee1faac71ff1566c77d1a7b3aea70a0f877))
+- *(thumbnail)* Bake image edits into generated thumbnails([`6539016`](https://github.com/stevenwcarter/imgfind/commit/6539016e8ff629ae72c5966c3321a1e1b65feb13))
+- *(thumbnail)* Regenerate all cached sizes for an edited image([`06b130e`](https://github.com/stevenwcarter/imgfind/commit/06b130e2e6602c8243e5d4aee0d975ec601e0f78))
+- *(gui)* Lightbox edit-mode sidebar and Edit toggle (markup)([`f4c8db1`](https://github.com/stevenwcarter/imgfind/commit/f4c8db17fe47e7b7286869b79659cf0db7b0eb8e))
+- *(gui)* Lightbox exposure edit mode with live preview and accept([`238f66e`](https://github.com/stevenwcarter/imgfind/commit/238f66eb0fe9762687a7be7e631a119bd158de36))
+- *(edits)* Linear-light exposure pipeline with soft-knee highlight rolloff([`3255b6b`](https://github.com/stevenwcarter/imgfind/commit/3255b6bd735349308881e3efda7a3bd80b56ea75))
+- *(decode)* Decode_linear — RAW sensor demosaic to linear light([`39ede79`](https://github.com/stevenwcarter/imgfind/commit/39ede79030be1ef6b8599c620eb923a3272e9901))
+- *(thumbnail)* Route non-identity edits through the linear pipeline; drop 8-bit apply_adjustments([`5ed373b`](https://github.com/stevenwcarter/imgfind/commit/5ed373b9bce30d684b8bc893889b1e18165e6ffa))
+- *(gui)* Render live edit preview through the linear pipeline; remove apply_adjustments([`0642408`](https://github.com/stevenwcarter/imgfind/commit/064240841facf7563ff417b7cdde7dbe2fa04061))
+- *(gui)* Fix Reset to neutral 0 EV and add a busy spinner for slow edits([`9d79520`](https://github.com/stevenwcarter/imgfind/commit/9d795203289d1edddb48c9695d8f4d0c7f43c9b7))
+- *(edits)* Expand ImageEdits to six adjustment controls([`3d57aec`](https://github.com/stevenwcarter/imgfind/commit/3d57aec5603ea50c1aff931277f60d42ff4fdec3))
+- *(edits)* Hybrid pipeline for saturation/blacks/whites/brightness/contrast([`445e702`](https://github.com/stevenwcarter/imgfind/commit/445e702a92c3879597bed873cb3e9e281320cd88))
+- *(db)* Migration 005 + persist all six adjustment fields([`9cc0844`](https://github.com/stevenwcarter/imgfind/commit/9cc0844d0e2f9addf570735ee8b4db77fd77a988))
+- *(gui)* EditControl enum with per-control clamp/format([`b9b85b8`](https://github.com/stevenwcarter/imgfind/commit/b9b85b8e8e0d8a912f936cebaa753bce77150f5d))
+- *(gui)* Six adjustment rows with per-control reset, Reset All, full-edits preview, Esc-twice fix([`af57304`](https://github.com/stevenwcarter/imgfind/commit/af57304dc8d602723700cdb60d6e6758121e82c7))
 
 ### Performance
 
