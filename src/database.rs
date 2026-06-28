@@ -999,28 +999,22 @@ impl Database {
             .await
             .context("Failed to get DB connection for find_similar_to_path")?;
 
-        let id = {
-            let mut rows = conn
-                .query("SELECT id FROM images WHERE path = ?1", (rel.clone(),))
-                .await?;
-            let row = rows
-                .next()
-                .await?
-                .with_context(|| format!("No indexed image at path {rel}"))?;
-            col_i64(&row, 0, "id")?
-        };
-
+        // One round-trip: join the active model's vector table to `images` on
+        // the (relative) path so the stored embedding comes back directly.
         let blob = {
             let mut rows = conn
                 .query(
-                    &format!("SELECT embedding FROM {vt} WHERE image_id = ?1"),
-                    (id,),
+                    &format!(
+                        "SELECT v.embedding FROM {vt} v \
+                         JOIN images i ON i.id = v.image_id WHERE i.path = ?1"
+                    ),
+                    (rel.clone(),),
                 )
                 .await?;
             let row = rows
                 .next()
                 .await?
-                .with_context(|| format!("No stored embedding for image id {id}"))?;
+                .with_context(|| format!("No stored embedding for indexed image at path {rel}"))?;
             match row.get_value(0)? {
                 Value::Blob(b) => b,
                 _ => anyhow::bail!("stored embedding is not a blob"),

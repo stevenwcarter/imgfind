@@ -48,16 +48,6 @@ _(none)_
 
 ## Low
 
-### B21. `find_similar_to_path` does two DB round-trips where one JOIN suffices: `find_similar_to_path` (src/database.rs:1002)
-- Category: caching
-- Impact: 4 (severity 2 × blast-radius 2)
-- Effort: S
-- Risk: low
-- Evidence: "search similar" first queries the image id by path, then queries the embedding by id — two round-trips on a warm path that a single JOIN-on-path query would collapse.
-- Blast radius: src/database.rs:1002-1027
-- Proposed fix: combine into one SQL query joining the vector table on the image path; return the embedding directly.
-- [x] execute   [ ] skip
-
 ### B22. DB-stored relative paths aren't validated against `../` escape on read: `RelativePath::to_absolute` (src/lib.rs:167)
 - Category: api-surface
 - Impact: 4 (severity 2 × blast-radius 2)
