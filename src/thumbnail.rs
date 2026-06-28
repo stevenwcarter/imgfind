@@ -58,13 +58,8 @@ pub fn generate_missing_thumbnails_batch(
 
     // Open a single database in the writer thread to avoid write deadlocks.
     let db_path = get_db_path(None).context("Failed to resolve database path")?;
-    let writer_db = match block_on(Database::new(&db_path)) {
-        Ok(db) => db,
-        Err(e) => {
-            tracing::error!("Writer thread failed to open database: {:?}", e);
-            panic!("Cannot proceed without DB access");
-        }
-    };
+    let writer_db =
+        block_on(Database::new(&db_path)).context("writer thread failed to open database")?;
     let writer_handle = thread::spawn(move || {
         let mut buffer: Vec<(String, u32, Vec<u8>)> = Vec::with_capacity(10);
 

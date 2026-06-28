@@ -68,16 +68,6 @@ _(none)_
 - Proposed fix: pass the two values directly (or module consts) instead of materializing the struct; or keep the struct but build it once. Pairs naturally with B19's validation if `DistanceThreshold` gains a constructor.
 - [x] execute   [ ] skip
 
-### B26. Writer-DB-open failure `panic!`s on the coordinating thread instead of returning `Err`: `generate_missing_thumbnails_batch` (src/thumbnail.rs:65)
-- Category: api-surface
-- Impact: 2 (severity 2 × blast-radius 1)
-- Effort: S
-- Risk: low
-- Evidence: if `Database::new` fails when opening the writer connection it calls `panic!("Cannot proceed without DB access")`. This runs on the *coordinating* thread (before `thread::spawn`), so B12's `writer_join_result` does **not** catch it — the function aborts with a panic instead of the clean `Err` it's declared to return. Trigger: DB removed/locked between resolving the path and opening the writer connection.
-- Blast radius: src/thumbnail.rs:60-67
-- Proposed fix: replace the `panic!` with `return Err(e).context("writer thread failed to open database")` — the function already returns `Result<usize>`.
-- [x] execute   [ ] skip
-
 ### B27. `thumbnails --size` accepts an unbounded `u32` → OOM/extreme slowness: `resolve_thumbnail_sizes` (src/main.rs:1040)
 - Category: api-surface
 - Impact: 2 (severity 2 × blast-radius 1)
