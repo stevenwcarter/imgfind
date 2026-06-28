@@ -133,7 +133,7 @@ pub fn process_embeddings_batch(
     let mut successes = 0usize;
     for (image_id, abs_path, hash) in rows {
         let path_str = abs_path.as_str();
-        match embed_one_from_thumbnail(db, embedder, image_id, &path_str, &hash) {
+        match embed_one_from_thumbnail(db, embedder, image_id, path_str.as_ref(), &hash) {
             Ok(()) => {
                 info!("embedded {path_str}");
                 successes += 1;
@@ -146,18 +146,22 @@ pub fn process_embeddings_batch(
     Ok(successes)
 }
 
-/// Full-thumbnail sizes generated in the `FullThumbnails` phase.
-///
-/// These are the GUI's grid (512 px) and lightbox (2048 px) sizes. The 300 px
-/// size is handled separately in the `Thumbnails300` phase.
-const FULL_THUMBNAIL_SIZES: [ThumbnailSize; 2] = [ThumbnailSize(512), ThumbnailSize(2048)];
+/// Canonical full-thumbnail sizes for the GUI: detail/grid (512 px) and
+/// lightbox (2048 px). Pass as `&FULL_THUMBNAIL_SIZES` to [`process_next_batch`]
+/// or [`run_to_completion`] for standard GUI pre-generation. The 300 px size
+/// is handled separately in the `Thumbnails300` phase.
+pub const FULL_THUMBNAIL_SIZES: [ThumbnailSize; 2] = [ThumbnailSize(512), ThumbnailSize(2048)];
 
 /// Process one batch of the given phase.
 ///
 /// - `Thumbnails300` — generate up to `batch` missing 300 px thumbnails.
+///   `sizes` is ignored.
 /// - `Embeddings` — embed up to `batch` images; `embedder` must be `Some`.
-/// - `FullThumbnails` — generate up to `batch` missing thumbnails for each of
-///   512 px and 2048 px; returns the total across both sizes.
+///   `sizes` is ignored.
+/// - `FullThumbnails` — for *each* size in `sizes`, generate up to `batch`
+///   missing thumbnails and return the total across all sizes. A caller that
+///   rate-limits by `batch` count should be aware that this arm can process up
+///   to `sizes.len() × batch` items per call.
 ///
 /// Returns the number of items that made forward progress this batch.
 pub fn process_next_batch(
@@ -165,6 +169,7 @@ pub fn process_next_batch(
     embedder: Option<&ClipEmbedder>,
     phase: ProcessPhase,
     batch: usize,
+    sizes: &[ThumbnailSize],
 ) -> Result<usize> {
     match phase {
         ProcessPhase::Thumbnails300 => {
@@ -177,7 +182,7 @@ pub fn process_next_batch(
         }
         ProcessPhase::FullThumbnails => {
             let mut total = 0usize;
-            for &size in &FULL_THUMBNAIL_SIZES {
+            for &size in sizes {
                 total += thumbnail::generate_missing_thumbnails_batch(db, size, batch)
                     .with_context(|| format!("generate missing {size:?} thumbnails batch"))?;
             }
@@ -193,12 +198,17 @@ pub fn process_next_batch(
 /// A per-phase zero-progress guard terminates processing if a batch makes no
 /// forward progress (preventing infinite loops on permanently undecodable images).
 ///
+/// Delegates all batch work to [`process_next_batch`].
+///
 /// # Arguments
 ///
 /// - `embedder` — CLIP embedder; must be `Some` when `with_embeddings` is `true`.
 ///   Pass `None` when `with_embeddings` is `false` to avoid loading the model.
+/// - `batch` — maximum items per batch call; the `FullThumbnails` phase may
+///   process up to `sizes.len() × batch` items per iteration (see
+///   [`process_next_batch`]).
 /// - `sizes` — thumbnail sizes for the `FullThumbnails` phase; pass
-///   `&[ThumbnailSize(512), ThumbnailSize(2048)]` for the standard GUI sizes.
+///   `&FULL_THUMBNAIL_SIZES` for the standard GUI sizes.
 /// - `with_embeddings` — if `false`, the `Embeddings` phase is skipped entirely.
 ///   Useful for workflows that defer vector search to a later step.
 /// - `progress` — called after each completed batch with
@@ -219,8 +229,8 @@ pub fn run_to_completion(
             break;
         }
         let done =
-            thumbnail::generate_missing_thumbnails_batch(db, ThumbnailSize(300), batch)
-                .context("generate 300px thumbnails batch")?;
+            process_next_batch(db, embedder, ProcessPhase::Thumbnails300, batch, sizes)
+                .context("Thumbnails300 batch")?;
         progress(ProcessPhase::Thumbnails300, done);
         if done == 0 {
             break; // zero-progress guard: permanently undecodable images
@@ -232,8 +242,7 @@ pub fn run_to_completion(
 
     // Phase 2: Embeddings.
     if with_embeddings {
-        let embedder =
-            embedder.context("embedder required when with_embeddings is set")?;
+        let emb = embedder.context("embedder required when with_embeddings is set")?;
         loop {
             let remaining = block_on(db.count_images_without_embedding())
                 .context("count missing embeddings")?;
@@ -241,7 +250,8 @@ pub fn run_to_completion(
                 break;
             }
             let done =
-                process_embeddings_batch(db, embedder, batch).context("embeddings batch")?;
+                process_next_batch(db, Some(emb), ProcessPhase::Embeddings, batch, sizes)
+                    .context("Embeddings batch")?;
             progress(ProcessPhase::Embeddings, done);
             if done == 0 {
                 break; // zero-progress guard
@@ -249,21 +259,22 @@ pub fn run_to_completion(
         }
     }
 
-    // Phase 3: Full thumbnails (caller-specified sizes for flexibility).
-    for &size in sizes {
-        loop {
-            let remaining = block_on(db.count_images_without_thumbnails(size))
+    // Phase 3: Full thumbnails (driven by the caller-specified `sizes`).
+    loop {
+        let mut remaining = 0usize;
+        for &size in sizes {
+            remaining += block_on(db.count_images_without_thumbnails(size))
                 .context("count missing full thumbnails")?;
-            if remaining == 0 {
-                break;
-            }
-            let done =
-                thumbnail::generate_missing_thumbnails_batch(db, size, batch)
-                    .with_context(|| format!("generate {size:?} thumbnails batch"))?;
-            progress(ProcessPhase::FullThumbnails, done);
-            if done == 0 {
-                break; // zero-progress guard
-            }
+        }
+        if remaining == 0 {
+            break;
+        }
+        let done =
+            process_next_batch(db, embedder, ProcessPhase::FullThumbnails, batch, sizes)
+                .context("FullThumbnails batch")?;
+        progress(ProcessPhase::FullThumbnails, done);
+        if done == 0 {
+            break; // zero-progress guard
         }
     }
 
@@ -374,13 +385,23 @@ mod tests {
             block_on(db.count_images_without_embedding()).expect("count after");
         assert_eq!(missing_after, 0, "no images should remain without an embedding");
 
-        // Verify that the stored vectors have the correct dimension and unit L2 norm.
-        // We confirm the dimension by checking the embedder reports 512 for the
-        // default model, and that normalize_vector's output is already unit length.
+        // Verify the embedder dimension matches the default model.
         assert_eq!(
             embedder.dim(),
             512,
             "default model must produce 512-dim vectors"
+        );
+
+        // Verify the stored vector has unit L2 norm.  Vectors are L2-normalized
+        // via `normalize_vector` before storage so cosine similarity equals dot
+        // product, and the norm must survive the round-trip through the DB blob.
+        let stored =
+            block_on(db.get_embedding_by_rel_path_for_test("proc_fixture_0.png"))
+                .expect("read back stored vector for proc_fixture_0.png");
+        let norm: f32 = stored.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(
+            (norm - 1.0).abs() < 1e-3,
+            "stored vector must have unit L2 norm, got {norm}"
         );
 
         let _ = std::fs::remove_dir_all(parent_dir);

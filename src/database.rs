@@ -1727,6 +1727,42 @@ impl Database {
             datetime_taken: col_opt_text(&row, 7)?,
         }))
     }
+
+    /// Read back the stored embedding for `rel_path` (relative to the DB's
+    /// parent directory), decoding from the `F32_BLOB` wire format.
+    ///
+    /// For use in unit tests only — not part of the public API.
+    #[cfg(test)]
+    pub async fn get_embedding_by_rel_path_for_test(&self, rel_path: &str) -> Result<Vec<f32>> {
+        let vt = self.vectors_table().await?;
+        let conn = self
+            .pool
+            .get()
+            .await
+            .context("get connection for test embedding read")?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT v.embedding FROM {vt} v \
+                     JOIN images i ON i.id = v.image_id WHERE i.path = ?1"
+                ),
+                (rel_path.to_string(),),
+            )
+            .await
+            .context("query embedding by relative path")?;
+        let row = rows
+            .next()
+            .await?
+            .with_context(|| format!("no embedding row for path {rel_path}"))?;
+        let blob = match row.get_value(0)? {
+            Value::Blob(b) => b,
+            _ => anyhow::bail!("stored embedding is not a blob"),
+        };
+        Ok(blob
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect())
+    }
 }
 
 /// Build a [`crate::sort::RowMeta`] from a `(id, path, file_size)` row, deriving
