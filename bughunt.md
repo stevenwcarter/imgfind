@@ -38,17 +38,6 @@ _(none)_
 
 ## Low
 
-### B27. `thumbnails --size` accepts an unbounded `u32` → OOM/extreme slowness: `resolve_thumbnail_sizes` (src/main.rs:1040)
-- Category: api-surface
-- Impact: 2 (severity 2 × blast-radius 1)
-- Effort: S
-- Risk: low
-- Evidence: `--size` is validated to reject 0 but has no upper bound; `--size 4294967295` reaches `image::resize` and tries to allocate/process an absurd rendition (OOM or effectively hangs). Self-inflicted, but a trivial guard prevents a foot-gun.
-- Blast radius: src/main.rs:1040-1053; src/thumbnail.rs (resize call)
-- Proposed fix: cap accepted sizes at a sane maximum (e.g. ≤ 8192, comfortably above `LIGHTBOX_SIZE` 2048) in `resolve_thumbnail_sizes`, `bail!`ing on larger.
-- User Note: allow up to 100 megapixels for now (normal-ish aspect ratio, just pick something in the right ballpark)
-- [x] execute   [ ] skip
-
 ### B28. Indexing progress-bar template `.unwrap()` on a constant string: `index_directory` (src/main.rs:496)
 - Category: api-surface
 - Impact: 1 (severity 1 × blast-radius 1)

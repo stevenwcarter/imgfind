@@ -1031,6 +1031,11 @@ fn handle_config_command(config_command: ConfigCommands) -> Result<()> {
     Ok(())
 }
 
+/// Upper bound on a requested thumbnail dimension. `--size` is a bounding-box
+/// long edge in px; 12000 yields ~100 MP at a typical 3:2 photo aspect
+/// (12000×8000 = 96 MP). Guards against `--size 4294967295` OOM-ing image::resize.
+const MAX_THUMBNAIL_SIZE: u32 = 12_000;
+
 /// Resolve the set of thumbnail sizes to generate.
 ///
 /// - `gui_sizes` → returns `GUI_THUMBNAIL_SIZES` (300, 512, 2048).
@@ -1039,10 +1044,14 @@ fn handle_config_command(config_command: ConfigCommands) -> Result<()> {
 ///
 /// Duplicates are removed while preserving the first-occurrence order.
 ///
-/// Returns `Err` if any size is 0, since `image::resize(0, 0, …)` panics.
+/// Returns `Err` if any size is 0 (since `image::resize(0, 0, …)` panics) or
+/// exceeds `MAX_THUMBNAIL_SIZE` (which would OOM/hang `image::resize`).
 fn resolve_thumbnail_sizes(sizes: &[u32], gui_sizes: bool) -> anyhow::Result<Vec<ThumbnailSize>> {
     if let Some(&bad) = sizes.iter().find(|&&s| s == 0) {
         anyhow::bail!("thumbnail size must be ≥ 1, got {bad}");
+    }
+    if let Some(&bad) = sizes.iter().find(|&&s| s > MAX_THUMBNAIL_SIZE) {
+        anyhow::bail!("thumbnail size must be ≤ {MAX_THUMBNAIL_SIZE}, got {bad}");
     }
     let raw: Vec<ThumbnailSize> = if gui_sizes {
         imgfind::thumbnail::GUI_THUMBNAIL_SIZES.to_vec()
@@ -1165,6 +1174,19 @@ mod gui_cli_tests {
     #[test]
     fn resolve_sizes_accepts_positive() {
         assert!(resolve_thumbnail_sizes(&[300], false).is_ok());
+    }
+
+    /// Regression: an unbounded `--size` (e.g. `4294967295`) must be rejected
+    /// before reaching `image::resize`, which would otherwise try to allocate
+    /// an absurd rendition (OOM/hang). Sizes at/below the cap stay valid.
+    #[test]
+    fn resolve_sizes_rejects_above_cap() {
+        assert!(resolve_thumbnail_sizes(&[MAX_THUMBNAIL_SIZE + 1], false).is_err());
+        assert!(resolve_thumbnail_sizes(&[20_000], false).is_err());
+        assert!(resolve_thumbnail_sizes(&[u32::MAX], false).is_err());
+        assert!(resolve_thumbnail_sizes(&[300, u32::MAX, 512], false).is_err());
+        assert!(resolve_thumbnail_sizes(&[MAX_THUMBNAIL_SIZE], false).is_ok());
+        assert!(resolve_thumbnail_sizes(&[2048], false).is_ok());
     }
 }
 
