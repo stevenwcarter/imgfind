@@ -3805,6 +3805,7 @@ dependencies = [
  "slint-build",
  "tracing",
  "tracing-subscriber",
+ "winresource",
 ]
 
 [[package]]

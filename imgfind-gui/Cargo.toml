@@ -24,3 +24,9 @@ parking_lot = "0.12"
 
 [build-dependencies]
 slint-build = "1.16"
+
+# Windows-only: embed the app icon into the .exe resources (see build.rs).
+# Host-gated — included only when building on a Windows host (our Windows
+# artifacts are built natively in CI); a non-Windows host skips it.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
