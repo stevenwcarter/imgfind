@@ -1,4 +1,4 @@
-use crate::{ThumbnailSize, ThumbnailSpec, database::Database, edits::ImageEdits, get_db_path};
+use crate::{ThumbnailSize, ThumbnailSpec, database::Database, edits::ImageEdits};
 use anyhow::{Context, Result};
 
 /// Long-edge target for the GUI lightbox/preview cached render.
@@ -57,7 +57,12 @@ pub fn generate_missing_thumbnails_batch(
     let writer_count = Arc::clone(&generated_count);
 
     // Open a single database in the writer thread to avoid write deadlocks.
-    let db_path = get_db_path(None).context("Failed to resolve database path")?;
+    // Derive the path from the PASSED db's parent_dir so the writer always
+    // targets the same library as the reader, regardless of the process cwd.
+    // Using get_db_path(None) here was a bug: it resolved via cwd walk-up and
+    // could open a completely different database when the caller was launched
+    // with --dir pointing elsewhere.
+    let db_path = db.parent_dir.join(".imgfind").join("imgfind.db");
     let writer_db =
         block_on(Database::new(&db_path)).context("writer thread failed to open database")?;
     let writer_handle = thread::spawn(move || {
