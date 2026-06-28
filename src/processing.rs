@@ -195,15 +195,17 @@ pub fn process_next_batch(
 ///
 /// # Arguments
 ///
+/// - `embedder` — CLIP embedder; must be `Some` when `with_embeddings` is `true`.
+///   Pass `None` when `with_embeddings` is `false` to avoid loading the model.
 /// - `sizes` — thumbnail sizes for the `FullThumbnails` phase; pass
 ///   `&[ThumbnailSize(512), ThumbnailSize(2048)]` for the standard GUI sizes.
-/// - `with_embeddings` — if `false`, the `Embeddings` phase is skipped. Useful
-///   for workflows that defer vector search to a later step.
+/// - `with_embeddings` — if `false`, the `Embeddings` phase is skipped entirely.
+///   Useful for workflows that defer vector search to a later step.
 /// - `progress` — called after each completed batch with
 ///   `(phase, items_done_this_batch)`.
 pub fn run_to_completion(
     db: &mut Database,
-    embedder: &ClipEmbedder,
+    embedder: Option<&ClipEmbedder>,
     batch: usize,
     sizes: &[ThumbnailSize],
     with_embeddings: bool,
@@ -230,6 +232,8 @@ pub fn run_to_completion(
 
     // Phase 2: Embeddings.
     if with_embeddings {
+        let embedder =
+            embedder.context("embedder required when with_embeddings is set")?;
         loop {
             let remaining = block_on(db.count_images_without_embedding())
                 .context("count missing embeddings")?;

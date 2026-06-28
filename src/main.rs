@@ -138,6 +138,23 @@ enum Commands {
         #[arg(long)]
         all: bool,
     },
+    /// Generate embeddings and thumbnails for indexed images (resumable).
+    ///
+    /// Runs the three processing phases in order: 300 px thumbnails →
+    /// CLIP embeddings → 512/2048 px thumbnails. Each phase is skippable
+    /// if already complete, so the command is safe to re-run.
+    Process {
+        /// Per-batch size (images processed per iteration).
+        #[arg(long, default_value_t = 64)]
+        count: usize,
+        /// Skip embedding generation (thumbnail-only pass; avoids loading the
+        /// ~1.7 GB CLIP model).
+        #[arg(long)]
+        no_embeddings: bool,
+        /// Directory whose DB to use (walk-up/global logic otherwise).
+        #[arg(short, long)]
+        dir: Option<String>,
+    },
     /// Manage embedding models
     Models {
         #[command(subcommand)]
@@ -299,6 +316,39 @@ fn main() -> Result<()> {
                     generate_thumbnails_batch(&mut db, s, count)?;
                 }
             }
+        }
+        Commands::Process {
+            count,
+            no_embeddings,
+            dir,
+        } => {
+            let db_path = get_db_path(dir.as_deref())?;
+            let mut db = imgfind::block_on(Database::new(&db_path))?;
+            let embedder: Option<ClipEmbedder> = if no_embeddings {
+                None
+            } else {
+                info!("Loading CLIP model...");
+                let spinner = ProgressBar::new_spinner();
+                spinner
+                    .set_message("Loading CLIP model… (this may take a minute on first use)");
+                spinner.enable_steady_tick(std::time::Duration::from_millis(120));
+                let model_name = imgfind::block_on(db.active_model())?.name;
+                let model = ClipEmbedder::from_model(&model_name, false)
+                    .context("Failed to create ClipEmbedder")?;
+                spinner.finish_and_clear();
+                Some(model)
+            };
+            // The `sizes` arg controls the FullThumbnails phase only; 300 px is
+            // always handled by Phase 1 internally. Passing 512 and 2048 matches
+            // the GUI_THUMBNAIL_SIZES without the 300 px redundancy.
+            imgfind::processing::run_to_completion(
+                &mut db,
+                embedder.as_ref(),
+                count,
+                &[ThumbnailSize(512), ThumbnailSize(2048)],
+                !no_embeddings,
+                |phase, n| println!("{phase:?}: processed {n}"),
+            )?;
         }
         Commands::Models { action } => {
             let db_path = get_db_path(None)?;
