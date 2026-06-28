@@ -80,6 +80,20 @@ impl Backend {
         self.embedder.get().is_some()
     }
 
+    /// Clone the underlying database handle for use in a background worker.
+    ///
+    /// The process-worker owns its own connection pool so it can be the sole
+    /// heavy writer without contending with interactive queries.
+    pub fn db_clone(&self) -> Database {
+        self.db.clone()
+    }
+
+    /// Share the embedder lock so a background worker can wait for and access
+    /// the loaded CLIP model once it is ready.
+    pub fn embedder_arc(&self) -> Arc<OnceLock<ClipEmbedder>> {
+        Arc::clone(&self.embedder)
+    }
+
     /// Text query → ranked [`RowMeta`] in relevance order (distance ascending).
     /// Relevance lives in the Vec ordering; `distance` is not stored.
     pub fn search(&self, query: &str, filters: &Filters) -> Result<Vec<RowMeta>> {

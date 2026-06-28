@@ -25,6 +25,43 @@ export struct BrushRow {
     joined: string,
 }
 
+// One labeled progress row in the background-processing status panel: a caption,
+// a "done / total" readout, and a proportional fill bar. ASCII text only (Slint's
+// default font has no glyph for many symbols — §1 of the slint skill).
+component ProcessBar inherits VerticalLayout {
+    in property <string> label;
+    in property <int> done;
+    in property <int> total;
+    spacing: 4px;
+    HorizontalLayout {
+        Text {
+            text: root.label;
+            color: #cfd6e4;
+            font-size: 12px;
+        }
+        Rectangle { horizontal-stretch: 1; }
+        Text {
+            text: "\{root.done} / \{root.total}";
+            color: #9aa4b2;
+            font-size: 12px;
+        }
+    }
+    Rectangle {
+        height: 8px;
+        border-radius: 4px;
+        background: #2d3446;
+        Rectangle {
+            x: 0;
+            y: 0;
+            height: 100%;
+            // Guard total == 0 (no work) and clamp to a full bar.
+            width: parent.width * (root.total > 0 ? min(1.0, root.done / root.total) : 0);
+            border-radius: 4px;
+            background: #3a6;
+        }
+    }
+}
+
 // One row in the adjustments sidebar: label, value readout, slider, per-control
 // reset button. The `value <=> root.value` two-way binding lets a Rust write
 // (per-control reset or Reset All) physically reseat the thumb. The reset button
@@ -254,6 +291,25 @@ export component MainWindow inherits Window {
     callback grid-space();
     callback grid-escape();
 
+    // --- Background processing status (set from Rust; the worker drains its
+    // progress channel on the UI thread and writes these). The `\` key toggles
+    // the panel; the statusline pill mirrors `process-pill-text`. ASCII text only.
+    in property <bool> process-panel-open: false;
+    in property <bool> process-paused: false;
+    in property <string> process-state;        // "Running" / "Paused" / "Waiting for model..." / "Idle"
+    in property <string> process-pill-text;    // e.g. "Indexing 16/40" or "Done"
+    in property <string> process-indexing-hint; // e.g. "12 still indexing" (empty when caught up)
+    in property <int> process-thumbs300-done;
+    in property <int> process-thumbs300-total;
+    in property <int> process-embed-done;
+    in property <int> process-embed-total;
+    in property <int> process-full-done;
+    in property <int> process-full-total;
+    in property <int> process-overall-done;
+    in property <int> process-overall-total;
+    callback toggle-process-panel();
+    callback toggle-process-pause();
+
     // Grid geometry constants.
     private property <length> tile-size: 200px;
     private property <length> tile-gap: 8px;
@@ -415,6 +471,11 @@ export component MainWindow inherits Window {
                     root.lightbox-zoom-step(-1);
                     return accept;
                 }
+                // Backslash toggles the background-processing status panel.
+                if (event.text == "\\") {
+                    root.toggle-process-panel();
+                    return accept;
+                }
                 return accept;
             }
             // Multi-image selection (grid-only): `v` enters Free mode, `Shift+V`
@@ -466,6 +527,13 @@ export component MainWindow inherits Window {
             // detail panel). Rust decides via grid-escape().
             if (event.text == Key.Escape) {
                 root.grid-escape();
+                return accept;
+            }
+            // Backslash toggles the background-processing status panel. Placed
+            // after the typing/chord-suppression guards above, so it never fires
+            // while a text field is focused.
+            if (event.text == "\\") {
+                root.toggle-process-panel();
                 return accept;
             }
             return reject;
@@ -573,6 +641,14 @@ export component MainWindow inherits Window {
                         enabled: root.can-search;
                         // Return focus to app-keys after submitting so grid keys work.
                         accepted(text) => { root.search(text); app-keys.focus(); }
+                    }
+                    // "N still indexing" hint while embeddings are still being
+                    // generated in the background (some images aren't searchable yet).
+                    if root.process-indexing-hint != "": Text {
+                        text: root.process-indexing-hint;
+                        color: #f2c94c;
+                        font-size: 12px;
+                        vertical-alignment: center;
                     }
                 }
 
@@ -933,6 +1009,75 @@ export component MainWindow inherits Window {
                             }
                         }
                     }
+
+                    // Processing status panel — fixed 300 px, only present when
+                    // process-panel-open. Reflows the grid (grid-area has
+                    // horizontal-stretch: 1, so it shrinks) — it does NOT overlay,
+                    // mirroring the detail panel above. Closing it does not stop
+                    // the worker (Rust only flips the property).
+                    if root.process-panel-open: Rectangle {
+                        width: 300px;
+                        background: #252b3a;
+
+                        // Left border divider rendered as a thin child rectangle.
+                        Rectangle {
+                            x: 0px;
+                            y: 0px;
+                            width: 1px;
+                            height: parent.height;
+                            background: #3a4255;
+                        }
+
+                        VerticalLayout {
+                            padding: 12px;
+                            spacing: 10px;
+
+                            HorizontalLayout {
+                                Text {
+                                    text: "Processing";
+                                    color: #e0e4ed;
+                                    font-size: 14px;
+                                    vertical-alignment: center;
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                                Button {
+                                    // U+00D7 (×, Latin-1) renders; ✕ (U+2715) tofus.
+                                    text: "×";
+                                    clicked => { root.toggle-process-panel(); app-keys.focus(); }
+                                }
+                            }
+
+                            ProcessBar {
+                                label: "Thumbnails (300px)";
+                                done: root.process-thumbs300-done;
+                                total: root.process-thumbs300-total;
+                            }
+                            ProcessBar {
+                                label: "Embeddings";
+                                done: root.process-embed-done;
+                                total: root.process-embed-total;
+                            }
+                            ProcessBar {
+                                label: "Full thumbnails";
+                                done: root.process-full-done;
+                                total: root.process-full-total;
+                            }
+
+                            Text {
+                                text: "State: \{root.process-state}";
+                                color: #9aa4b2;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+
+                            Button {
+                                text: root.process-paused ? "Resume" : "Pause";
+                                clicked => { root.toggle-process-pause(); app-keys.focus(); }
+                            }
+
+                            Rectangle { vertical-stretch: 1; }
+                        }
+                    }
                 }
             }
         }
@@ -945,11 +1090,35 @@ export component MainWindow inherits Window {
             HorizontalLayout {
                 padding-left: 10px;
                 padding-right: 10px;
+                spacing: 8px;
                 Text {
                     text: root.statusline;
                     color: #9aa4b2;
                     font-size: 12px;
                     vertical-alignment: center;
+                }
+                // Spacer pushes the processing pill to the right edge.
+                Rectangle { horizontal-stretch: 1; }
+                // Clickable processing-status pill (ASCII text only). Toggles the
+                // status panel; hidden until the worker has set its text.
+                Rectangle {
+                    visible: root.process-pill-text != "";
+                    width: pill-text.preferred-width + 16px;
+                    height: 18px;
+                    border-radius: 4px;
+                    background: pill-touch.has-hover ? #3a4255 : #2d3446;
+                    pill-text := Text {
+                        text: root.process-pill-text;
+                        color: #cfd6e4;
+                        font-size: 11px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        width: 100%;
+                        height: 100%;
+                    }
+                    pill-touch := TouchArea {
+                        clicked => { root.toggle-process-panel(); app-keys.focus(); }
+                    }
                 }
             }
         }

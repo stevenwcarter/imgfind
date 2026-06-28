@@ -36,6 +36,7 @@ pub mod indexing;
 pub mod logging;
 pub mod metadata;
 pub mod models;
+pub mod processing;
 pub mod schema;
 pub mod search;
 pub mod sort;

@@ -15,30 +15,27 @@ pub struct ChildCommandSpec {
     pub cwd: PathBuf,
 }
 
-/// Build the index→thumbnails plan for indexing `folder`.
+/// Build the index plan for indexing `folder`.
 ///
 /// `create_new` decides whether a fresh library is created *inside* `folder`
 /// (`index --root`, exploiting that `--root` creates the DB in the process cwd)
 /// or whether indexing walks up into an existing ancestor library (`index`).
-/// Both steps run with `cwd = folder`, and thumbnails pre-generates all GUI
-/// sizes so first view is instant.
+/// The step runs with `cwd = folder`.
+///
+/// Thumbnail + embedding + full-rendition generation is no longer spawned here:
+/// the GUI's background processing worker now does that work when the library is
+/// opened, with a live status panel/pill. See
+/// `docs/superpowers/specs/2026-06-28-fast-index-background-processing-design.md`.
 pub fn plan(folder: &Path, create_new: bool) -> Vec<ChildCommandSpec> {
     let mut index_args = vec!["index".to_string()];
     if create_new {
         index_args.push("--root".to_string());
     }
-    vec![
-        ChildCommandSpec {
-            kind: ChildKind::Imgfind,
-            args: index_args,
-            cwd: folder.to_path_buf(),
-        },
-        ChildCommandSpec {
-            kind: ChildKind::Imgfind,
-            args: vec!["thumbnails".into(), "--gui-sizes".into(), "--all".into()],
-            cwd: folder.to_path_buf(),
-        },
-    ]
+    vec![ChildCommandSpec {
+        kind: ChildKind::Imgfind,
+        args: index_args,
+        cwd: folder.to_path_buf(),
+    }]
 }
 
 /// Spawn each spec sequentially, streaming merged stdout+stderr line-by-line to
@@ -107,24 +104,21 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn plan_create_new_uses_root_then_thumbnails_all() {
+    fn plan_create_new_uses_root_only() {
         let folder = Path::new("/data/photos");
         let specs = plan(folder, true);
-        assert_eq!(specs.len(), 2);
-        // index --root, cwd = folder
+        // Only the index step — the GUI background worker handles thumbnails/embeddings.
+        assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].args, vec!["index", "--root"]);
         assert_eq!(specs[0].cwd, folder);
-        // thumbnails --gui-sizes --all, cwd = folder
-        assert_eq!(specs[1].args, vec!["thumbnails", "--gui-sizes", "--all"]);
-        assert_eq!(specs[1].cwd, folder);
     }
 
     #[test]
     fn plan_existing_omits_root() {
         let folder = Path::new("/data/photos/sub");
         let specs = plan(folder, false);
+        assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].args, vec!["index"]);
         assert_eq!(specs[0].cwd, folder);
-        assert_eq!(specs[1].args, vec!["thumbnails", "--gui-sizes", "--all"]);
     }
 }

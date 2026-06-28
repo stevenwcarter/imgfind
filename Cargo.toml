@@ -62,5 +62,6 @@ hashbrown = "0.17"
 serde_json = "1.0"
 
 [dev-dependencies]
+image = "0.25"
 insta = "1.48"
 tempfile = "3.27.0"
