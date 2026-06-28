@@ -206,6 +206,15 @@ fn format_statusline(sel: &selection::Selection, results: &[RowMeta]) -> String 
     }
 }
 
+/// Status-line message shown when launching the OS image viewer fails.
+fn open_external_error_msg(path: &str) -> String {
+    let name = std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(path);
+    format!("Could not open {name} in external viewer")
+}
+
 /// Build a `Filters` from current UI slider/chip/GPS state.
 fn build_filters(
     lo: f32,
@@ -827,6 +836,7 @@ fn main() -> Result<()> {
     {
         let backend_open = backend.clone();
         let state_ref = Arc::clone(&state);
+        let weak = window.as_weak();
         window.on_tile_open_external(move |index| {
             let path = {
                 let s = state_ref.lock();
@@ -836,6 +846,9 @@ fn main() -> Result<()> {
                 let abs = backend_open.abs_path(&rel);
                 if let Err(e) = open::that(&abs) {
                     tracing::warn!("Failed to open {abs:?}: {e}");
+                    if let Some(w) = weak.upgrade() {
+                        w.set_statusline(open_external_error_msg(rel.as_str()).into());
+                    }
                 }
             }
         });
@@ -4343,6 +4356,7 @@ mod tests {
     use super::{
         DetailState, FileSize, build_filters, build_size_label, clamp_next, clamp_prev,
         detail_shows, format_bytes, format_statusline, fraction_to_bytes, is_current_generation,
+        open_external_error_msg,
     };
     use imgfind::ids::ImageId;
     use imgfind::sort::RowMeta;
@@ -4357,6 +4371,13 @@ mod tests {
         assert!(detail_shows(&detail, "a/b.jpg"));
         assert!(!detail_shows(&detail, "a/c.jpg"));
         assert!(!detail_shows(&None, "a/b.jpg"));
+    }
+
+    #[test]
+    fn open_external_error_msg_shows_basename_only() {
+        let msg = open_external_error_msg("/home/u/pics/sunset.jpg");
+        assert!(msg.contains("sunset.jpg"));
+        assert!(!msg.contains("/home/u/pics"));
     }
 
     #[test]

@@ -24,15 +24,7 @@ _(none)_
 
 ## Low
 
-### B15. Open-in-OS-viewer failure only logged, no UI feedback: `on_tile_open_external` (imgfind-gui/src/main.rs:744)
-- Category: api-surface
-- Impact: 4 (severity 2 × blast-radius 2)
-- Effort: S
-- Risk: low
-- Evidence: `open::that(&abs)` errors on right-click-open are caught and `tracing::warn!`'d; the GUI shows nothing, so the user gets no indication the open failed.
-- Blast radius: imgfind-gui/src/main.rs:744
-- Proposed fix: On `Err`, surface a transient UI error (toast/status field).
-- [x] execute   [ ] skip
+_(none)_
 
 ## Skip (do not re-flag in future runs)
 - `SearchState.results` unbounded `Vec<RowMeta>` at imgfind-gui/src/state.rs:19 — search results are 100 by default and only "relevance" is in-memory sorted; O(100) is fine.
