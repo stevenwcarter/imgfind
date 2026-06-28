@@ -36,16 +36,6 @@ _(none)_
 - Proposed fix: surface a flush failure so the batch function returns `Err` (e.g. record a flush-error flag/`Result` shared with the writer thread and check it after join), so the CLI reports failure and `--all` aborts instead of looping. At minimum, break the `--all` loop when a batch makes zero forward progress.
 - [ ] execute   [ ] skip
 
-### B20. Directory-walk errors are silently skipped during indexing — no diagnostic trail for unindexed files: `index_directory` (src/main.rs:447)
-- Category: observability
-- Impact: 6 (severity 3 × blast-radius 2)
-- Effort: S
-- Risk: low
-- Evidence: the index file-walk discards `WalkDir` errors with `Err(_) => continue` (main.rs ~:444-448). Permission-denied dirs, broken symlinks, and transient I/O errors cause whole subtrees to be skipped with zero logging, so a user wondering why images are missing from search has no breadcrumb even at `RUST_LOG=debug`.
-- Blast radius: src/main.rs:444-452
-- Proposed fix: `Err(e) => { tracing::debug!("skipped path on walk error: {e}"); continue; }` (debug level keeps normal output clean while giving operators a diagnostic trail).
-- [x] execute   [ ] skip
-
 ## Low
 
 ### B27. `thumbnails --size` accepts an unbounded `u32` → OOM/extreme slowness: `resolve_thumbnail_sizes` (src/main.rs:1040)

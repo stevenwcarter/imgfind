@@ -444,7 +444,10 @@ fn index_directory(
     while let Some(entry_result) = walker_iter.next() {
         let entry = match entry_result {
             Ok(entry) => entry,
-            Err(_) => continue,
+            Err(e) => {
+                debug!("skipped path on walk error: {e}");
+                continue;
+            }
         };
 
         let path = entry.path();
