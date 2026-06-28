@@ -36,16 +36,6 @@ _(none)_
 - Proposed fix: surface a flush failure so the batch function returns `Err` (e.g. record a flush-error flag/`Result` shared with the writer thread and check it after join), so the CLI reports failure and `--all` aborts instead of looping. At minimum, break the `--all` loop when a batch makes zero forward progress.
 - [ ] execute   [ ] skip
 
-### B19. `distance_threshold` from config can be NaN/inf and is interpolated into the KNN SQL: `SearchConfig.distance_threshold` (src/config.rs:35)
-- Category: api-surface
-- Impact: 6 (severity 3 × blast-radius 2)
-- Effort: S
-- Risk: low
-- Evidence: `distance_threshold` is deserialized from the user-editable `~/.imgfind/config.toml` as a raw float with no finiteness/range check, then formatted into the `vector_distance_cos(...) <= {threshold}` SQL (vector_sql / database.rs). A NaN/inf/negative value (typo in the TOML) yields a malformed or always-false comparison, so search silently returns nothing with no clear error.
-- Blast radius: src/config.rs:35; src/database.rs (knn_query call sites, ~:867/:903/:952); src/vector_sql.rs
-- Proposed fix: validate at the config boundary (parse-don't-validate) — reject a non-finite or `< 0.0` threshold in `Config::load` with a clear error, or clamp into `[0.0, 2.0]` (cosine-distance domain) and `warn!`. Ties into TYPECHECK T9's `DistanceThreshold` newtype — a smart constructor there would enforce this once.
-- [x] execute   [ ] skip
-
 ### B20. Directory-walk errors are silently skipped during indexing — no diagnostic trail for unindexed files: `index_directory` (src/main.rs:447)
 - Category: observability
 - Impact: 6 (severity 3 × blast-radius 2)

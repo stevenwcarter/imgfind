@@ -42,6 +42,25 @@ fn default_distance_threshold() -> DistanceThreshold {
     DistanceThreshold(1.3)
 }
 
+/// Reject a `distance_threshold` that could never be a valid cosine distance.
+///
+/// Cosine distance lives in `[0, 2]`, and this value is formatted directly into
+/// the KNN `vector_distance_cos(...) <= {threshold}` SQL. A NaN/inf/negative
+/// value (typically a `config.toml` typo) would make every search silently
+/// return nothing, so we fail loudly at the parse boundary instead.
+fn validate_search_config(search: &SearchConfig) -> Result<()> {
+    let t = search.distance_threshold.get();
+    // `contains` also rejects NaN/inf (any comparison against them is false), but
+    // the explicit `is_finite` documents that intent for the reader.
+    if !t.is_finite() || !(0.0..=2.0).contains(&t) {
+        anyhow::bail!(
+            "config search.distance_threshold must be a finite value in [0.0, 2.0] \
+             (cosine distance range); got {t}"
+        );
+    }
+    Ok(())
+}
+
 fn default_max_k() -> MaxK {
     MaxK(100)
 }
@@ -165,6 +184,9 @@ impl Config {
 
         let config: Config = toml::from_str(&config_content)
             .with_context(|| format!("Failed to parse config file: {}", config_path.display()))?;
+
+        validate_search_config(&config.search)
+            .with_context(|| format!("Invalid config file: {}", config_path.display()))?;
 
         Ok(config)
     }
@@ -365,6 +387,29 @@ mod tests {
         let cfg: Config = toml::from_str("").expect("empty toml parses");
         assert_eq!(cfg.search.distance_threshold, DistanceThreshold(1.3));
         assert_eq!(cfg.search.max_k, MaxK(100));
+    }
+
+    #[test]
+    fn validate_search_config_rejects_invalid_thresholds() {
+        for bad in [f32::NAN, f32::INFINITY, -1.0, 2.5] {
+            let search = SearchConfig {
+                distance_threshold: DistanceThreshold(bad),
+                ..SearchConfig::default()
+            };
+            assert!(
+                validate_search_config(&search).is_err(),
+                "expected {bad} to be rejected",
+            );
+        }
+    }
+
+    #[test]
+    fn validate_search_config_accepts_in_range_threshold() {
+        let search = SearchConfig {
+            distance_threshold: DistanceThreshold(1.3),
+            ..SearchConfig::default()
+        };
+        assert!(validate_search_config(&search).is_ok());
     }
 
     #[test]
