@@ -329,8 +329,7 @@ fn main() -> Result<()> {
             } else {
                 info!("Loading CLIP model...");
                 let spinner = ProgressBar::new_spinner();
-                spinner
-                    .set_message("Loading CLIP model… (this may take a minute on first use)");
+                spinner.set_message("Loading CLIP model… (this may take a minute on first use)");
                 spinner.enable_steady_tick(std::time::Duration::from_millis(120));
                 let model_name = imgfind::block_on(db.active_model())?.name;
                 let model = ClipEmbedder::from_model(&model_name, false)
@@ -1247,14 +1246,16 @@ mod index_tests {
         // Solid-colour images compress to near zero, so use per-pixel variation
         // to defeat PNG's DEFLATE compressor and guarantee file size > 128 KB.
         for i in 0..N {
-            let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
-                ImageBuffer::from_fn(512, 512, |x, y| {
-                    Rgb([
-                        ((x.wrapping_mul(y).wrapping_add(i as u32 * 17)) % 256) as u8,
-                        ((x.wrapping_add(y).wrapping_add(i as u32 * 31)) % 256) as u8,
-                        ((x.wrapping_mul(3).wrapping_add(y.wrapping_mul(7)).wrapping_add(i as u32 * 53)) % 256) as u8,
-                    ])
-                });
+            let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(512, 512, |x, y| {
+                Rgb([
+                    ((x.wrapping_mul(y).wrapping_add(i as u32 * 17)) % 256) as u8,
+                    ((x.wrapping_add(y).wrapping_add(i as u32 * 31)) % 256) as u8,
+                    ((x.wrapping_mul(3)
+                        .wrapping_add(y.wrapping_mul(7))
+                        .wrapping_add(i as u32 * 53))
+                        % 256) as u8,
+                ])
+            });
             img.save(parent_dir.join(format!("fixture_{i}.png")))
                 .expect("save fixture");
         }

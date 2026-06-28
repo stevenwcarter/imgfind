@@ -19,7 +19,9 @@ use anyhow::{Context, Result};
 use clipper::ClipEmbedder;
 use tracing::{info, warn};
 
-use crate::{ThumbnailSize, block_on, database::Database, metadata::extract_missing_metadata, thumbnail};
+use crate::{
+    ThumbnailSize, block_on, database::Database, metadata::extract_missing_metadata, thumbnail,
+};
 
 /// The three phases of background processing, in execution order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,9 +230,8 @@ pub fn run_to_completion(
         if remaining == 0 {
             break;
         }
-        let done =
-            process_next_batch(db, embedder, ProcessPhase::Thumbnails300, batch, sizes)
-                .context("Thumbnails300 batch")?;
+        let done = process_next_batch(db, embedder, ProcessPhase::Thumbnails300, batch, sizes)
+            .context("Thumbnails300 batch")?;
         progress(ProcessPhase::Thumbnails300, done);
         if done == 0 {
             break; // zero-progress guard: permanently undecodable images
@@ -249,9 +250,8 @@ pub fn run_to_completion(
             if remaining == 0 {
                 break;
             }
-            let done =
-                process_next_batch(db, Some(emb), ProcessPhase::Embeddings, batch, sizes)
-                    .context("Embeddings batch")?;
+            let done = process_next_batch(db, Some(emb), ProcessPhase::Embeddings, batch, sizes)
+                .context("Embeddings batch")?;
             progress(ProcessPhase::Embeddings, done);
             if done == 0 {
                 break; // zero-progress guard
@@ -269,9 +269,8 @@ pub fn run_to_completion(
         if remaining == 0 {
             break;
         }
-        let done =
-            process_next_batch(db, embedder, ProcessPhase::FullThumbnails, batch, sizes)
-                .context("FullThumbnails batch")?;
+        let done = process_next_batch(db, embedder, ProcessPhase::FullThumbnails, batch, sizes)
+            .context("FullThumbnails batch")?;
         progress(ProcessPhase::FullThumbnails, done);
         if done == 0 {
             break; // zero-progress guard
@@ -294,8 +293,8 @@ mod tests {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         // Use std::env::temp_dir() — processing tests do not go through the
         // index walk, so the "tmp" ignore pattern does not apply here.
-        let dir = std::env::temp_dir()
-            .join(format!("imgfind_proc_test_{}_{n}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("imgfind_proc_test_{}_{n}", std::process::id()));
         dir.join(".imgfind").join("imgfind.db")
     }
 
@@ -303,28 +302,56 @@ mod tests {
 
     #[test]
     fn next_phase_walks_in_order_then_none() {
-        let c = ProcessCounts { thumbs300: 0, embeddings: 0, full_thumbs: 0 };
+        let c = ProcessCounts {
+            thumbs300: 0,
+            embeddings: 0,
+            full_thumbs: 0,
+        };
         assert_eq!(c.next_phase(), None);
 
-        let c = ProcessCounts { thumbs300: 0, embeddings: 3, full_thumbs: 5 };
+        let c = ProcessCounts {
+            thumbs300: 0,
+            embeddings: 3,
+            full_thumbs: 5,
+        };
         assert_eq!(c.next_phase(), Some(ProcessPhase::Embeddings));
 
-        let c = ProcessCounts { thumbs300: 2, embeddings: 3, full_thumbs: 5 };
+        let c = ProcessCounts {
+            thumbs300: 2,
+            embeddings: 3,
+            full_thumbs: 5,
+        };
         assert_eq!(c.next_phase(), Some(ProcessPhase::Thumbnails300));
 
-        let c = ProcessCounts { thumbs300: 0, embeddings: 0, full_thumbs: 4 };
+        let c = ProcessCounts {
+            thumbs300: 0,
+            embeddings: 0,
+            full_thumbs: 4,
+        };
         assert_eq!(c.next_phase(), Some(ProcessPhase::FullThumbnails));
     }
 
     #[test]
     fn total_remaining_sums_all_phases() {
-        let c = ProcessCounts { thumbs300: 1, embeddings: 2, full_thumbs: 3 };
+        let c = ProcessCounts {
+            thumbs300: 1,
+            embeddings: 2,
+            full_thumbs: 3,
+        };
         assert_eq!(c.total_remaining(), 6);
 
-        let c = ProcessCounts { thumbs300: 0, embeddings: 0, full_thumbs: 0 };
+        let c = ProcessCounts {
+            thumbs300: 0,
+            embeddings: 0,
+            full_thumbs: 0,
+        };
         assert_eq!(c.total_remaining(), 0);
 
-        let c = ProcessCounts { thumbs300: 10, embeddings: 0, full_thumbs: 0 };
+        let c = ProcessCounts {
+            thumbs300: 10,
+            embeddings: 0,
+            full_thumbs: 0,
+        };
         assert_eq!(c.total_remaining(), 10);
     }
 
@@ -370,9 +397,11 @@ mod tests {
         }
 
         // All K images should need embeddings before processing.
-        let missing_before =
-            block_on(db.count_images_without_embedding()).expect("count before");
-        assert_eq!(missing_before, K, "all fixtures should be awaiting embeddings");
+        let missing_before = block_on(db.count_images_without_embedding()).expect("count before");
+        assert_eq!(
+            missing_before, K,
+            "all fixtures should be awaiting embeddings"
+        );
 
         // Load the default CLIP model on CPU and run the batch.
         let embedder = ClipEmbedder::from_model("openai/clip-vit-base-patch32", true)
@@ -381,9 +410,11 @@ mod tests {
         assert_eq!(done, K, "all K images should be successfully embedded");
 
         // Verify the backlog is now drained.
-        let missing_after =
-            block_on(db.count_images_without_embedding()).expect("count after");
-        assert_eq!(missing_after, 0, "no images should remain without an embedding");
+        let missing_after = block_on(db.count_images_without_embedding()).expect("count after");
+        assert_eq!(
+            missing_after, 0,
+            "no images should remain without an embedding"
+        );
 
         // Verify the embedder dimension matches the default model.
         assert_eq!(
@@ -395,9 +426,8 @@ mod tests {
         // Verify the stored vector has unit L2 norm.  Vectors are L2-normalized
         // via `normalize_vector` before storage so cosine similarity equals dot
         // product, and the norm must survive the round-trip through the DB blob.
-        let stored =
-            block_on(db.get_embedding_by_rel_path_for_test("proc_fixture_0.png"))
-                .expect("read back stored vector for proc_fixture_0.png");
+        let stored = block_on(db.get_embedding_by_rel_path_for_test("proc_fixture_0.png"))
+            .expect("read back stored vector for proc_fixture_0.png");
         let norm: f32 = stored.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!(
             (norm - 1.0).abs() < 1e-3,
