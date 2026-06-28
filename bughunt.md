@@ -48,16 +48,6 @@ _(none)_
 
 ## Low
 
-### B22. DB-stored relative paths aren't validated against `../` escape on read: `RelativePath::to_absolute` (src/lib.rs:167)
-- Category: api-surface
-- Impact: 4 (severity 2 × blast-radius 2)
-- Effort: S
-- Risk: low
-- Evidence: `to_absolute()` does a bare `Path::join` with no containment check. The write side (`abs_to_relative_path`) rejects out-of-bounds paths via `strip_prefix`, but a path that became `../…` through DB corruption or a hand-edited DB would escape the library root on read (e.g. when opened in the OS viewer). Lens 1 (security) judged the write-side safe and the read-side low-risk for a single-user local tool; this is defense-in-depth, not an active exploit.
-- Blast radius: src/lib.rs:167; src/main.rs:837-838; src/database.rs:1242,1326,1559
-- Proposed fix: reject a relative path containing `Component::ParentDir`/`RootDir` when reading rows (or in `to_absolute`), returning a clear error rather than silently resolving outside the root.
-- [x] execute   [ ] skip
-
 ### B25. `SearchConfig` re-allocated per search to carry two hardcoded constants (GUI + TUI): `Backend::search`/`search_similar`, TUI search handler (imgfind-gui/src/backend.rs:90)
 - Category: caching
 - Impact: 2 (severity 1 × blast-radius 2)

@@ -167,6 +167,27 @@ impl RelativePath {
     pub fn to_absolute(&self, base: &Path) -> AbsolutePath {
         AbsolutePath(base.join(&self.0))
     }
+
+    /// Like [`to_absolute`](Self::to_absolute), but rejects a stored path that
+    /// would escape `base` before resolving it. The write side already keeps
+    /// stored paths within the library root; this is defense-in-depth for a
+    /// corrupted or hand-edited DB whose `images.path` contains `..` or an
+    /// absolute component, which `Path::join` would otherwise honour and let
+    /// escape the library root (e.g. when opened in the OS viewer).
+    pub fn try_to_absolute(&self, base: &Path) -> Result<AbsolutePath> {
+        use std::path::Component;
+        if self
+            .0
+            .components()
+            .any(|c| matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_)))
+        {
+            return Err(anyhow::anyhow!(
+                "Stored relative path escapes the library root: {:?}",
+                self.0
+            ));
+        }
+        Ok(self.to_absolute(base))
+    }
 }
 
 impl AbsolutePath {
@@ -249,6 +270,21 @@ mod tests {
         let base = Path::new("/data");
         let abs = AbsolutePath(PathBuf::from("/other/a.jpg"));
         assert!(abs.to_relative(base).is_err());
+    }
+
+    #[test]
+    fn try_to_absolute_rejects_parent_escape() {
+        let base = Path::new("/data");
+        let rel = RelativePath(PathBuf::from("../../etc/passwd"));
+        assert!(rel.try_to_absolute(base).is_err());
+    }
+
+    #[test]
+    fn try_to_absolute_ok_for_normal_relative() {
+        let base = Path::new("/data");
+        let rel = RelativePath(PathBuf::from("sub/img.jpg"));
+        let abs = rel.try_to_absolute(base).unwrap();
+        assert_eq!(abs.0, PathBuf::from("/data/sub/img.jpg"));
     }
 
     #[test]
