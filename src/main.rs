@@ -46,17 +46,18 @@ enum Commands {
         /// Create database in current directory instead of using existing or global database
         #[arg(long)]
         root: bool,
-        /// Number of images to embed per CLIP batch (default: [index].batch_size config, 32)
+        /// Number of rows to insert per DB batch (default: [index].batch_size config, 32).
         #[arg(long)]
         batch_size: Option<usize>,
         /// Deprecated: thumbnails are now deferred to `process`; this flag is a no-op.
         #[arg(long)]
         no_thumbnails: bool,
-        /// Embedding model to use for this run (sets it active first).
+        /// Embedding model to register as active (affects `process`/`search` only;
+        /// `index` no longer generates embeddings).
         #[arg(long)]
         model: Option<String>,
-        /// Re-embed every image even if it already has an embedding for the
-        /// active model (otherwise already-indexed images are skipped).
+        /// Re-index every file even if a row already exists (otherwise
+        /// already-indexed files are skipped).
         #[arg(long)]
         reindex: bool,
     },
@@ -327,7 +328,7 @@ fn main() -> Result<()> {
             let embedder: Option<ClipEmbedder> = if no_embeddings {
                 None
             } else {
-                info!("Loading CLIP model...");
+                info!("Loading CLIP model…");
                 let spinner = ProgressBar::new_spinner();
                 spinner.set_message("Loading CLIP model… (this may take a minute on first use)");
                 spinner.enable_steady_tick(std::time::Duration::from_millis(120));
@@ -346,7 +347,7 @@ fn main() -> Result<()> {
                 count,
                 &[ThumbnailSize(512), ThumbnailSize(2048)],
                 !no_embeddings,
-                |phase, n| println!("{phase:?}: processed {n}"),
+                |phase, n| println!("{phase}: processed {n}"),
             )?;
         }
         Commands::Models { action } => {
@@ -602,12 +603,14 @@ fn index_directory(
             println!("  Failed: {}", error_count);
         }
         println!();
+        if indexed_count > 0 {
+            println!(
+                "Indexed {} file{}. Run `imgfind process` (or open the GUI) to generate embeddings and thumbnails.",
+                indexed_count,
+                if indexed_count == 1 { "" } else { "s" }
+            );
+        }
     }
-
-    info!(
-        "Indexed {} files. Run `imgfind process` (or open the GUI) to generate embeddings + thumbnails.",
-        indexed_count
-    );
 
     if let Err(e) = imgfind::block_on(db.checkpoint_wal()) {
         warn!("WAL checkpoint failed (non-fatal): {e:#}");
@@ -677,7 +680,7 @@ fn search_images(
         return Ok(());
     }
 
-    info!("Loading CLIP model...");
+    info!("Loading CLIP model…");
     let spinner = ProgressBar::new_spinner();
     spinner.set_message("Loading CLIP model… (this may take a minute on first use)");
     spinner.enable_steady_tick(std::time::Duration::from_millis(120));

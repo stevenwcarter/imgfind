@@ -17,6 +17,7 @@
 
 use anyhow::{Context, Result};
 use clipper::ClipEmbedder;
+use std::fmt;
 use tracing::{info, warn};
 
 use crate::{
@@ -32,6 +33,16 @@ pub enum ProcessPhase {
     Embeddings,
     /// Generate 512 px and 2048 px renditions for the GUI.
     FullThumbnails,
+}
+
+impl fmt::Display for ProcessPhase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Thumbnails300 => "300px thumbnails",
+            Self::Embeddings => "Embeddings",
+            Self::FullThumbnails => "Full thumbnails (512/2048)",
+        })
+    }
 }
 
 /// Remaining work counts for each processing phase.
