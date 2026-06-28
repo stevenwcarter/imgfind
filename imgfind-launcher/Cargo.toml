@@ -1,6 +1,6 @@
 [package]
 name = "imgfind-launcher"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Desktop launcher for imgfind: pick a library to open or index a new folder."

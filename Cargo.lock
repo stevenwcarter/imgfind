@@ -3751,7 +3751,7 @@ checksum = "09e54e57b4c48b40f7aec75635392b12b3421fa26fe8b4332e63138ed278459c"
 
 [[package]]
 name = "imgfind"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3791,7 +3791,7 @@ dependencies = [
 
 [[package]]
 name = "imgfind-gui"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -3809,7 +3809,7 @@ dependencies = [
 
 [[package]]
 name = "imgfind-launcher"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "clap",

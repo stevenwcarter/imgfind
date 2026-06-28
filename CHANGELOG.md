@@ -1,3 +1,8 @@
+## [0.2.2] - 2026-06-28
+
+### Bug Fixes
+
+- *(packaging)* Embed the app icon into the Windows .exe binaries([`cd87bdd`](https://github.com/stevenwcarter/imgfind/commit/cd87bddfa7f24fa128f0f9a1137acb9b42b693fe))
 ## [0.2.1] - 2026-06-28
 
 ### Bug Fixes
