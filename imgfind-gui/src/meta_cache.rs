@@ -29,12 +29,19 @@ fn cache() -> &'static Mutex<LruCache<String, ImageMetadata>> {
 
 /// Cached metadata for `key` (relative path), if present; promotes it to MRU.
 pub fn get(key: &str) -> Option<ImageMetadata> {
-    cache().lock().unwrap().get(key).cloned()
+    cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(key)
+        .cloned()
 }
 
 /// Insert (or refresh) metadata for `key`.
 pub fn insert(key: String, meta: ImageMetadata) {
-    cache().lock().unwrap().put(key, meta);
+    cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .put(key, meta);
 }
 
 #[cfg(test)]

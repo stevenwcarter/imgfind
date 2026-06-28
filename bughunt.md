@@ -36,16 +36,6 @@ _(none)_
 - Proposed fix: surface a flush failure so the batch function returns `Err` (e.g. record a flush-error flag/`Result` shared with the writer thread and check it after join), so the CLI reports failure and `--all` aborts instead of looping. At minimum, break the `--all` loop when a batch makes zero forward progress.
 - [ ] execute   [ ] skip
 
-### B18. `meta_cache` mutex accessed with `.lock().unwrap()` from background threads — a poisoned lock crashes the UI: `cache()` (imgfind-gui/src/meta_cache.rs:32)
-- Category: frontend
-- Impact: 6 (severity 3 × blast-radius 2)
-- Effort: S
-- Risk: medium
-- Evidence: the process-wide `Mutex<LruCache>` is taken via `.lock().unwrap()` (meta_cache.rs:32,37) from background detail-meta threads (main.rs ~3969). If any thread panics while holding the lock, the mutex is poisoned and every later `.unwrap()` panics — turning one stray worker panic into a UI-wide crash. (The `.lock().unwrap()` pattern is broader in the GUI, but `meta_cache` is the cross-thread, shared instance where poisoning is most reachable.)
-- Blast radius: imgfind-gui/src/meta_cache.rs:32,37; imgfind-gui/src/main.rs (detail-meta spawn sites)
-- Proposed fix: recover from poisoning instead of panicking — `.lock().unwrap_or_else(|e| e.into_inner())` (the cache contents are still valid after a poison), optionally with a `tracing::warn!`. Apply consistently to both lock sites in this module.
-- [x] execute   [ ] skip
-
 ### B19. `distance_threshold` from config can be NaN/inf and is interpolated into the KNN SQL: `SearchConfig.distance_threshold` (src/config.rs:35)
 - Category: api-surface
 - Impact: 6 (severity 3 × blast-radius 2)
