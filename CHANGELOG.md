@@ -1,3 +1,8 @@
+## [0.2.1] - 2026-06-28
+
+### Bug Fixes
+
+- *(packaging)* Ship + install the app icon for the Linux desktop entry([`470cd8b`](https://github.com/stevenwcarter/imgfind/commit/470cd8b7485901d75a9d7984011b46009b854ba5))
 ## [0.2.0] - 2026-06-28
 
 ### Bug Fixes
