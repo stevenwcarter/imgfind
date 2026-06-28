@@ -26,6 +26,21 @@ impl MaxK {
     }
 }
 
+/// A cosine-distance cutoff for brute-force KNN search. Cosine distance lives
+/// in [0, 2]; the configured default is 1.3. A newtype so the search cutoff
+/// can't be confused with other bare floats (and documents the unit at every
+/// signature). `#[serde(transparent)]` keeps the persisted
+/// `SearchConfig.distance_threshold` a bare float in config.toml.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DistanceThreshold(pub f32);
+
+impl DistanceThreshold {
+    pub const fn get(self) -> f32 {
+        self.0
+    }
+}
+
 /// The dimensionality of a CLIP model's embedding vectors (512 for the default
 /// `openai/clip-vit-base-patch32`, 768 for the LAION ViT-L/14). A newtype so the
 /// per-model dimension can't be confused with other bare `usize` counts (limits,
@@ -151,6 +166,20 @@ mod tests {
             "config.toml stores a bare integer"
         );
         assert_eq!(MaxK(100).get(), 100);
+    }
+
+    #[test]
+    fn distance_threshold_is_transparent_f32() {
+        assert_eq!(
+            serde_json::to_string(&DistanceThreshold(1.3)).unwrap(),
+            "1.3"
+        );
+        assert_eq!(
+            serde_json::from_str::<DistanceThreshold>("1.3").unwrap(),
+            DistanceThreshold(1.3),
+            "config.toml stores a bare float"
+        );
+        assert_eq!(DistanceThreshold(1.3).get(), 1.3);
     }
 
     #[test]

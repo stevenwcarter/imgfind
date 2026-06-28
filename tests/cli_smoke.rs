@@ -52,8 +52,13 @@ fn index_and_search_roundtrip_through_block_on() {
     // ── 4. Search with query == vec_a ─────────────────────────────────────────
     // distance_threshold = 2.0 (generous upper-bound) so both rows are
     // candidates; max_k = 100 so no artificial cap truncates results.
-    let results = block_on(db.search_similar_images(&vec_a, 10, 2.0, imgfind::MaxK(100)))
-        .expect("search_similar_images");
+    let results = block_on(db.search_similar_images(
+        &vec_a,
+        10,
+        imgfind::DistanceThreshold(2.0),
+        imgfind::MaxK(100),
+    ))
+    .expect("search_similar_images");
 
     assert!(
         !results.is_empty(),

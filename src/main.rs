@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use walkdir::WalkDir;
 
 use imgfind::AbsolutePath;
+use imgfind::DistanceThreshold;
 use imgfind::MaxK;
 use imgfind::ThumbnailSize;
 use imgfind::abs_to_relative_path;
@@ -255,7 +256,9 @@ fn main() -> Result<()> {
                 imgfind::block_on(imgfind::models::ensure_and_activate_model(&db, &m))?;
             }
             let config = config::Config::load()?;
-            let distance_threshold = threshold.unwrap_or(config.search.distance_threshold);
+            let distance_threshold = threshold
+                .map(DistanceThreshold)
+                .unwrap_or(config.search.distance_threshold);
             let max_k = config.search.max_k;
             search_images(
                 &db,
@@ -761,7 +764,7 @@ fn search_images(
     db: &Database,
     prompt: &str,
     limit: usize,
-    distance_threshold: f32,
+    distance_threshold: DistanceThreshold,
     max_k: MaxK,
     short: bool,
     all: bool,

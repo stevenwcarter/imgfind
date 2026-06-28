@@ -47,7 +47,9 @@ pub mod units;
 pub mod vector_sql;
 
 pub use ids::{CollectionId, ImageId, TagId};
-pub use units::{EmbeddingDim, FileSize, GeoRect, MaxK, ThumbnailSize, ThumbnailSpec};
+pub use units::{
+    DistanceThreshold, EmbeddingDim, FileSize, GeoRect, MaxK, ThumbnailSize, ThumbnailSpec,
+};
 
 /// Walk up from `start` (inclusive) and return the first directory that
 /// contains a `.imgfind/imgfind.db`, or `None` if no ancestor does. Pure

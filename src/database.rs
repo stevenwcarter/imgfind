@@ -2,8 +2,8 @@ use crate::filters::{Filters, build_filter_clause_turso};
 use crate::ids::{CollectionId, ImageId, TagId};
 use crate::ui_state::UiState;
 use crate::{
-    AbsolutePath, EmbeddingDim, GeoRect, MaxK, RelativePath, ThumbnailSize, ThumbnailSpec, db_pool,
-    get_db_parent_dir,
+    AbsolutePath, DistanceThreshold, EmbeddingDim, GeoRect, MaxK, RelativePath, ThumbnailSize,
+    ThumbnailSpec, db_pool, get_db_parent_dir,
 };
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose};
@@ -858,13 +858,20 @@ impl Database {
         &self,
         query_embedding: &[f32],
         limit: usize,
-        distance_threshold: f32,
+        distance_threshold: DistanceThreshold,
         max_k: MaxK,
     ) -> Result<Vec<(String, f32)>> {
         let k = limit.clamp(1, max_k.get());
         let vt = self.vectors_table().await?;
-        let sql =
-            crate::vector_sql::knn_query(&vt, "path, distance", "", "", k, 0, distance_threshold);
+        let sql = crate::vector_sql::knn_query(
+            &vt,
+            "path, distance",
+            "",
+            "",
+            k,
+            0,
+            distance_threshold.get(),
+        );
         let conn = self
             .pool
             .get()
@@ -888,7 +895,7 @@ impl Database {
         query_embedding: &[f32],
         limit: usize,
         offset: usize,
-        distance_threshold: f32,
+        distance_threshold: DistanceThreshold,
         max_k: MaxK,
     ) -> ImageSearchResult {
         let k = limit.clamp(1, max_k.get());
@@ -900,7 +907,7 @@ impl Database {
             "",
             k,
             offset,
-            distance_threshold,
+            distance_threshold.get(),
         );
         let conn = self
             .pool
@@ -933,7 +940,7 @@ impl Database {
         query_embedding: &[f32],
         limit: usize,
         offset: usize,
-        distance_threshold: f32,
+        distance_threshold: DistanceThreshold,
         max_k: MaxK,
         filters: &Filters,
     ) -> Result<Vec<RankedMetaRow>> {
@@ -949,7 +956,7 @@ impl Database {
             &clause,
             limit.min(k),
             offset,
-            distance_threshold,
+            distance_threshold.get(),
         );
         let conn = self
             .pool
@@ -980,7 +987,7 @@ impl Database {
         path: &RelativePath,
         limit: usize,
         offset: usize,
-        distance_threshold: f32,
+        distance_threshold: DistanceThreshold,
         max_k: MaxK,
         filters: &crate::filters::Filters,
     ) -> Result<Vec<RankedMetaRow>> {
@@ -1042,7 +1049,7 @@ impl Database {
         &self,
         query_embedding: &[f32],
         limit: usize,
-        distance_threshold: f32,
+        distance_threshold: DistanceThreshold,
         max_k: MaxK,
     ) -> Result<Vec<(String, f32, Option<String>)>> {
         let search_results = self
@@ -2167,7 +2174,7 @@ mod tests {
                 &query,
                 4,
                 0,
-                2.0,
+                DistanceThreshold(2.0),
                 MaxK(100),
                 &crate::filters::Filters::default(),
             )
@@ -2178,7 +2185,7 @@ mod tests {
                 &query,
                 4,
                 4,
-                2.0,
+                DistanceThreshold(2.0),
                 MaxK(100),
                 &crate::filters::Filters::default(),
             )
@@ -2232,7 +2239,7 @@ mod tests {
                 &query,
                 20,
                 35,
-                2.0,
+                DistanceThreshold(2.0),
                 MaxK(40),
                 &crate::filters::Filters::default(),
             )
@@ -2473,7 +2480,7 @@ mod tests {
                 &RelativePath(PathBuf::from("a.jpg")),
                 10,
                 0,
-                2.0,
+                DistanceThreshold(2.0),
                 MaxK(100),
                 &crate::filters::Filters::default(),
             )
@@ -2650,7 +2657,7 @@ mod tests {
             ..Default::default()
         };
         let rows = db
-            .search_similar_images_meta(&q, 80, 0, 1.3, MaxK(100), &jpg_only)
+            .search_similar_images_meta(&q, 80, 0, DistanceThreshold(1.3), MaxK(100), &jpg_only)
             .await
             .unwrap();
         let paths: Vec<&str> = rows.iter().map(|(_, p, _, _)| p.as_str()).collect();
@@ -2660,7 +2667,14 @@ mod tests {
             "png filtered out of vector results"
         );
         let both = db
-            .search_similar_images_meta(&q, 80, 0, 1.3, MaxK(100), &Filters::default())
+            .search_similar_images_meta(
+                &q,
+                80,
+                0,
+                DistanceThreshold(1.3),
+                MaxK(100),
+                &Filters::default(),
+            )
             .await
             .unwrap();
         assert_eq!(both.len(), 2);

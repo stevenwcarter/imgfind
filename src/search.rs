@@ -1,6 +1,6 @@
 use crate::database::{Database, ImageSearchResult, RankedMetaRow};
 use crate::filters::Filters;
-use crate::units::MaxK;
+use crate::units::{DistanceThreshold, MaxK};
 use anyhow::Result;
 
 pub struct SearchEngine<'a> {
@@ -16,7 +16,7 @@ impl<'a> SearchEngine<'a> {
         &self,
         query_embedding: &[f32],
         limit: usize,
-        distance_threshold: f32,
+        distance_threshold: DistanceThreshold,
         max_k: MaxK,
     ) -> Result<Vec<(String, f32)>> {
         let query_embedding = normalize_vector(query_embedding);
@@ -28,7 +28,7 @@ impl<'a> SearchEngine<'a> {
         &self,
         query_embedding: &[f32],
         limit: usize,
-        distance_threshold: f32,
+        distance_threshold: DistanceThreshold,
         max_k: MaxK,
     ) -> Result<Vec<(String, f32, Option<String>)>> {
         let query_embedding = normalize_vector(query_embedding);
@@ -41,7 +41,7 @@ impl<'a> SearchEngine<'a> {
         query_embedding: Vec<f32>,
         limit: usize,
         offset: usize,
-        distance_threshold: f32,
+        distance_threshold: DistanceThreshold,
         max_k: MaxK,
         filters: &Filters,
     ) -> Result<Vec<RankedMetaRow>> {
@@ -62,7 +62,7 @@ impl<'a> SearchEngine<'a> {
         query_embedding: &[f32],
         limit: usize,
         offset: usize,
-        distance_threshold: f32,
+        distance_threshold: DistanceThreshold,
         max_k: MaxK,
     ) -> ImageSearchResult {
         let query_embedding = normalize_vector(query_embedding);

@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::sort::{Sort, SortDir, SortKey};
-use crate::units::MaxK;
+use crate::units::{DistanceThreshold, MaxK};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexConfig {
@@ -32,14 +32,14 @@ impl Default for IndexConfig {
 pub struct SearchConfig {
     /// Maximum cosine distance to include in results (lower = stricter)
     #[serde(default = "default_distance_threshold")]
-    pub distance_threshold: f32,
+    pub distance_threshold: DistanceThreshold,
     /// Upper bound on the vec0 `k` value (result-set ceiling)
     #[serde(default = "default_max_k")]
     pub max_k: MaxK,
 }
 
-fn default_distance_threshold() -> f32 {
-    1.3
+fn default_distance_threshold() -> DistanceThreshold {
+    DistanceThreshold(1.3)
 }
 
 fn default_max_k() -> MaxK {
@@ -356,25 +356,25 @@ mod tests {
     #[test]
     fn search_config_has_sane_defaults() {
         let sc = SearchConfig::default();
-        assert_eq!(sc.distance_threshold, 1.3);
+        assert_eq!(sc.distance_threshold, DistanceThreshold(1.3));
         assert_eq!(sc.max_k, MaxK(100));
     }
 
     #[test]
     fn config_defaults_include_search_section() {
         let cfg: Config = toml::from_str("").expect("empty toml parses");
-        assert_eq!(cfg.search.distance_threshold, 1.3);
+        assert_eq!(cfg.search.distance_threshold, DistanceThreshold(1.3));
         assert_eq!(cfg.search.max_k, MaxK(100));
     }
 
     #[test]
     fn config_roundtrips_search_section() {
         let mut cfg = Config::default();
-        cfg.search.distance_threshold = 1.1;
+        cfg.search.distance_threshold = DistanceThreshold(1.1);
         cfg.search.max_k = MaxK(50);
         let s = toml::to_string(&cfg).unwrap();
         let back: Config = toml::from_str(&s).unwrap();
-        assert_eq!(back.search.distance_threshold, 1.1);
+        assert_eq!(back.search.distance_threshold, DistanceThreshold(1.1));
         assert_eq!(back.search.max_k, MaxK(50));
     }
 }
