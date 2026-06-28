@@ -58,16 +58,6 @@ _(none)_
 - Proposed fix: reject a relative path containing `Component::ParentDir`/`RootDir` when reading rows (or in `to_absolute`), returning a clear error rather than silently resolving outside the root.
 - [x] execute   [ ] skip
 
-### B23. CLIP model-load *success* is never logged — the GUI log pane is silent through a multi-minute first-time download: `Backend::start_loading_model` (imgfind-gui/src/backend.rs:69)
-- Category: observability
-- Impact: 3 (severity 3 × blast-radius 1)
-- Effort: S
-- Risk: low
-- Evidence: only the error path logs; on success (`embedder.set(e)`) nothing is emitted. During a first-time model download (~1.7 GB, minutes), the launcher's `RUST_LOG=info` log pane shows nothing until search silently becomes enabled, so the user can't tell loading from hanging.
-- Blast radius: imgfind-gui/src/backend.rs:57-71; imgfind-gui/src/main.rs:294
-- Proposed fix: `tracing::info!("CLIP model loaded: {model_name}")` on the success path, symmetric with the existing error log (a critical-startup-milestone event).
-- [x] execute   [ ] skip
-
 ### B24. Session-restore rehydrate failure is swallowed — user sees a blank grid with no log: `restore_session` (imgfind-gui/src/main.rs:2854)
 - Category: observability
 - Impact: 3 (severity 3 × blast-radius 1)

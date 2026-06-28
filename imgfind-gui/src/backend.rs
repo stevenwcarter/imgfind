@@ -58,15 +58,18 @@ impl Backend {
         let embedder = Arc::clone(&self.embedder);
         let db = self.db.clone();
         std::thread::spawn(move || {
-            let result = (|| -> Result<ClipEmbedder> {
+            let result = (|| -> Result<(String, ClipEmbedder)> {
                 let model_name = imgfind::block_on(db.active_model())
                     .context("Failed to resolve active model")?
                     .name;
-                ClipEmbedder::from_model(&model_name, false).context("Failed to load CLIP model")
+                let embedder = ClipEmbedder::from_model(&model_name, false)
+                    .context("Failed to load CLIP model")?;
+                Ok((model_name, embedder))
             })();
             match result {
-                Ok(e) => {
+                Ok((model_name, e)) => {
                     let _ = embedder.set(e);
+                    tracing::info!("CLIP model loaded: {model_name}");
                 }
                 Err(err) => tracing::error!("model load failed: {err:#}"),
             }
