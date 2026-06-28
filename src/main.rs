@@ -836,6 +836,13 @@ fn show_status(db: &Database, db_path: &PathBuf) -> Result<()> {
         println!("\nDatabase size: {:.2} MB", size_mb);
     }
 
+    // Unprocessed work remaining
+    let c = imgfind::block_on(imgfind::processing::counts(db))?;
+    println!("\nUnprocessed work:");
+    println!("  missing 300px thumbnails: {}", c.thumbs300);
+    println!("  missing embeddings:       {}", c.embeddings);
+    println!("  missing 512/2048 thumbs:  {}", c.full_thumbs);
+
     println!();
     Ok(())
 }
