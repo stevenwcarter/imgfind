@@ -8,7 +8,6 @@ use imgfind::{config, get_db_path, get_local_db_path};
 use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, info, warn};
 use oshash::oshash;
-use rayon::prelude::*;
 use std::path::PathBuf;
 use walkdir::WalkDir;
 
@@ -17,9 +16,9 @@ use imgfind::DistanceThreshold;
 use imgfind::MaxK;
 use imgfind::ThumbnailSize;
 use imgfind::abs_to_relative_path;
-use imgfind::database::{Database, ImageMetadata, extract_image_metadata};
+use imgfind::database::Database;
 use imgfind::indexing::chunk_pending;
-use imgfind::search::{SearchEngine, normalize_vector};
+use imgfind::search::SearchEngine;
 use imgfind::thumbnail::generate_missing_thumbnails_batch;
 
 #[derive(Parser)]
@@ -50,7 +49,7 @@ enum Commands {
         /// Number of images to embed per CLIP batch (default: [index].batch_size config, 32)
         #[arg(long)]
         batch_size: Option<usize>,
-        /// Skip generating thumbnails during indexing (generate later with `thumbnails`).
+        /// Deprecated: thumbnails are now deferred to `process`; this flag is a no-op.
         #[arg(long)]
         no_thumbnails: bool,
         /// Embedding model to use for this run (sets it active first).
@@ -385,7 +384,7 @@ fn index_directory(
     recursive: bool,
     quiet: bool,
     batch_size_override: Option<usize>,
-    no_thumbnails: bool,
+    _no_thumbnails: bool,
     reindex: bool,
 ) -> Result<()> {
     if !quiet {
@@ -393,7 +392,6 @@ fn index_directory(
     }
     info!("Indexing directory: {}", dir);
 
-    // Load configuration
     let config = config::Config::load().context("Failed to load configuration")?;
     if !quiet {
         println!(
@@ -402,7 +400,6 @@ fn index_directory(
         );
     }
 
-    // Check if directory exists
     let dir_path = std::path::Path::new(dir);
     if !dir_path.exists() {
         return Err(anyhow::anyhow!("Directory does not exist: {}", dir));
@@ -411,22 +408,6 @@ fn index_directory(
         return Err(anyhow::anyhow!("Path is not a directory: {}", dir));
     }
 
-    info!("Loading CLIP model...");
-    let spinner = if quiet {
-        ProgressBar::hidden()
-    } else {
-        let pb = ProgressBar::new_spinner();
-        pb.set_message("Loading CLIP model… (this may take a minute on first use)");
-        pb.enable_steady_tick(std::time::Duration::from_millis(120));
-        pb
-    };
-    let model_name = imgfind::block_on(db.active_model())?.name;
-    let model =
-        ClipEmbedder::from_model(&model_name, false).context("Failed to create ClipEmbedder")?;
-    spinner.finish_and_clear();
-    info!("CLIP model loaded successfully");
-
-    // First pass: collect all image files
     if !quiet {
         println!("Scanning for image files...");
     }
@@ -452,11 +433,8 @@ fn index_directory(
 
         let path = entry.path();
 
-        // Check if this path should be ignored based on configuration
         if config.should_ignore_path(path) {
             debug!("Ignoring path due to config pattern: {}", path.display());
-
-            // If this is a directory, skip traversing into it entirely
             if path.is_dir() {
                 walker_iter.skip_current_dir();
             }
@@ -467,7 +445,6 @@ fn index_directory(
             continue;
         }
 
-        // Check if it's a supported image (still or RAW) by extension.
         if let Some(ext_str) = path.extension().and_then(|e| e.to_str())
             && imgfind::decode::is_supported_extension(ext_str)
         {
@@ -484,11 +461,9 @@ fn index_directory(
 
     if !quiet {
         println!("Found {} image files", image_files.len());
-        println!("Processing images...");
     }
     info!("Found {} image files to process", image_files.len());
 
-    // Create progress bar
     let progress_bar = if quiet {
         ProgressBar::hidden()
     } else {
@@ -504,27 +479,22 @@ fn index_directory(
 
     let batch_size = batch_size_override.unwrap_or(config.index.batch_size);
 
-    let mut indexed_count = 0;
-    let mut skipped_count = 0;
-    let mut error_count = 0;
+    let mut indexed_count = 0usize;
+    let mut skipped_count = 0usize;
+    let mut error_count = 0usize;
 
-    info!("Starting to process images...");
+    // Scan phase: hash each file and collect (rel_path, hash) pairs for new images.
+    // The dedup check is row-only (no embedding check) so images queued here will
+    // still need `process` to generate embeddings and thumbnails.
+    let mut pending: Vec<(String, String)> = Vec::new();
 
-    // Phase 1: collect images that are not yet indexed. We compute the content
-    // hash and run the existing already-indexed check here; only genuinely-new
-    // images make it into `pending`. Each entry carries (abs_path, hash) — the
-    // relative path is derived just before insertion.
-    let mut pending: Vec<(PathBuf, String)> = Vec::new();
-
-    for path in image_files.iter() {
-        // Convert to absolute path for storage consistency
+    for path in &image_files {
         let abs_path = match path.canonicalize() {
             Ok(p) => p,
-            Err(_) => path.to_path_buf(), // fallback to original path if canonicalize fails
+            Err(_) => path.to_path_buf(),
         };
         let path_str = abs_path.to_string_lossy();
 
-        // Calculate hash
         let hash = match oshash(&path_str) {
             Ok(h) => h,
             Err(e) => {
@@ -535,10 +505,9 @@ fn index_directory(
             }
         };
 
-        // Check if already indexed with same hash for the active model.
-        // `--reindex` forces re-embedding even when a vector already exists.
+        // Skip if a row for this path+hash already exists (unless --reindex).
         if !reindex
-            && imgfind::block_on(db.is_image_indexed(&AbsolutePath(abs_path.clone()), &hash))?
+            && imgfind::block_on(db.image_row_exists(&AbsolutePath(abs_path.clone()), &hash))?
         {
             debug!("Skipping already indexed: {}", path_str);
             skipped_count += 1;
@@ -546,179 +515,50 @@ fn index_directory(
             continue;
         }
 
-        pending.push((abs_path, hash));
-    }
-
-    // Phase 2: batch-embed and insert the pending images. Images are decoded
-    // individually so a single corrupt file can be skipped and counted rather
-    // than failing an entire embedding batch.
-    for chunk in chunk_pending(&pending, batch_size) {
-        // Decode each image individually; survivors stay index-aligned with the
-        // DynamicImage vec passed to the embedder.
-        let mut survivors: Vec<(String, String, String)> = Vec::new(); // (abs_path_str, rel_path_str, hash)
-        let mut images: Vec<image::DynamicImage> = Vec::new();
-
-        for (abs_path, hash) in chunk {
-            let path_str = abs_path.to_string_lossy().to_string();
-
-            if !quiet {
-                progress_bar.set_message(format!(
-                    "Processing: {}",
-                    abs_path.file_name().unwrap_or_default().to_string_lossy()
-                ));
-            }
-
-            let img = match imgfind::decode::decode_image(abs_path) {
-                Ok(img) => img,
-                Err(e) => {
-                    warn!("Failed to decode image {}: {}", path_str, e);
-                    error_count += 1;
-                    progress_bar.inc(1);
-                    continue;
-                }
-            };
-
-            let rel_path = match abs_to_relative_path(abs_path, &db.parent_dir) {
-                Ok(p) => p.to_string_lossy().to_string(),
-                Err(e) => {
-                    warn!(
-                        "Failed to convert path {} to relative path: {}",
-                        path_str, e
-                    );
-                    error_count += 1;
-                    progress_bar.inc(1);
-                    continue;
-                }
-            };
-
-            survivors.push((path_str, rel_path, hash.clone()));
-            images.push(img);
-        }
-
-        if survivors.is_empty() {
-            continue;
-        }
-
-        // Whole-batch embedding: a failure here drops the entire surviving chunk.
-        let embeddings = match model.get_image_embeddings_from_dynamic(images) {
-            Ok(embs) => embs,
+        let rel_path = match abs_to_relative_path(&abs_path, &db.parent_dir) {
+            Ok(p) => p.to_string_lossy().to_string(),
             Err(e) => {
-                warn!("Failed to generate embeddings for batch: {}", e);
-                error_count += survivors.len();
-                progress_bar.inc(survivors.len() as u64);
+                warn!(
+                    "Failed to convert path {} to relative path: {}",
+                    path_str, e
+                );
+                error_count += 1;
+                progress_bar.inc(1);
                 continue;
             }
         };
 
-        // Build rows (relative_path, hash, normalized_embedding) for batch insert.
-        let rows: Vec<(String, String, Vec<f32>)> = survivors
-            .iter()
-            .zip(embeddings.iter())
-            .map(|((_, rel_path, hash), embedding)| {
-                (rel_path.clone(), hash.clone(), normalize_vector(embedding))
-            })
-            .collect();
-
-        if let Err(e) = imgfind::block_on(db.insert_images_batch(&rows)) {
-            warn!("Failed to insert image batch into database: {}", e);
-            error_count += rows.len();
-            progress_bar.inc(survivors.len() as u64);
-            continue;
-        }
-
-        indexed_count += rows.len();
-
-        // Extract and store metadata for the newly-indexed images. Metadata
-        // extraction is I/O-bound and pure, so run it in parallel (rayon),
-        // then do the DB writes serially (the pool/txn stays on one thread).
-        let extracted: Vec<(String, Result<ImageMetadata>)> = survivors
-            .par_iter()
-            .map(|(abs_path_str, _, _)| {
-                (abs_path_str.clone(), extract_image_metadata(abs_path_str))
-            })
-            .collect();
-        for (abs_path_str, res) in extracted {
-            match res {
-                Ok(metadata) => {
-                    match imgfind::block_on(
-                        db.get_image_id(&AbsolutePath(PathBuf::from(&abs_path_str))),
-                    ) {
-                        Ok(image_id) => {
-                            if let Err(e) =
-                                imgfind::block_on(db.insert_or_update_metadata(image_id, &metadata))
-                            {
-                                warn!("Failed to store metadata for {}: {}", abs_path_str, e);
-                            } else {
-                                debug!("Stored metadata for: {}", abs_path_str);
-                            }
-                        }
-                        Err(e) => {
-                            warn!(
-                                "Failed to get image ID for metadata storage {}: {}",
-                                abs_path_str, e
-                            );
-                        }
-                    }
-                }
-                Err(e) => {
-                    debug!("Failed to extract metadata for {}: {}", abs_path_str, e);
-                    // This is not critical, so we don't increment error_count
-                }
-            }
-        }
-
-        progress_bar.inc(survivors.len() as u64);
+        pending.push((rel_path, hash));
+        progress_bar.inc(1);
     }
 
-    progress_bar.finish_with_message("Indexing complete!");
+    progress_bar.finish_with_message("Inserting rows...");
+
+    // Insert phase: write row-only records in batches (no CLIP, no thumbnails).
+    for chunk in chunk_pending(&pending, batch_size) {
+        if let Err(e) = imgfind::block_on(db.insert_image_rows_batch(chunk)) {
+            warn!("Failed to insert image batch into database: {}", e);
+            error_count += chunk.len();
+            continue;
+        }
+        indexed_count += chunk.len();
+    }
 
     if !quiet {
         println!("\nIndexing Summary:");
-        println!("  📁 Total files found: {}", image_files.len());
-        println!("  ✅ Newly indexed: {}", indexed_count);
-        println!("  ⏭️  Already indexed (skipped): {}", skipped_count);
+        println!("  Total files found: {}", image_files.len());
+        println!("  Newly indexed: {}", indexed_count);
+        println!("  Already indexed (skipped): {}", skipped_count);
         if error_count > 0 {
-            println!("  ❌ Failed: {}", error_count);
+            println!("  Failed: {}", error_count);
         }
         println!();
     }
 
-    // Backfill metadata for existing images that don't have it
-    if !quiet {
-        println!("Checking for images missing metadata...");
-    }
-    info!("Starting metadata backfill for existing images");
-
-    extract_missing_metadata(db, quiet, 100).context("extracting missing metadata")?;
-
-    info!("Indexing complete!");
-    info!("  Total files: {}", image_files.len());
-    info!("  Indexed: {}", indexed_count);
-    info!("  Skipped: {}", skipped_count);
-    info!("  Failed: {}", error_count);
-
-    // Generate thumbnails for any images still missing a 300px thumbnail. `count`
-    // is bound as a SQL `LIMIT ?` parameter (see get_images_without_thumbnails),
-    // and the limit is bound via i64::try_from — so usize::MAX overflows i64 and
-    // the bind fails. Instead, count the images actually missing a thumbnail and
-    // pass that exact number, which covers every one of them.
-    if !no_thumbnails {
-        let missing = imgfind::block_on(db.count_images_without_thumbnails(ThumbnailSize(300)))
-            .unwrap_or_else(|e| {
-                warn!("counting images without thumbnails failed (non-fatal): {e:#}");
-                0
-            });
-        if missing > 0 {
-            let made = generate_missing_thumbnails_batch(db, ThumbnailSize(300), missing)
-                .unwrap_or_else(|e| {
-                    warn!("thumbnail generation failed (non-fatal): {e:#}");
-                    0
-                });
-            if !quiet {
-                info!("Generated {made} thumbnails");
-            }
-        }
-    }
+    info!(
+        "Indexed {} files. Run `imgfind process` (or open the GUI) to generate embeddings + thumbnails.",
+        indexed_count
+    );
 
     if let Err(e) = imgfind::block_on(db.checkpoint_wal()) {
         warn!("WAL checkpoint failed (non-fatal): {e:#}");
@@ -1315,5 +1155,70 @@ mod tests {
             1,
             "--all must include results regardless of the current directory"
         );
+    }
+}
+
+#[cfg(test)]
+mod index_tests {
+    use super::*;
+    use image::{ImageBuffer, Rgb};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn temp_db_path() -> std::path::PathBuf {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        // Avoid /tmp: the "tmp" default ignore pattern filters every path whose
+        // components contain "tmp", so indexing fixtures placed there would yield
+        // zero results.  Prefer XDG_RUNTIME_DIR (/run/user/<uid>), which is a
+        // per-user tmpfs on Linux and contains no matching path components.
+        let base = std::env::var("XDG_RUNTIME_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("/dev/shm"));
+        let dir = base.join(format!("imgfind_fast_idx_{}_{n}", std::process::id()));
+        dir.join(".imgfind").join("imgfind.db")
+    }
+
+    #[test]
+    fn fast_index_writes_rows_without_vectors_or_thumbnails() {
+        const N: usize = 3;
+        let db_path = temp_db_path();
+        let mut db = imgfind::block_on(Database::new(&db_path)).expect("create db");
+        // parent_dir is the dir that contains .imgfind/
+        let parent_dir = db_path.parent().unwrap().parent().unwrap().to_path_buf();
+
+        // Write N decodable PNGs large enough for oshash (>= 128 KB).
+        // Solid-colour images compress to near zero, so use per-pixel variation
+        // to defeat PNG's DEFLATE compressor and guarantee file size > 128 KB.
+        for i in 0..N {
+            let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+                ImageBuffer::from_fn(512, 512, |x, y| {
+                    Rgb([
+                        ((x.wrapping_mul(y).wrapping_add(i as u32 * 17)) % 256) as u8,
+                        ((x.wrapping_add(y).wrapping_add(i as u32 * 31)) % 256) as u8,
+                        ((x.wrapping_mul(3).wrapping_add(y.wrapping_mul(7)).wrapping_add(i as u32 * 53)) % 256) as u8,
+                    ])
+                });
+            img.save(parent_dir.join(format!("fixture_{i}.png")))
+                .expect("save fixture");
+        }
+
+        let dir_str = parent_dir.to_string_lossy().into_owned();
+        index_directory(&mut db, &dir_str, true, true, None, false, false)
+            .expect("index_directory");
+
+        let total = imgfind::block_on(db.get_image_count()).unwrap();
+        assert_eq!(total as usize, N, "row count must equal fixture count");
+        assert_eq!(
+            imgfind::block_on(db.count_images_without_embedding()).unwrap(),
+            N,
+            "no embeddings should be generated by fast index"
+        );
+        assert_eq!(
+            imgfind::block_on(db.count_images_without_thumbnails(ThumbnailSize(300))).unwrap(),
+            N,
+            "no thumbnails should be generated by fast index"
+        );
+
+        let _ = std::fs::remove_dir_all(&parent_dir);
     }
 }
