@@ -139,11 +139,25 @@ pub fn generate_missing_thumbnails_batch(
     // Close the sending side so the writer thread can finish once queue is drained.
     drop(tx);
     tracing::info!("Waiting for writer thread to finish...");
-    if let Err(e) = writer_handle.join() {
-        tracing::error!("Writer thread panicked: {:?}", e);
+    if let Err(e) = writer_join_result(writer_handle.join()) {
+        tracing::error!("{e:#}");
+        return Err(e);
     }
 
     Ok(generated_count.load(Ordering::SeqCst))
+}
+
+/// Convert a writer-thread join result into a flat error. A panic payload is a
+/// `Box<dyn Any + Send>`; extract a `&str`/`String` message when present.
+fn writer_join_result(joined: thread::Result<()>) -> Result<()> {
+    joined.map_err(|payload| {
+        let msg = payload
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "writer thread panicked".to_string());
+        anyhow::anyhow!("thumbnail writer thread panicked: {msg}")
+    })
 }
 
 // Generate JPEG bytes for a thumbnail rendition (pure aside from file IO).
@@ -347,6 +361,19 @@ mod tests {
         fn generate_batch(&mut self) -> Result<usize> {
             Ok(Self::pop(&self.generated))
         }
+    }
+
+    #[test]
+    fn writer_join_result_propagates_panic_message() {
+        let handle = thread::spawn(|| panic!("boom"));
+        let err = writer_join_result(handle.join()).expect_err("panic must surface as Err");
+        assert!(format!("{err:#}").contains("boom"));
+    }
+
+    #[test]
+    fn writer_join_result_ok_on_normal_return() {
+        let handle = thread::spawn(|| {});
+        assert!(writer_join_result(handle.join()).is_ok());
     }
 
     #[test]
