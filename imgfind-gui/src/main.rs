@@ -11,6 +11,7 @@ mod loader;
 mod meta_cache;
 mod nav;
 mod preload;
+mod processor;
 mod selection;
 mod sort_option;
 mod state;
