@@ -797,6 +797,146 @@ impl Database {
         Ok(())
     }
 
+    /// Insert many `(relative_path, hash)` rows into `images` in one transaction,
+    /// without writing any embedding vectors.
+    ///
+    /// This is the "row-only" phase of two-phase background indexing: reserve a
+    /// slot in the `images` table for dedup, then fill the embedding later with
+    /// [`Database::set_image_embedding`]. An existing row for the same path is
+    /// updated with the new hash (upsert).
+    pub async fn insert_image_rows_batch(&self, rows: &[(String, String)]) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .context("get connection for row-only batch insert")?;
+        let tx = conn.transaction().await?;
+        for (rel_path_str, hash) in rows {
+            tx.execute(
+                "INSERT INTO images (path, hash) VALUES (?1, ?2) \
+                 ON CONFLICT(path) DO UPDATE SET hash = excluded.hash",
+                (rel_path_str.clone(), hash.clone()),
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Whether a row for `path`/`hash` exists in the `images` table (ignoring
+    /// whether an embedding has been stored).
+    ///
+    /// Cheaper than [`Database::is_image_indexed`] because it performs no join
+    /// with the vector table; use it to skip files already queued for embedding.
+    pub async fn image_row_exists(&self, path: &AbsolutePath, hash: &str) -> Result<bool> {
+        let rel_path = path.to_relative(&self.parent_dir).with_context(|| {
+            format!("failed to convert path {} to relative path", path.as_str())
+        })?;
+        let rel_path_str = rel_path.as_str().into_owned();
+        let conn = self
+            .pool
+            .get()
+            .await
+            .context("get connection to check image row existence")?;
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM images WHERE path = ?1 AND hash = ?2",
+                (rel_path_str, hash.to_string()),
+            )
+            .await?;
+        let row = rows.next().await?.context("COUNT returned no row")?;
+        Ok(col_i64(&row, 0, "count")? > 0)
+    }
+
+    /// Count images that have no embedding in the active model's vector table.
+    ///
+    /// Used to report backlog size during two-phase background indexing.
+    pub async fn count_images_without_embedding(&self) -> Result<usize> {
+        let vt = self.vectors_table().await?;
+        let conn = self
+            .pool
+            .get()
+            .await
+            .context("get connection to count images without embedding")?;
+        let sql = format!(
+            "SELECT COUNT(*) \
+             FROM images i \
+             LEFT JOIN {vt} v ON v.image_id = i.id \
+             WHERE v.image_id IS NULL"
+        );
+        let mut rows = conn.query(&sql, ()).await?;
+        let row = rows.next().await?.context("COUNT returned no row")?;
+        Ok(col_i64(&row, 0, "count")? as usize)
+    }
+
+    /// Return up to `limit` images that have no embedding in the active model's
+    /// vector table, as `(image_id, absolute_path, hash)` tuples.
+    ///
+    /// Callers embed each image and then call [`Database::set_image_embedding`]
+    /// to fulfil the missing vector row.
+    pub async fn get_images_without_embedding(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<(i64, AbsolutePath, String)>> {
+        let limit = i64::try_from(limit).context("embedding LIMIT exceeds i64 range")?;
+        let vt = self.vectors_table().await?;
+        let conn = self
+            .pool
+            .get()
+            .await
+            .context("get connection for images-without-embedding query")?;
+        let sql = format!(
+            "SELECT i.id, i.path, i.hash \
+             FROM images i \
+             LEFT JOIN {vt} v ON v.image_id = i.id \
+             WHERE v.image_id IS NULL \
+             LIMIT ?1"
+        );
+        let mut rows = conn.query(&sql, (limit,)).await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let id = col_i64(&row, 0, "id")?;
+            let rel_path_str = col_text(&row, 1, "path")?;
+            let hash = col_text(&row, 2, "hash")?;
+            let abs_path = RelativePath(PathBuf::from(rel_path_str)).to_absolute(&self.parent_dir);
+            out.push((id, abs_path, hash));
+        }
+        Ok(out)
+    }
+
+    /// Write (or overwrite) the embedding for `image_id` in the active model's
+    /// vector table.
+    ///
+    /// Replaces any pre-existing row for this image so the operation is safe to
+    /// call on a re-index.
+    pub async fn set_image_embedding(&self, image_id: i64, embedding: &[f32]) -> Result<()> {
+        let vt = self.vectors_table().await?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .context("get connection to set image embedding")?;
+        let tx = conn.transaction().await?;
+        tx.execute(
+            &format!("DELETE FROM {vt} WHERE image_id = ?1"),
+            (image_id,),
+        )
+        .await?;
+        tx.execute(
+            &format!("INSERT INTO {vt} (image_id, embedding) VALUES (?1, ?2)"),
+            (
+                Value::Integer(image_id),
+                Value::Blob(to_le_bytes(embedding)),
+            ),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Insert many `(image_hash, size, jpeg_bytes)` thumbnails in one transaction.
     ///
     /// Used by the thumbnail writer thread (which bridges through
@@ -3118,5 +3258,50 @@ mod tests {
         let mut sizes = db.get_thumbnail_sizes(&hash).await.unwrap();
         sizes.sort_unstable();
         assert_eq!(sizes, vec![300, 512]);
+    }
+
+    /// Fresh empty database — no images, no embeddings.
+    async fn test_db() -> (Database, PathBuf) {
+        let db_path = temp_db_path();
+        let db = Database::new(&db_path).await.expect("create test db");
+        (db, db_path)
+    }
+
+    #[tokio::test]
+    async fn row_only_insert_has_no_embedding() {
+        let (db, _tmp) = test_db().await;
+        db.insert_image_rows_batch(&[("a.jpg".into(), "hash1".into())])
+            .await
+            .unwrap();
+        // present as a row...
+        let abs = db.parent_dir.join("a.jpg");
+        assert!(
+            db.image_row_exists(&AbsolutePath(abs.clone()), "hash1")
+                .await
+                .unwrap()
+        );
+        // ...but not "indexed" (no embedding) and counted as missing-embedding
+        assert!(
+            !db.is_image_indexed(&AbsolutePath(abs), "hash1")
+                .await
+                .unwrap()
+        );
+        assert_eq!(db.count_images_without_embedding().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn set_embedding_flips_missing_count_to_zero() {
+        let (db, _tmp) = test_db().await;
+        db.insert_image_rows_batch(&[("a.jpg".into(), "h".into())])
+            .await
+            .unwrap();
+        let missing = db.get_images_without_embedding(10).await.unwrap();
+        assert_eq!(missing.len(), 1);
+        let (id, _abs, _hash) = missing[0].clone();
+        let dim = db.active_model().await.unwrap().dim.get();
+        db.set_image_embedding(id, &vec![0.0_f32; dim])
+            .await
+            .unwrap();
+        assert_eq!(db.count_images_without_embedding().await.unwrap(), 0);
     }
 }
