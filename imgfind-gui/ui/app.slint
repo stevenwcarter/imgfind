@@ -33,6 +33,11 @@ component ProcessBar inherits VerticalLayout {
     in property <int> done;
     in property <int> total;
     spacing: 4px;
+    // Pack to natural height: label sits tight (4px) above its bar. Without this
+    // the row stretches to fill the panel and the slack lands *between* label and
+    // bar, butting the next item's label against this bar. Inter-item spacing is
+    // owned by the wrapping VerticalLayout, slack by a single bottom spacer.
+    vertical-stretch: 0;
     HorizontalLayout {
         Text {
             text: root.label;
@@ -1047,21 +1052,31 @@ export component MainWindow inherits Window {
                                 }
                             }
 
-                            ProcessBar {
-                                label: "Thumbnails (300px)";
-                                done: root.process-thumbs300-done;
-                                total: root.process-thumbs300-total;
+                            // Bars grouped with generous inter-item spacing so each
+                            // label clearly belongs to the bar directly beneath it.
+                            VerticalLayout {
+                                spacing: 18px;
+                                vertical-stretch: 0;
+                                ProcessBar {
+                                    label: "Thumbnails (300px)";
+                                    done: root.process-thumbs300-done;
+                                    total: root.process-thumbs300-total;
+                                }
+                                ProcessBar {
+                                    label: "Embeddings";
+                                    done: root.process-embed-done;
+                                    total: root.process-embed-total;
+                                }
+                                ProcessBar {
+                                    label: "Full thumbnails";
+                                    done: root.process-full-done;
+                                    total: root.process-full-total;
+                                }
                             }
-                            ProcessBar {
-                                label: "Embeddings";
-                                done: root.process-embed-done;
-                                total: root.process-embed-total;
-                            }
-                            ProcessBar {
-                                label: "Full thumbnails";
-                                done: root.process-full-done;
-                                total: root.process-full-total;
-                            }
+
+                            // Slack lives here so the bars pack to the top while
+                            // State + Pause stay pinned to the panel bottom.
+                            Rectangle { vertical-stretch: 1; }
 
                             Text {
                                 text: "State: \{root.process-state}";
@@ -1074,8 +1089,6 @@ export component MainWindow inherits Window {
                                 text: root.process-paused ? "Resume" : "Pause";
                                 clicked => { root.toggle-process-pause(); app-keys.focus(); }
                             }
-
-                            Rectangle { vertical-stretch: 1; }
                         }
                     }
                 }
