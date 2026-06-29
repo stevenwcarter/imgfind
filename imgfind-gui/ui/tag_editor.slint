@@ -4,10 +4,10 @@
 // never run off the right edge. Click anywhere on a pill to remove it; click the
 // empty background to enter editing mode.
 //
-// Editing state: a LineEdit pre-filled from `joined` (space-joined tags, set
-// by Rust). Commits raw text via committed-text(string) on Enter OR focus
-// loss; Rust is responsible for splitting on whitespace and deduplicating.
-import { LineEdit } from "std-widgets.slint";
+// Editing state: a bare TextInput pre-filled from `joined` (space-joined tags,
+// set by Rust), styled to fill the editor's own box. Commits raw text via
+// committed-text(string) on Enter OR focus loss; Rust is responsible for
+// splitting on whitespace and deduplicating.
 import { TagWrap } from "tag_wrap.slint";
 
 export component TagEditor inherits Rectangle {
@@ -36,7 +36,7 @@ export component TagEditor inherits Rectangle {
     border-radius: 4px;
     background: #232838;
     border-width: 1px;
-    border-color: #3a4255;
+    border-color: root.editing ? #4a5573 : #3a4255;
     // Defense-in-depth: even if the Rust width estimate is slightly off, a pill
     // can never visibly overflow off-screen (the symptom this change kills).
     clip: true;
@@ -72,21 +72,43 @@ export component TagEditor inherits Rectangle {
         }
     }
 
-    // --- Editing state: LineEdit pre-filled from `joined` ---
-    if root.editing: LineEdit {
-        placeholder-text: root.placeholder;
-        init => { self.text = root.joined; self.focus(); }
-        // Signal "leaving edit" BEFORE committed-text. committed-text triggers Rust
-        // to rebuild the rail/tag models, which destroys this very element — so the
-        // `changed editing` notification from `editing = false` below would never be
-        // delivered, leaving the window's chords-suppressed flag stuck on (keyboard
-        // shortcuts dead). The direct callback runs synchronously while we're alive.
-        accepted(t) => { root.editing-changed(false); root.editing = false; root.committed-text(t); }
-        changed has-focus => {
-            if (!self.has-focus) {
-                root.editing-changed(false);
-                root.editing = false;
-                root.committed-text(self.text);
+    // --- Editing state: bare TextInput filling the editor's own box ---
+    // No std-widgets LineEdit: its intrinsic background/border/min-height render
+    // as a floating sub-box. A bare TextInput inside this Rectangle reuses the
+    // editor's own bg/border/radius so the caret fills the same box as the pills.
+    if root.editing: Rectangle {
+        // Manual placeholder: bare TextInput has no placeholder-text. The 6px x
+        // offset aligns the caret with where the pills sat (no layout padding —
+        // padding has no effect on a bare Rectangle).
+        Text {
+            x: 6px;
+            text: root.placeholder;
+            color: #6b7488;
+            font-size: 11px;
+            vertical-alignment: center;
+            visible: input.text == "";
+        }
+        input := TextInput {
+            x: 6px;
+            width: parent.width - 6px;
+            single-line: true;
+            font-size: 11px;
+            color: #e0e4ed;
+            selection-background-color: #3d4663;
+            vertical-alignment: center;
+            init => { self.text = root.joined; self.focus(); }
+            // Signal "leaving edit" BEFORE committed-text. committed-text triggers Rust
+            // to rebuild the rail/tag models, which destroys this very element — so the
+            // `changed editing` notification from `editing = false` below would never be
+            // delivered, leaving the window's chords-suppressed flag stuck on (keyboard
+            // shortcuts dead). The direct callback runs synchronously while we're alive.
+            accepted => { root.editing-changed(false); root.editing = false; root.committed-text(input.text); }
+            changed has-focus => {
+                if (!input.has-focus) {
+                    root.editing-changed(false);
+                    root.editing = false;
+                    root.committed-text(input.text);
+                }
             }
         }
     }
