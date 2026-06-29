@@ -53,6 +53,8 @@ pub struct ProcessProgress {
     pub counts: ProcessCounts,
     /// Worker's current operational state.
     pub state: WorkerState,
+    /// The phase the worker is actually processing; `None` when Idle.
+    pub phase: Option<ProcessPhase>,
 }
 
 /// A handle that lets the UI thread pause and resume the background
@@ -114,22 +116,61 @@ pub fn overall(now: &ProcessCounts, baseline: &ProcessCounts) -> (usize, usize) 
     (done, total)
 }
 
+/// Tracks which phases have made zero progress this work-cycle (their remaining
+/// items are permanently unprocessable, e.g. files no decoder can read).
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StuckPhases {
+    thumbnails300: bool,
+    embeddings: bool,
+    full_thumbnails: bool,
+}
+
+impl StuckPhases {
+    pub fn mark(&mut self, phase: ProcessPhase) {
+        match phase {
+            ProcessPhase::Thumbnails300 => self.thumbnails300 = true,
+            ProcessPhase::Embeddings => self.embeddings = true,
+            ProcessPhase::FullThumbnails => self.full_thumbnails = true,
+        }
+    }
+}
+
+/// Highest-priority phase that still has remaining work AND is not stuck.
+///
+/// Returns `None` when every phase with remaining work is stuck (all remaining
+/// items are unprocessable) or nothing remains — the worker then goes Idle.
+pub fn select_phase(counts: &ProcessCounts, stuck: &StuckPhases) -> Option<ProcessPhase> {
+    if counts.thumbs300 > 0 && !stuck.thumbnails300 {
+        Some(ProcessPhase::Thumbnails300)
+    } else if counts.embeddings > 0 && !stuck.embeddings {
+        Some(ProcessPhase::Embeddings)
+    } else if counts.full_thumbs > 0 && !stuck.full_thumbnails {
+        Some(ProcessPhase::FullThumbnails)
+    } else {
+        None
+    }
+}
+
 /// Spawn the dedicated background process-worker thread.
 ///
 /// The thread runs until the [`Sender`] is dropped (app exit) or the UI drops
-/// its [`Receiver`]. When all phases are drained it parks for [`IDLE_RECHECK`]
-/// so a later `index` run can wake it via [`thread::Thread::unpark`].
+/// its [`Receiver`]. When all phases are drained (or all remaining items are
+/// permanently unprocessable) it parks for [`IDLE_RECHECK`] so a later `index`
+/// run can wake it via [`thread::Thread::unpark`].
 ///
 /// ## Loop
 ///
 /// 1. Read current remaining-work counts via `imgfind::processing::counts`.
-/// 2. If `next_phase()` is `None`, send `Idle` and park.
+///    Reset `stuck` if total remaining increased (new images added).
+/// 2. [`select_phase`] picks the highest-priority phase with remaining work that
+///    is not stuck. If `None`, send `Idle` and park.
 /// 3. If `paused`, send `Paused` and sleep [`BACKOFF`].
 /// 4. For `Embeddings`, wait until the CLIP model is loaded (polling with
 ///    [`BACKOFF`] sleep) before calling `process_next_batch`.
 /// 5. Call `process_next_batch` for the current phase with [`BATCH`] items.
-/// 6. Zero-progress guard: if the batch advanced 0 items, sleep [`BACKOFF`]
-///    (permanently-undecodable images should not cause a busy-spin).
+/// 6. Zero-progress guard: if the batch advanced 0 items, call
+///    `stuck.mark(phase); continue` — permanently-undecodable items are skipped
+///    rather than retried, and `select_phase` advances past them next iteration.
 /// 7. Read fresh counts and send a `Running` snapshot.
 pub fn spawn_process_worker(
     backend: Backend,
@@ -144,6 +185,9 @@ pub fn spawn_process_worker(
             let mut db = backend.db_clone();
             let embedder_lock = backend.embedder_arc();
 
+            let mut stuck = StuckPhases::default();
+            let mut prev_total: Option<usize> = None;
+
             loop {
                 // --- 1. Read current remaining work ---
                 let current_counts = match imgfind::block_on(processing::counts(&db)) {
@@ -155,12 +199,23 @@ pub fn spawn_process_worker(
                     }
                 };
 
+                // If new images were added (total_remaining increased), reset stuck
+                // so previously-failing files get another chance (user may have
+                // replaced them or a new index run added genuinely decodable files).
+                if let Some(pt) = prev_total
+                    && current_counts.total_remaining() > pt
+                {
+                    stuck = StuckPhases::default();
+                }
+                prev_total = Some(current_counts.total_remaining());
+
                 // --- 2. Idle check ---
-                let Some(phase) = current_counts.next_phase() else {
+                let Some(phase) = select_phase(&current_counts, &stuck) else {
                     if progress
                         .send(ProcessProgress {
                             counts: current_counts,
                             state: WorkerState::Idle,
+                            phase: None,
                         })
                         .is_err()
                     {
@@ -178,6 +233,7 @@ pub fn spawn_process_worker(
                         .send(ProcessProgress {
                             counts: current_counts,
                             state: WorkerState::Paused,
+                            phase: Some(phase),
                         })
                         .is_err()
                     {
@@ -197,6 +253,7 @@ pub fn spawn_process_worker(
                                 .send(ProcessProgress {
                                     counts: current_counts,
                                     state: WorkerState::Running,
+                                    phase: Some(phase),
                                 })
                                 .is_err()
                             {
@@ -227,10 +284,10 @@ pub fn spawn_process_worker(
 
                 // --- 6. Zero-progress guard ---
                 if done == 0 {
-                    // All remaining images in this phase are permanently
-                    // undecodable. Back off so we do not spin hot; counts() will
-                    // re-read next iteration and next_phase() may advance.
-                    thread::sleep(BACKOFF);
+                    // All remaining items in this phase are permanently undecodable.
+                    // Mark it stuck so select_phase skips it next iteration.
+                    // No sleep: with ≤3 phases, select_phase reaches Idle quickly.
+                    stuck.mark(phase);
                     continue;
                 }
 
@@ -246,6 +303,7 @@ pub fn spawn_process_worker(
                     .send(ProcessProgress {
                         counts: fresh,
                         state: WorkerState::Running,
+                        phase: Some(phase),
                     })
                     .is_err()
                 {
@@ -263,7 +321,43 @@ mod tests {
 
     use imgfind::processing::ProcessCounts;
 
-    use super::{ProcessController, overall};
+    use super::{ProcessController, StuckPhases, overall, select_phase};
+
+    #[test]
+    fn select_phase_skips_stuck_phases() {
+        use imgfind::processing::{ProcessCounts, ProcessPhase};
+        let counts = ProcessCounts {
+            thumbs300: 1,
+            embeddings: 5,
+            full_thumbs: 3,
+        };
+        // nothing stuck → highest priority
+        assert_eq!(
+            select_phase(&counts, &StuckPhases::default()),
+            Some(ProcessPhase::Thumbnails300)
+        );
+        // Thumbnails300 stuck (the undecodable file) → must advance to Embeddings,
+        // NOT re-pick Thumbnails300 (this is the bug: next_phase() returned Thumbnails300 forever)
+        let mut s = StuckPhases::default();
+        s.mark(ProcessPhase::Thumbnails300);
+        assert_eq!(select_phase(&counts, &s), Some(ProcessPhase::Embeddings));
+        // + Embeddings stuck → FullThumbnails
+        s.mark(ProcessPhase::Embeddings);
+        assert_eq!(
+            select_phase(&counts, &s),
+            Some(ProcessPhase::FullThumbnails)
+        );
+        // all stuck → None even though counts > 0 (this lets the worker go Idle instead of spinning)
+        s.mark(ProcessPhase::FullThumbnails);
+        assert_eq!(select_phase(&counts, &s), None);
+        // nothing remaining → None
+        let empty = ProcessCounts {
+            thumbs300: 0,
+            embeddings: 0,
+            full_thumbs: 0,
+        };
+        assert_eq!(select_phase(&empty, &StuckPhases::default()), None);
+    }
 
     #[test]
     fn pause_flag_round_trips() {
