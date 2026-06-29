@@ -256,7 +256,7 @@ fn apply_process_progress(
     w.set_process_paused(paused);
 
     let waiting_for_model = matches!(p.state, processor::WorkerState::Running)
-        && now.next_phase() == Some(ProcessPhase::Embeddings)
+        && p.phase == Some(ProcessPhase::Embeddings)
         && !model_ready;
 
     // State line: name the active phase while running so the panel is informative.
@@ -267,7 +267,7 @@ fn apply_process_progress(
     } else if waiting_for_model {
         "Waiting for model...".to_string()
     } else {
-        match now.next_phase() {
+        match p.phase {
             Some(phase) => format!("Running - {}", processor::phase_label(phase)),
             None => "Running".to_string(),
         }
