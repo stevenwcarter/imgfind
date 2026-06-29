@@ -76,9 +76,18 @@ export component TagEditor inherits Rectangle {
     if root.editing: LineEdit {
         placeholder-text: root.placeholder;
         init => { self.text = root.joined; self.focus(); }
-        accepted(t) => { root.committed-text(t); root.editing = false; }
+        // Signal "leaving edit" BEFORE committed-text. committed-text triggers Rust
+        // to rebuild the rail/tag models, which destroys this very element — so the
+        // `changed editing` notification from `editing = false` below would never be
+        // delivered, leaving the window's chords-suppressed flag stuck on (keyboard
+        // shortcuts dead). The direct callback runs synchronously while we're alive.
+        accepted(t) => { root.editing-changed(false); root.editing = false; root.committed-text(t); }
         changed has-focus => {
-            if (!self.has-focus) { root.committed-text(self.text); root.editing = false; }
+            if (!self.has-focus) {
+                root.editing-changed(false);
+                root.editing = false;
+                root.committed-text(self.text);
+            }
         }
     }
 }

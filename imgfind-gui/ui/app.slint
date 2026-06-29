@@ -376,6 +376,20 @@ export component MainWindow inherits Window {
         }
     }
 
+    // Same null-focus trap as edit-mode above, for the tag text editors (brush /
+    // Most Recent / filter / detail). When a TagEditor commits, its LineEdit is
+    // destroyed (`editing = false`) and focus goes null — so app-keys'
+    // capture-key-pressed stops receiving keys and every shortcut dies until the
+    // next click. Rust clears `chords-suppressed` as the editor leaves editing;
+    // when it drops to false, reclaim focus one tick later (after the LineEdit
+    // teardown) via the shared refocus-timer. The timer's guard skips the
+    // re-focus if another editor/search grabbed focus in the meantime.
+    changed chords-suppressed => {
+        if (!root.chords-suppressed) {
+            refocus-timer.running = true;
+        }
+    }
+
     app-keys := FocusScope {
         // Hold focus from startup so key events flow; capture-key-pressed then
         // intercepts them for the whole subtree regardless of inner focus.
@@ -389,7 +403,11 @@ export component MainWindow inherits Window {
             running: false;
             triggered => {
                 self.running = false;
-                app-keys.focus();
+                // Don't yank focus from a control that legitimately grabbed it in
+                // the meantime (a freshly-opened tag editor, or the search field).
+                if (!root.chords-suppressed && !search-input.has-focus) {
+                    app-keys.focus();
+                }
             }
         }
 
