@@ -51,7 +51,10 @@ base64 = "0.22.1"
 crossterm = { version = "0.29.0", features = ["event-stream"], optional = true }
 futures = { version = "0.3.31", optional = true }
 ratatui = { version = "0.30.1", optional = true }
-ratatui-image = { version = "11.0.4", features = ["tokio"], optional = true }
+# default-features = false drops the `chafa-dyn` default feature, which links the
+# system `chafa` C library via pkg-config (build fails without libchafa). We use
+# primitive halfblocks + the native terminal graphics protocols, not chafa.
+ratatui-image = { version = "11.0.4", default-features = false, features = ["crossterm", "image-defaults", "tokio"], optional = true }
 tui-input = { version = "0.15.3", optional = true }
 turso = { version = "0.7.0-pre.10", default-features = false }
 deadpool = { version = "0.13", features = ["managed"] }
