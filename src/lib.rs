@@ -31,6 +31,7 @@ pub mod database;
 pub mod decode;
 pub mod edits;
 pub mod filters;
+pub mod hashing;
 pub mod ids;
 pub mod indexing;
 pub mod logging;

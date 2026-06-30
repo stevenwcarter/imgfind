@@ -7,7 +7,6 @@ use imgfind::metadata::extract_missing_metadata;
 use imgfind::{config, get_db_path, get_local_db_path};
 use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, info, warn};
-use oshash::oshash;
 use std::path::PathBuf;
 use walkdir::WalkDir;
 
@@ -545,7 +544,7 @@ fn index_directory(
         };
         let path_str = abs_path.to_string_lossy();
 
-        let hash = match oshash(&path_str) {
+        let hash = match imgfind::hashing::hash_file(&path_str) {
             Ok(h) => h,
             Err(e) => {
                 warn!("Failed to calculate hash for {}: {}", path_str, e);

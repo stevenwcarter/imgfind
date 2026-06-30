@@ -29,6 +29,7 @@ ratatui-image = ["dep:ratatui-image"]
 [dependencies]
 clipper = { version = "0.1.0", path = "../clipper" }
 oshash = "0.4"
+md5 = "0.8"
 clap = { version = "4.0", features = ["derive"] }
 clap_complete = "4.0"
 walkdir = "2.0"
