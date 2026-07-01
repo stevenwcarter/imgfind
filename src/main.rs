@@ -227,7 +227,8 @@ fn main() -> Result<()> {
             quiet,
             root,
             batch_size,
-            no_thumbnails,
+            // Deprecated no-op; thumbnails are deferred to `process`.
+            no_thumbnails: _,
             model,
             reindex,
         } => {
@@ -238,23 +239,15 @@ fn main() -> Result<()> {
             };
             // A brand-new database is seeded with the configured default model;
             // an explicit --model (applied below) still wins over it.
-            let default_model = config::Config::load()?.default_model;
+            let config = config::Config::load().context("Failed to load configuration")?;
             let mut db = imgfind::block_on(imgfind::models::open_db_seeding_default(
                 &db_path,
-                default_model.as_deref(),
+                config.default_model.as_deref(),
             ))?;
             if let Some(m) = model {
                 imgfind::block_on(imgfind::models::ensure_and_activate_model(&db, &m))?;
             }
-            index_directory(
-                &mut db,
-                &dir,
-                recursive,
-                quiet,
-                batch_size,
-                no_thumbnails,
-                reindex,
-            )?;
+            index_directory(&mut db, &config, &dir, recursive, quiet, batch_size, reindex)?;
         }
         Commands::Search {
             prompt,
@@ -429,11 +422,11 @@ fn metadata(db: &mut Database, quiet: bool, count: usize) -> Result<()> {
 
 fn index_directory(
     db: &mut Database,
+    config: &config::Config,
     dir: &str,
     recursive: bool,
     quiet: bool,
     batch_size_override: Option<usize>,
-    _no_thumbnails: bool,
     reindex: bool,
 ) -> Result<()> {
     if !quiet {
@@ -441,7 +434,6 @@ fn index_directory(
     }
     info!("Indexing directory: {}", dir);
 
-    let config = config::Config::load().context("Failed to load configuration")?;
     if !quiet {
         println!(
             "Loaded configuration with {} ignore patterns",
@@ -1220,29 +1212,32 @@ mod tests {
 mod index_tests {
     use super::*;
     use image::{ImageBuffer, Rgb};
-    use std::sync::atomic::{AtomicU32, Ordering};
 
-    fn temp_db_path() -> std::path::PathBuf {
-        static COUNTER: AtomicU32 = AtomicU32::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        // Avoid /tmp: the "tmp" default ignore pattern filters every path whose
-        // components contain "tmp", so indexing fixtures placed there would yield
-        // zero results.  Prefer XDG_RUNTIME_DIR (/run/user/<uid>), which is a
-        // per-user tmpfs on Linux and contains no matching path components.
-        let base = std::env::var("XDG_RUNTIME_DIR")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| std::path::PathBuf::from("/dev/shm"));
-        let dir = base.join(format!("imgfind_fast_idx_{}_{n}", std::process::id()));
-        dir.join(".imgfind").join("imgfind.db")
+    /// A `Config` that ignores nothing, so fixtures can live in the OS temp dir
+    /// (whose path contains "tmp"/"temp"/"T" on various platforms) without being
+    /// filtered by the default ignore patterns. This keeps the test
+    /// cross-platform (Linux `/tmp`, macOS `/var/folders/.../T`, Windows `Temp`)
+    /// instead of depending on `XDG_RUNTIME_DIR`/`/dev/shm`, which are Linux-only.
+    fn config_ignoring_nothing() -> config::Config {
+        let mut config = config::Config::default();
+        config.ignore_patterns.clear();
+        config
     }
 
     #[test]
     fn fast_index_writes_rows_without_vectors_or_thumbnails() {
         const N: usize = 3;
-        let db_path = temp_db_path();
+        // A real cross-platform temp dir; auto-removed when `_tmp` drops.
+        // Canonicalize so it matches the paths the indexer produces after its
+        // own `canonicalize()` (e.g. macOS resolves /var -> /private/var), which
+        // the relative-path prefix check requires.
+        let _tmp = tempfile::tempdir().expect("create temp dir");
+        let parent_dir = _tmp
+            .path()
+            .canonicalize()
+            .expect("canonicalize temp dir");
+        let db_path = parent_dir.join(".imgfind").join("imgfind.db");
         let mut db = imgfind::block_on(Database::new(&db_path)).expect("create db");
-        // parent_dir is the dir that contains .imgfind/
-        let parent_dir = db_path.parent().unwrap().parent().unwrap().to_path_buf();
 
         // Write N decodable PNGs large enough for oshash (>= 128 KB).
         // Solid-colour images compress to near zero, so use per-pixel variation
@@ -1263,8 +1258,16 @@ mod index_tests {
         }
 
         let dir_str = parent_dir.to_string_lossy().into_owned();
-        index_directory(&mut db, &dir_str, true, true, None, false, false)
-            .expect("index_directory");
+        index_directory(
+            &mut db,
+            &config_ignoring_nothing(),
+            &dir_str,
+            true,
+            true,
+            None,
+            false,
+        )
+        .expect("index_directory");
 
         let total = imgfind::block_on(db.get_image_count()).unwrap();
         assert_eq!(total as usize, N, "row count must equal fixture count");
@@ -1278,7 +1281,6 @@ mod index_tests {
             N,
             "no thumbnails should be generated by fast index"
         );
-
-        let _ = std::fs::remove_dir_all(&parent_dir);
+        // `_tmp` (TempDir) removes the fixtures on drop; no manual cleanup.
     }
 }
