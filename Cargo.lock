@@ -3770,6 +3770,7 @@ dependencies = [
  "iterm2img",
  "kamadak-exif",
  "log",
+ "md5",
  "oshash",
  "ratatui",
  "ratatui-image",
