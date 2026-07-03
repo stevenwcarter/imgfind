@@ -139,10 +139,7 @@ mod tests {
     #[test]
     fn gg_jumps_first() {
         let (p, _) = resolve(Pending::None, "g");
-        assert_eq!(
-            resolve(p, "g"),
-            (Pending::None, Some(Action::JumpFirst))
-        );
+        assert_eq!(resolve(p, "g"), (Pending::None, Some(Action::JumpFirst)));
     }
 
     #[test]

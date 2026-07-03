@@ -251,7 +251,9 @@ fn main() -> Result<()> {
             if let Some(m) = model {
                 imgfind::block_on(imgfind::models::ensure_and_activate_model(&db, &m))?;
             }
-            index_directory(&mut db, &config, &dir, recursive, quiet, batch_size, reindex)?;
+            index_directory(
+                &mut db, &config, &dir, recursive, quiet, batch_size, reindex,
+            )?;
         }
         Commands::Search {
             prompt,
@@ -1242,10 +1244,7 @@ mod index_tests {
         // own `canonicalize()` (e.g. macOS resolves /var -> /private/var), which
         // the relative-path prefix check requires.
         let _tmp = tempfile::tempdir().expect("create temp dir");
-        let parent_dir = _tmp
-            .path()
-            .canonicalize()
-            .expect("canonicalize temp dir");
+        let parent_dir = _tmp.path().canonicalize().expect("canonicalize temp dir");
         let db_path = parent_dir.join(".imgfind").join("imgfind.db");
         let mut db = imgfind::block_on(Database::new(&db_path)).expect("create db");
 

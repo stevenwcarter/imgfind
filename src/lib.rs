@@ -178,11 +178,12 @@ impl RelativePath {
     /// escape the library root (e.g. when opened in the OS viewer).
     pub fn try_to_absolute(&self, base: &Path) -> Result<AbsolutePath> {
         use std::path::Component;
-        if self
-            .0
-            .components()
-            .any(|c| matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_)))
-        {
+        if self.0.components().any(|c| {
+            matches!(
+                c,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        }) {
             return Err(anyhow::anyhow!(
                 "Stored relative path escapes the library root: {:?}",
                 self.0

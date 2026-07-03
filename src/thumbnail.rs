@@ -19,9 +19,17 @@ use std::thread;
 /// A message from a thumbnail-generation worker to the single DB writer thread.
 enum ThumbMsg {
     /// Successfully generated JPEG bytes for `(hash, size)`.
-    Ok { hash: String, size: u32, data: Vec<u8> },
+    Ok {
+        hash: String,
+        size: u32,
+        data: Vec<u8>,
+    },
     /// Generation failed for `(hash, size)`; record a permanent marker.
-    Failed { hash: String, size: u32, error: String },
+    Failed {
+        hash: String,
+        size: u32,
+        error: String,
+    },
 }
 
 /// Generate thumbnails in batches for images that don't have cached thumbnails
@@ -107,7 +115,8 @@ pub fn generate_missing_thumbnails_batch(
                 }
                 ThumbMsg::Failed { hash, size, error } => {
                     tracing::debug!("Writer received hash {} (failed)", hash);
-                    if let Err(e) = block_on(writer_db.insert_thumbnail_failure(&hash, size, &error))
+                    if let Err(e) =
+                        block_on(writer_db.insert_thumbnail_failure(&hash, size, &error))
                     {
                         tracing::error!("Failed to record thumbnail failure for {hash}: {e:#}");
                     }

@@ -581,7 +581,10 @@ mod tests {
     #[test]
     fn hide_failed_round_trips_and_defaults_when_absent() {
         // New field round-trips.
-        let f = Filters { hide_failed: true, ..Default::default() };
+        let f = Filters {
+            hide_failed: true,
+            ..Default::default()
+        };
         let json = serde_json::to_string(&f).unwrap();
         let back: Filters = serde_json::from_str(&json).unwrap();
         assert_eq!(back, f);

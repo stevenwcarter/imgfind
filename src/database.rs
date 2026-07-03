@@ -3461,7 +3461,12 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(db.count_images_without_embedding().await.unwrap(), 0);
-        assert!(db.get_images_without_embedding(10).await.unwrap().is_empty());
+        assert!(
+            db.get_images_without_embedding(10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         // Clearing markers re-includes it.
         let cleared = db.clear_thumbnail_failures().await.unwrap();

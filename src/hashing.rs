@@ -4,7 +4,7 @@
 //! 64 KB) but rejects files smaller than 128 KB. Those files fall back to a
 //! full-content md5 — cheap precisely because the file is small.
 
-use oshash::{oshash, HashError};
+use oshash::{HashError, oshash};
 
 /// Hash a file for indexing.
 ///
@@ -42,7 +42,10 @@ mod tests {
         let f = write_temp(&vec![7u8; 200 * 1024]);
         let h = hash_file(f.path().to_str().unwrap()).expect("hash large file");
         assert_eq!(h.len(), 16, "oshash hex is 16 chars, got {h:?}");
-        assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(
+            h.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
     }
 
     #[test]
@@ -53,7 +56,10 @@ mod tests {
         let h1 = hash_file(path).expect("hash small file");
         let h2 = hash_file(path).expect("hash small file again");
         assert_eq!(h1.len(), 32, "md5 hex is 32 chars, got {h1:?}");
-        assert!(h1.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(
+            h1.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
         assert_eq!(h1, h2, "md5 must be stable for identical content");
 
         let g = write_temp(b"different small contents");

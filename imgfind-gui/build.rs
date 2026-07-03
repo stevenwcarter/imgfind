@@ -13,5 +13,6 @@ fn main() {
 fn embed_windows_icon() {
     let mut res = winresource::WindowsResource::new();
     res.set_icon("../packaging/icon.ico");
-    res.compile().expect("failed to embed Windows icon resource");
+    res.compile()
+        .expect("failed to embed Windows icon resource");
 }
