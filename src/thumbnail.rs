@@ -41,6 +41,14 @@ use std::thread;
 /// let generated = generate_missing_thumbnails_batch(&mut db, ThumbnailSize(300), 10).unwrap();
 /// println!("Generated {} thumbnails", generated);
 /// ```
+/// A message from a thumbnail-generation worker to the single DB writer thread.
+enum ThumbMsg {
+    /// Successfully generated JPEG bytes for `(hash, size)`.
+    Ok { hash: String, size: u32, data: Vec<u8> },
+    /// Generation failed for `(hash, size)`; record a permanent marker.
+    Failed { hash: String, size: u32, error: String },
+}
+
 pub fn generate_missing_thumbnails_batch(
     db: &mut Database,
     size: ThumbnailSize,
@@ -50,7 +58,7 @@ pub fn generate_missing_thumbnails_batch(
     let images_without_thumbnails = block_on(db.get_images_without_thumbnails(size, count))?;
 
     // Channel used by producer tasks (thumbnail generators) to send bytes to a single DB writer.
-    let (tx, rx) = std::sync::mpsc::channel::<(String, u32, Vec<u8>)>();
+    let (tx, rx) = std::sync::mpsc::channel::<ThumbMsg>();
 
     // Atomic counter shared with writer thread to record successful inserts.
     let generated_count = Arc::new(AtomicUsize::new(0));
@@ -88,11 +96,20 @@ pub fn generate_missing_thumbnails_batch(
             }
         };
 
-        for item in rx {
-            tracing::debug!("Writer received hash {}", item.0);
-            buffer.push(item);
-            if buffer.len() >= 40 {
-                flush(&mut buffer);
+        for msg in rx {
+            match msg {
+                ThumbMsg::Ok { hash, size, data } => {
+                    buffer.push((hash, size, data));
+                    if buffer.len() >= 40 {
+                        flush(&mut buffer);
+                    }
+                }
+                ThumbMsg::Failed { hash, size, error } => {
+                    if let Err(e) = block_on(writer_db.insert_thumbnail_failure(&hash, size, &error))
+                    {
+                        tracing::error!("Failed to record thumbnail failure for {hash}: {e:#}");
+                    }
+                }
             }
         }
         // Final flush after channel close.
@@ -130,6 +147,11 @@ pub fn generate_missing_thumbnails_batch(
             if let Err(e) = generate_and_store_thumbnail(path_str.as_ref(), hash, size, edits, &tx)
             {
                 tracing::warn!("Failed to generate thumbnail for {}: {:?}", path_str, e);
+                let _ = tx.send(ThumbMsg::Failed {
+                    hash: hash.to_string(),
+                    size: size.get(),
+                    error: format!("{e:#}"),
+                });
             } else {
                 tracing::info!("Generated thumbnail for: {}", path_str);
             }
@@ -206,11 +228,15 @@ fn generate_and_store_thumbnail(
     hash: &str,
     size: ThumbnailSize,
     edits: &ImageEdits,
-    tx: &Sender<(String, u32, Vec<u8>)>,
+    tx: &Sender<ThumbMsg>,
 ) -> Result<()> {
     let bytes = generate_thumbnail_bytes(filepath, ThumbnailSpec::ScaleSize(size), edits)?;
-    tx.send((hash.to_string(), size.get(), bytes))
-        .context("Failed to send thumbnail bytes over channel")?;
+    tx.send(ThumbMsg::Ok {
+        hash: hash.to_string(),
+        size: size.get(),
+        data: bytes,
+    })
+    .context("Failed to send thumbnail bytes over channel")?;
     Ok(())
 }
 
@@ -248,7 +274,19 @@ pub fn get_or_generate_thumbnail(
             ImageEdits::default()
         }
     };
-    let bytes = generate_thumbnail_bytes(filepath, spec, &edits)?;
+    let bytes = match generate_thumbnail_bytes(filepath, spec, &edits) {
+        Ok(b) => b,
+        Err(e) => {
+            if let ThumbnailSpec::ScaleSize(size) = spec {
+                if let Err(rec) =
+                    block_on(db.insert_thumbnail_failure(hash, size.get(), &format!("{e:#}")))
+                {
+                    tracing::error!("Failed to record thumbnail failure for {hash}: {rec:#}");
+                }
+            }
+            return Err(e);
+        }
+    };
     block_on(db.insert_thumbnail(hash, spec, &bytes))
         .context("Failed to store thumbnail in database")?;
     block_on(db.get_thumbnail(hash, spec)).context("Failed to retrieve newly generated thumbnail")
