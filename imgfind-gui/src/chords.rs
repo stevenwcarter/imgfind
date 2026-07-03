@@ -10,6 +10,7 @@ pub enum Pending {
     None,
     AwaitM,
     AwaitF,
+    AwaitG,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,6 +21,8 @@ pub enum Action {
     RepeatLast,
     LoadBrushIntoFilter(BrushColor),
     ToggleTagFilter,
+    JumpFirst,
+    JumpLast,
 }
 
 /// Resolve a key press given the current pending prefix.
@@ -33,6 +36,8 @@ pub fn resolve(pending: Pending, key: &str) -> (Pending, Option<Action>) {
             "t" => (Pending::None, Some(Action::OpenTagModal)),
             "m" => (Pending::AwaitM, None),
             "f" => (Pending::AwaitF, None),
+            "g" => (Pending::AwaitG, None),
+            "G" => (Pending::None, Some(Action::JumpLast)),
             _ => (Pending::None, None),
         },
         Pending::AwaitM => match key {
@@ -48,6 +53,10 @@ pub fn resolve(pending: Pending, key: &str) -> (Pending, Option<Action>) {
                 Some(c) => (Pending::None, Some(Action::LoadBrushIntoFilter(c))),
                 None => (Pending::None, None),
             },
+        },
+        Pending::AwaitG => match key {
+            "g" => (Pending::None, Some(Action::JumpFirst)),
+            _ => (Pending::None, None),
         },
     }
 }
@@ -120,5 +129,43 @@ mod tests {
     #[test]
     fn plain_nav_key_no_chord() {
         assert_eq!(resolve(Pending::None, "j"), (Pending::None, None));
+    }
+
+    #[test]
+    fn g_arms_prefix_no_action() {
+        assert_eq!(resolve(Pending::None, "g"), (Pending::AwaitG, None));
+    }
+
+    #[test]
+    fn gg_jumps_first() {
+        let (p, _) = resolve(Pending::None, "g");
+        assert_eq!(
+            resolve(p, "g"),
+            (Pending::None, Some(Action::JumpFirst))
+        );
+    }
+
+    #[test]
+    fn shift_g_jumps_last() {
+        assert_eq!(
+            resolve(Pending::None, "G"),
+            (Pending::None, Some(Action::JumpLast))
+        );
+    }
+
+    #[test]
+    fn g_then_other_cancels_no_action() {
+        let (p, _) = resolve(Pending::None, "g");
+        assert_eq!(resolve(p, "j"), (Pending::None, None));
+    }
+
+    #[test]
+    fn green_brush_still_paints_after_m() {
+        // Regression: `g` after `m` must still mean the green brush.
+        let (p, _) = resolve(Pending::None, "m");
+        assert_eq!(
+            resolve(p, "g"),
+            (Pending::None, Some(Action::PaintBrush(BrushColor::Green)))
+        );
     }
 }

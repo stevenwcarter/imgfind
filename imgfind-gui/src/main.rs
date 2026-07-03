@@ -2572,6 +2572,12 @@ fn main() -> Result<()> {
                         sel_handles.clone(),
                     );
                 }
+                chords::Action::JumpFirst => {
+                    // TODO: move cursor to first image in grid
+                }
+                chords::Action::JumpLast => {
+                    // TODO: move cursor to last image in grid
+                }
             }
         });
     }
