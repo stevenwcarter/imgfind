@@ -50,11 +50,12 @@ imgfind process --no-embeddings              # thumbnails-only pass (skips loadi
 imgfind process --count 32                   # smaller per-batch size (default: 64)
 ```
 
-`process` runs in three phases in order — 300px thumbnails → CLIP embeddings → 512/2048px thumbnails — followed by an EXIF backfill. Each phase is idempotent: already-complete work is skipped, so the command is safe to re-run and will pick up where it left off. With `--no-embeddings` the CLIP model (~1.7 GB on first download) is never loaded.
+`process` runs in three phases in order — 300px thumbnails → CLIP embeddings → 512/2048px thumbnails — followed by an EXIF backfill. Each phase is idempotent: already-complete work is skipped, so the command is safe to re-run and will pick up where it left off. With `--no-embeddings` the CLIP model (~1.7 GB on first download) is never loaded. If an image's thumbnail fails to generate (e.g. a corrupted JPEG), a permanent failure marker is recorded; the image is excluded from future passes. Use `--retry-failed` to clear all markers and re-attempt.
 
 Process options:
 - `--count <N>` — per-batch size (default: `64`)
 - `--no-embeddings` — thumbnail-only pass; avoids loading the CLIP model
+- `--retry-failed` — clear all permanent thumbnail failure markers before the pass, re-attempting previously-failed images
 - `-d/--dir <DIR>` — target a specific directory's DB (walk-up/global logic otherwise)
 
 ### 3. Search for Images
@@ -119,6 +120,8 @@ If the library has unprocessed images (e.g. after a fresh `imgfind index`), the 
 A **sort selector** beside the filter bar lets you order by Name, Size, or Type (with an asc/desc toggle); while a semantic query is active, Relevance is also offered. Browse re-queries the DB; search re-sorts in memory.
 
 Click a thumbnail to open a **detail panel** on the right (512px thumbnail + metadata + "Search similar"). Double-click (or "View full") opens the full-screen **lightbox** (prev/next navigation, Esc to close); the lightbox uses a persisted 2048px cached thumbnail, upgrading to full native resolution on first zoom. In the lightbox, scroll to zoom and drag to pan; the bottom bar has **Fit** and **1:1** (100% / native) buttons, and the keys `+`/`-` step zoom, `0` fits, `1` jumps to 100%. Right-click a thumbnail to open the original file in the OS viewer.
+
+The **filter bar** beneath the search bar includes a "Hide failed" toggle that excludes images with a permanent thumbnail failure marker (images whose decode failed irreparably). Use this to hide broken files from the grid; use `imgfind process --retry-failed` on the command line to clear the markers and re-attempt.
 
 Keyboard navigation: `h/j/k/l` or arrow keys move the selection; `Enter` opens the detail panel; `Space` opens the lightbox; `Esc` closes the panel.
 

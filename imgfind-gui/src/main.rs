@@ -310,6 +310,7 @@ fn build_filters(
     size_bounds: (i64, i64),
     selected_exts: &HashSet<String>,
     gps_mode: i32,
+    hide_failed: bool,
 ) -> Filters {
     let (min, max) = size_bounds;
     let size_min = fraction_to_bytes(lo, min, max, true);
@@ -336,6 +337,7 @@ fn build_filters(
         size_max: size_max.map(FileSize),
         extensions,
         gps,
+        hide_failed,
         ..Default::default()
     }
 }
@@ -438,6 +440,7 @@ fn main() -> Result<()> {
     window.set_size_label("Size: all".into());
     window.set_type_chips(build_chips_model(&all_extensions, &HashSet::new()));
     window.set_gps_mode(0);
+    window.set_hide_failed(false);
     // Sort selector initial state — browse mode: Relevance not available.
     // Seed the selector to the configured default sort so the UI matches the
     // initial browse order from the moment results appear.
@@ -1960,12 +1963,17 @@ fn main() -> Result<()> {
         let backend_fc = backend.clone();
         let timer = Rc::clone(&debounce_timer);
         window.on_filters_changed(move || {
-            let (lo, hi, gps_mode) = match weak.upgrade() {
-                Some(w) => (w.get_size_lo(), w.get_size_hi(), w.get_gps_mode()),
+            let (lo, hi, gps_mode, hide_failed) = match weak.upgrade() {
+                Some(w) => (
+                    w.get_size_lo(),
+                    w.get_size_hi(),
+                    w.get_gps_mode(),
+                    w.get_hide_failed(),
+                ),
                 None => return,
             };
             let exts = selected_exts_ref.lock().clone();
-            let mut new_filters = build_filters(lo, hi, size_bounds, &exts, gps_mode);
+            let mut new_filters = build_filters(lo, hi, size_bounds, &exts, gps_mode, hide_failed);
             let label = build_size_label(lo, hi, size_bounds);
             if let Some(w) = weak.upgrade() {
                 w.set_size_label(label);
@@ -2012,14 +2020,22 @@ fn main() -> Result<()> {
             }
             let active_exts = selected_exts_ref.lock().clone();
             let model = build_chips_model(&all_exts_et, &active_exts);
-            let (lo, hi, gps_mode) = weak
+            let (lo, hi, gps_mode, hide_failed) = weak
                 .upgrade()
-                .map(|w| (w.get_size_lo(), w.get_size_hi(), w.get_gps_mode()))
-                .unwrap_or((0.0, 1.0, 0));
+                .map(|w| {
+                    (
+                        w.get_size_lo(),
+                        w.get_size_hi(),
+                        w.get_gps_mode(),
+                        w.get_hide_failed(),
+                    )
+                })
+                .unwrap_or((0.0, 1.0, 0, false));
             if let Some(w) = weak.upgrade() {
                 w.set_type_chips(model);
             }
-            let mut new_filters = build_filters(lo, hi, size_bounds, &active_exts, gps_mode);
+            let mut new_filters =
+                build_filters(lo, hi, size_bounds, &active_exts, gps_mode, hide_failed);
             {
                 let mut stored = filters_ref.lock();
                 new_filters.carry_tag_filter_from(&stored);
@@ -2053,12 +2069,12 @@ fn main() -> Result<()> {
             if let Some(w) = weak.upgrade() {
                 w.set_gps_mode(mode);
             }
-            let (lo, hi) = weak
+            let (lo, hi, hide_failed) = weak
                 .upgrade()
-                .map(|w| (w.get_size_lo(), w.get_size_hi()))
-                .unwrap_or((0.0, 1.0));
+                .map(|w| (w.get_size_lo(), w.get_size_hi(), w.get_hide_failed()))
+                .unwrap_or((0.0, 1.0, false));
             let exts = selected_exts_ref.lock().clone();
-            let mut new_filters = build_filters(lo, hi, size_bounds, &exts, mode);
+            let mut new_filters = build_filters(lo, hi, size_bounds, &exts, mode, hide_failed);
             {
                 let mut stored = filters_ref.lock();
                 new_filters.carry_tag_filter_from(&stored);
@@ -2071,6 +2087,45 @@ fn main() -> Result<()> {
                 Arc::clone(&mode_ref),
                 Arc::clone(&grid_gen_ref),
                 backend_gps.clone(),
+                new_filters,
+                sel_handles.clone(),
+            );
+        });
+    }
+
+    // `on_hide_failed_changed` — fired when the user toggles the "Hide failed" chip.
+    {
+        let weak = window.as_weak();
+        let state_ref = Arc::clone(&state);
+        let mode_ref = Arc::clone(&search_mode);
+        let filters_ref = Arc::clone(&filters);
+        let selected_exts_ref = Arc::clone(&selected_exts);
+        let sel_handles = sel_handles.clone();
+        let grid_gen_ref = Arc::clone(&grid_generation);
+        let backend_hf = backend.clone();
+        let timer = Rc::clone(&debounce_timer);
+        window.on_hide_failed_changed(move |on| {
+            if let Some(w) = weak.upgrade() {
+                w.set_hide_failed(on);
+            }
+            let (lo, hi, gps_mode) = weak
+                .upgrade()
+                .map(|w| (w.get_size_lo(), w.get_size_hi(), w.get_gps_mode()))
+                .unwrap_or((0.0, 1.0, 0));
+            let exts = selected_exts_ref.lock().clone();
+            let mut new_filters = build_filters(lo, hi, size_bounds, &exts, gps_mode, on);
+            {
+                let mut stored = filters_ref.lock();
+                new_filters.carry_tag_filter_from(&stored);
+                *stored = new_filters.clone();
+            }
+            start_debounce(
+                &timer,
+                weak.clone(),
+                Arc::clone(&state_ref),
+                Arc::clone(&mode_ref),
+                Arc::clone(&grid_gen_ref),
+                backend_hf.clone(),
                 new_filters,
                 sel_handles.clone(),
             );
@@ -3112,6 +3167,7 @@ fn restore_session(st: UiState, ctx: RestoreCtx<'_>) {
         w.set_size_label(build_size_label(lo, hi, ctx.size_bounds));
         w.set_type_chips(build_chips_model(ctx.all_extensions, &exts));
         w.set_gps_mode(gps_to_mode(st.filters.gps));
+        w.set_hide_failed(st.filters.hide_failed);
         // Reflect the persisted tag filter into the UI under the `restoring`
         // guard (no query fired); the result list already reflects these tags.
         push_filter_tags(&w, &st.filters);
@@ -4765,7 +4821,7 @@ mod tests {
     fn build_filters_swaps_inverted_size_range() {
         // Inverted slider: lo fraction maps to a LARGER byte value than hi.
         // lo=0.8 -> Some(high bytes); hi=0.2 -> Some(low bytes); both Some, min>max.
-        let f = build_filters(0.8, 0.2, (0, 1000), &HashSet::new(), 0);
+        let f = build_filters(0.8, 0.2, (0, 1000), &HashSet::new(), 0, false);
         let (mn, mx) = (f.size_min.unwrap().bytes(), f.size_max.unwrap().bytes());
         assert!(
             mn <= mx,
@@ -4775,7 +4831,7 @@ mod tests {
 
     #[test]
     fn build_filters_leaves_normal_size_range() {
-        let f = build_filters(0.2, 0.8, (0, 1000), &HashSet::new(), 0);
+        let f = build_filters(0.2, 0.8, (0, 1000), &HashSet::new(), 0, false);
         assert_eq!(f.size_min, Some(FileSize(200)));
         assert_eq!(f.size_max, Some(FileSize(800)));
     }

@@ -154,6 +154,10 @@ enum Commands {
         /// Directory whose DB to use (walk-up/global logic otherwise).
         #[arg(short, long)]
         dir: Option<String>,
+        /// Clear all thumbnail-failure markers first, so previously failed
+        /// images are re-attempted this pass.
+        #[arg(long)]
+        retry_failed: bool,
     },
     /// Manage embedding models
     Models {
@@ -314,9 +318,14 @@ fn main() -> Result<()> {
             count,
             no_embeddings,
             dir,
+            retry_failed,
         } => {
             let db_path = get_db_path(dir.as_deref())?;
             let mut db = imgfind::block_on(Database::new(&db_path))?;
+            if retry_failed {
+                let cleared = imgfind::block_on(db.clear_thumbnail_failures())?;
+                info!("Cleared {cleared} thumbnail-failure marker(s); re-attempting.");
+            }
             let embedder: Option<ClipEmbedder> = if no_embeddings {
                 None
             } else {

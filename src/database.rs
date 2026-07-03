@@ -865,7 +865,9 @@ impl Database {
             "SELECT COUNT(*) \
              FROM images i \
              LEFT JOIN {vt} v ON v.image_id = i.id \
-             WHERE v.image_id IS NULL"
+             WHERE v.image_id IS NULL \
+               AND NOT EXISTS (SELECT 1 FROM thumbnail_failures f \
+                               WHERE f.image_hash = i.hash AND f.size = 300)"
         );
         let mut rows = conn.query(&sql, ()).await?;
         let row = rows.next().await?.context("COUNT returned no row")?;
@@ -893,6 +895,8 @@ impl Database {
              FROM images i \
              LEFT JOIN {vt} v ON v.image_id = i.id \
              WHERE v.image_id IS NULL \
+               AND NOT EXISTS (SELECT 1 FROM thumbnail_failures f \
+                               WHERE f.image_hash = i.hash AND f.size = 300) \
              LIMIT ?1"
         );
         let mut rows = conn.query(&sql, (limit,)).await?;
@@ -1365,6 +1369,8 @@ impl Database {
                  FROM images i \
                  LEFT JOIN thumbnails t ON i.hash = t.image_hash AND t.size = ?1 \
                  WHERE t.id IS NULL \
+                   AND NOT EXISTS (SELECT 1 FROM thumbnail_failures f \
+                                   WHERE f.image_hash = i.hash AND f.size = ?1) \
                  LIMIT ?2",
                 (i64::from(size.get()), limit),
             )
@@ -1391,8 +1397,63 @@ impl Database {
                 "SELECT COUNT(*) \
                  FROM images i \
                  LEFT JOIN thumbnails t ON i.hash = t.image_hash AND t.size = ?1 \
-                 WHERE t.id IS NULL",
+                 WHERE t.id IS NULL \
+                   AND NOT EXISTS (SELECT 1 FROM thumbnail_failures f \
+                                   WHERE f.image_hash = i.hash AND f.size = ?1)",
                 (i64::from(size.get()),),
+            )
+            .await?;
+        let row = rows.next().await?.context("COUNT returned no row")?;
+        Ok(col_i64(&row, 0, "count")? as usize)
+    }
+
+    /// Record that a thumbnail permanently failed to generate for `hash`/`size`.
+    ///
+    /// `INSERT OR IGNORE` so repeated failures for the same `(hash, size)` are a
+    /// no-op. Marked images are excluded from the thumbnail/embedding work queues
+    /// until [`Database::clear_thumbnail_failures`] is called.
+    pub async fn insert_thumbnail_failure(&self, hash: &str, size: u32, error: &str) -> Result<()> {
+        let conn = self
+            .pool
+            .get()
+            .await
+            .context("get connection to record thumbnail failure")?;
+        conn.execute(
+            "INSERT OR IGNORE INTO thumbnail_failures (image_hash, size, error) \
+             VALUES (?1, ?2, ?3)",
+            (hash.to_string(), size as i64, error.to_string()),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Delete all thumbnail failure markers (used by `process --retry-failed`).
+    /// Returns the number of markers cleared.
+    pub async fn clear_thumbnail_failures(&self) -> Result<usize> {
+        let conn = self
+            .pool
+            .get()
+            .await
+            .context("get connection to clear thumbnail failures")?;
+        let n = conn
+            .execute("DELETE FROM thumbnail_failures", ())
+            .await
+            .context("delete thumbnail_failures")?;
+        Ok(n as usize)
+    }
+
+    /// Count thumbnail-failure markers recorded for `hash` (across all sizes).
+    /// Test/diagnostic helper.
+    pub async fn thumbnail_failure_count(&self, hash: &str) -> Result<usize> {
+        let conn = self
+            .pool
+            .get()
+            .await
+            .context("get connection to count thumbnail failures")?;
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM thumbnail_failures WHERE image_hash = ?1",
+                (hash.to_string(),),
             )
             .await?;
         let row = rows.next().await?.context("COUNT returned no row")?;
@@ -3339,5 +3400,54 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(db.count_images_without_embedding().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn failure_marker_excludes_from_work_queues_and_clears() {
+        let (db, _tmp) = test_db().await;
+        db.insert_image_rows_batch(&[("a.jpg".into(), "h1".into())])
+            .await
+            .unwrap();
+
+        // Initially the image needs a 300px thumbnail and an embedding.
+        assert_eq!(
+            db.count_images_without_thumbnails(ThumbnailSize(300))
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(db.count_images_without_embedding().await.unwrap(), 1);
+
+        // Mark the 300px thumbnail as failed.
+        db.insert_thumbnail_failure("h1", 300, "boom")
+            .await
+            .unwrap();
+
+        // Now it is excluded from BOTH the thumbnail and embedding queues.
+        assert_eq!(
+            db.count_images_without_thumbnails(ThumbnailSize(300))
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(
+            db.get_images_without_thumbnails(ThumbnailSize(300), 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(db.count_images_without_embedding().await.unwrap(), 0);
+        assert!(db.get_images_without_embedding(10).await.unwrap().is_empty());
+
+        // Clearing markers re-includes it.
+        let cleared = db.clear_thumbnail_failures().await.unwrap();
+        assert_eq!(cleared, 1);
+        assert_eq!(
+            db.count_images_without_thumbnails(ThumbnailSize(300))
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(db.count_images_without_embedding().await.unwrap(), 1);
     }
 }

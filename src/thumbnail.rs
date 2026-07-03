@@ -16,6 +16,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc::Sender};
 use std::thread;
 
+/// A message from a thumbnail-generation worker to the single DB writer thread.
+enum ThumbMsg {
+    /// Successfully generated JPEG bytes for `(hash, size)`.
+    Ok { hash: String, size: u32, data: Vec<u8> },
+    /// Generation failed for `(hash, size)`; record a permanent marker.
+    Failed { hash: String, size: u32, error: String },
+}
+
 /// Generate thumbnails in batches for images that don't have cached thumbnails
 ///
 /// This function finds images that don't have a thumbnail entry of the given size
@@ -50,7 +58,7 @@ pub fn generate_missing_thumbnails_batch(
     let images_without_thumbnails = block_on(db.get_images_without_thumbnails(size, count))?;
 
     // Channel used by producer tasks (thumbnail generators) to send bytes to a single DB writer.
-    let (tx, rx) = std::sync::mpsc::channel::<(String, u32, Vec<u8>)>();
+    let (tx, rx) = std::sync::mpsc::channel::<ThumbMsg>();
 
     // Atomic counter shared with writer thread to record successful inserts.
     let generated_count = Arc::new(AtomicUsize::new(0));
@@ -88,11 +96,22 @@ pub fn generate_missing_thumbnails_batch(
             }
         };
 
-        for item in rx {
-            tracing::debug!("Writer received hash {}", item.0);
-            buffer.push(item);
-            if buffer.len() >= 40 {
-                flush(&mut buffer);
+        for msg in rx {
+            match msg {
+                ThumbMsg::Ok { hash, size, data } => {
+                    tracing::debug!("Writer received hash {}", hash);
+                    buffer.push((hash, size, data));
+                    if buffer.len() >= 40 {
+                        flush(&mut buffer);
+                    }
+                }
+                ThumbMsg::Failed { hash, size, error } => {
+                    tracing::debug!("Writer received hash {} (failed)", hash);
+                    if let Err(e) = block_on(writer_db.insert_thumbnail_failure(&hash, size, &error))
+                    {
+                        tracing::error!("Failed to record thumbnail failure for {hash}: {e:#}");
+                    }
+                }
             }
         }
         // Final flush after channel close.
@@ -130,6 +149,11 @@ pub fn generate_missing_thumbnails_batch(
             if let Err(e) = generate_and_store_thumbnail(path_str.as_ref(), hash, size, edits, &tx)
             {
                 tracing::warn!("Failed to generate thumbnail for {}: {:?}", path_str, e);
+                let _ = tx.send(ThumbMsg::Failed {
+                    hash: hash.to_string(),
+                    size: size.get(),
+                    error: format!("{e:#}"),
+                });
             } else {
                 tracing::info!("Generated thumbnail for: {}", path_str);
             }
@@ -206,11 +230,15 @@ fn generate_and_store_thumbnail(
     hash: &str,
     size: ThumbnailSize,
     edits: &ImageEdits,
-    tx: &Sender<(String, u32, Vec<u8>)>,
+    tx: &Sender<ThumbMsg>,
 ) -> Result<()> {
     let bytes = generate_thumbnail_bytes(filepath, ThumbnailSpec::ScaleSize(size), edits)?;
-    tx.send((hash.to_string(), size.get(), bytes))
-        .context("Failed to send thumbnail bytes over channel")?;
+    tx.send(ThumbMsg::Ok {
+        hash: hash.to_string(),
+        size: size.get(),
+        data: bytes,
+    })
+    .context("Failed to send thumbnail bytes over channel")?;
     Ok(())
 }
 
@@ -248,7 +276,19 @@ pub fn get_or_generate_thumbnail(
             ImageEdits::default()
         }
     };
-    let bytes = generate_thumbnail_bytes(filepath, spec, &edits)?;
+    let bytes = match generate_thumbnail_bytes(filepath, spec, &edits) {
+        Ok(b) => b,
+        Err(e) => {
+            if let ThumbnailSpec::ScaleSize(size) = spec {
+                if let Err(rec) =
+                    block_on(db.insert_thumbnail_failure(hash, size.get(), &format!("{e:#}")))
+                {
+                    tracing::error!("Failed to record thumbnail failure for {hash}: {rec:#}");
+                }
+            }
+            return Err(e);
+        }
+    };
     block_on(db.insert_thumbnail(hash, spec, &bytes))
         .context("Failed to store thumbnail in database")?;
     block_on(db.get_thumbnail(hash, spec)).context("Failed to retrieve newly generated thumbnail")
@@ -680,6 +720,42 @@ mod tests {
         assert_ne!(
             before_full, after_full,
             "FullSize thumbnail bytes must change after +2 EV edit"
+        );
+
+        let _ = std::fs::remove_dir_all(parent_dir);
+    }
+
+    /// `get_or_generate_thumbnail` records a failure marker for a `ScaleSize`
+    /// request on an undecodable file, but does NOT record one for `FullSize`
+    /// (only `ScaleSize` failures are recorded — see `generate_thumbnail_bytes`
+    /// call site in `get_or_generate_thumbnail`).
+    #[test]
+    fn get_or_generate_records_failure_only_for_scale_size() {
+        let db_path = temp_db_path();
+        let db = block_on(Database::new(&db_path)).expect("create test db");
+        let parent_dir = db_path.parent().unwrap().parent().unwrap();
+
+        // A garbage, undecodable "image" file.
+        let bad_path = parent_dir.join("garbage.png");
+        std::fs::write(&bad_path, b"not an image").expect("write garbage file");
+        let bad_path_str = bad_path.to_str().unwrap();
+
+        // ScaleSize failure IS recorded.
+        let err = get_or_generate_thumbnail(&db, bad_path_str, "H", ThumbnailSize(300));
+        assert!(err.is_err(), "undecodable file must fail to thumbnail");
+        assert_eq!(
+            block_on(db.thumbnail_failure_count("H")).unwrap(),
+            1,
+            "ScaleSize failure must be recorded"
+        );
+
+        // FullSize failure is NOT recorded.
+        let err = get_or_generate_thumbnail(&db, bad_path_str, "H2", ThumbnailSpec::FullSize);
+        assert!(err.is_err(), "undecodable file must fail to thumbnail");
+        assert_eq!(
+            block_on(db.thumbnail_failure_count("H2")).unwrap(),
+            0,
+            "FullSize failure must NOT be recorded"
         );
 
         let _ = std::fs::remove_dir_all(parent_dir);

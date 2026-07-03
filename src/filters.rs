@@ -18,6 +18,8 @@ pub struct Filters {
     /// "enabled-but-empty" state unrepresentable. The (possibly disabled) tag
     /// set and match mode are retained either way for fast re-activation.
     pub tag_filter: TagFilter,
+    /// When true, exclude images that have a thumbnail-failure marker.
+    pub hide_failed: bool,
 }
 
 /// Tag-filter state. Replaces the historical `tags`/`tag_match`/`tags_enabled`
@@ -124,6 +126,8 @@ struct FiltersRepr {
     tag_match: TagMatch,
     #[serde(default)]
     tags_enabled: bool,
+    #[serde(default)]
+    hide_failed: bool,
 }
 
 impl From<&Filters> for FiltersRepr {
@@ -140,6 +144,7 @@ impl From<&Filters> for FiltersRepr {
             tags,
             tag_match,
             tags_enabled,
+            hide_failed: f.hide_failed,
         }
     }
 }
@@ -163,6 +168,7 @@ impl From<FiltersRepr> for Filters {
             extensions: r.extensions,
             gps: r.gps,
             tag_filter,
+            hide_failed: r.hide_failed,
         }
     }
 }
@@ -241,6 +247,12 @@ pub fn build_filter_clause_turso(f: &Filters) -> (String, Vec<turso::Value>) {
         GpsFilter::NoGps => {
             clauses.push("(m.latitude IS NULL OR m.longitude IS NULL)".into());
         }
+    }
+
+    if f.hide_failed {
+        clauses.push(
+            "NOT EXISTS (SELECT 1 FROM thumbnail_failures f WHERE f.image_hash = i.hash)".into(),
+        );
     }
 
     if let Some((tags, match_mode)) = f.tag_filter.active_tags() {
@@ -544,5 +556,38 @@ mod tests {
             params,
             vec![turso::Value::Integer(5), turso::Value::Text("x".into())]
         );
+    }
+
+    #[test]
+    fn hide_failed_emits_not_exists_clause() {
+        let f = Filters {
+            hide_failed: true,
+            ..Default::default()
+        };
+        let (sql, params) = build_filter_clause_turso(&f);
+        assert_eq!(
+            sql,
+            " AND NOT EXISTS (SELECT 1 FROM thumbnail_failures f WHERE f.image_hash = i.hash)"
+        );
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn hide_failed_default_false_emits_nothing() {
+        let (sql, _) = build_filter_clause_turso(&Filters::default());
+        assert!(!sql.contains("thumbnail_failures"));
+    }
+
+    #[test]
+    fn hide_failed_round_trips_and_defaults_when_absent() {
+        // New field round-trips.
+        let f = Filters { hide_failed: true, ..Default::default() };
+        let json = serde_json::to_string(&f).unwrap();
+        let back: Filters = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, f);
+        // Old JSON lacking the field deserializes to false.
+        let old = r#"{"size_min":null,"size_max":null,"extensions":[],"gps":"any","tags":[],"tag_match":"allof","tags_enabled":false}"#;
+        let loaded: Filters = serde_json::from_str(old).unwrap();
+        assert!(!loaded.hide_failed);
     }
 }
