@@ -17,7 +17,7 @@ use anyhow::{Context, Result};
 use crate::EmbeddingDim;
 
 /// The highest migration version applied by this module.
-pub const LATEST_MIGRATION_VERSION: i32 = 5;
+pub const LATEST_MIGRATION_VERSION: i32 = 6;
 
 /// Derive a safe SQL identifier from a model name.
 ///
@@ -128,6 +128,11 @@ pub async fn run_migrations(conn: &turso::Connection) -> Result<()> {
         migration_005_edit_controls(conn)
             .await
             .context("migration 5 (edit control columns)")?;
+    }
+    if current < 6 {
+        migration_006_thumbnail_failures(conn)
+            .await
+            .context("migration 6 (thumbnail failures)")?;
     }
     if current < LATEST_MIGRATION_VERSION {
         conn.execute(
@@ -385,6 +390,33 @@ async fn migration_005_edit_controls(conn: &turso::Connection) -> Result<()> {
     Ok(())
 }
 
+/// Migration 6: record thumbnails that permanently fail to generate so the
+/// pipeline stops retrying undecodable images on every pass. Keyed by content
+/// hash + size, mirroring the `thumbnails` table.
+async fn migration_006_thumbnail_failures(conn: &turso::Connection) -> Result<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS thumbnail_failures (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            image_hash TEXT NOT NULL, \
+            size INTEGER NOT NULL, \
+            error TEXT, \
+            failed_at DATETIME DEFAULT CURRENT_TIMESTAMP, \
+            UNIQUE(image_hash, size)\
+        )",
+        (),
+    )
+    .await
+    .context("create thumbnail_failures table")?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_thumbnail_failures_hash \
+         ON thumbnail_failures(image_hash)",
+        (),
+    )
+    .await
+    .context("create idx_thumbnail_failures_hash")?;
+    Ok(())
+}
+
 /// Migration 4: image edits table for brightness/exposure adjustments.
 async fn migration_004_image_edits(conn: &turso::Connection) -> Result<()> {
     conn.execute(
@@ -447,6 +479,13 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn migration_006_creates_thumbnail_failures() {
+        let conn = mem().await;
+        run_migrations(&conn).await.unwrap();
+        assert!(table_exists(&conn, "thumbnail_failures").await);
+    }
+
+    #[tokio::test]
     async fn migrations_are_idempotent_and_create_tables() {
         let conn = mem().await;
         run_migrations(&conn).await.unwrap();
@@ -456,6 +495,7 @@ mod tests {
             "images",
             "image_vectors",
             "thumbnails",
+            "thumbnail_failures",
             "image_metadata",
             "favorites",
             "tags",
@@ -483,7 +523,7 @@ mod tests {
             .unwrap()
             .as_integer()
             .copied();
-        assert_eq!(v, Some(LATEST_MIGRATION_VERSION as i64));
+        assert_eq!(v, Some(6i64));
     }
 
     #[tokio::test]
