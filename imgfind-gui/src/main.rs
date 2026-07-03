@@ -213,6 +213,7 @@ fn format_statusline(sel: &selection::Selection, results: &[RowMeta]) -> String 
 /// and panel show the full totals before the worker's first batch completes.
 fn seed_process_ui(w: &MainWindow, baseline: &ProcessCounts) {
     w.set_process_thumbs300_total(baseline.thumbs300 as i32);
+    w.set_process_meta_total(baseline.metadata as i32);
     w.set_process_embed_total(baseline.embeddings as i32);
     w.set_process_full_total(baseline.full_thumbs as i32);
     w.set_process_overall_total(baseline.total_remaining() as i32);
@@ -239,12 +240,15 @@ fn apply_process_progress(
 ) {
     let now = &p.counts;
     let t_done = baseline.thumbs300.saturating_sub(now.thumbs300);
+    let m_done = baseline.metadata.saturating_sub(now.metadata);
     let e_done = baseline.embeddings.saturating_sub(now.embeddings);
     let f_done = baseline.full_thumbs.saturating_sub(now.full_thumbs);
     let (o_done, o_total) = processor::overall(now, baseline);
 
     w.set_process_thumbs300_done(t_done as i32);
     w.set_process_thumbs300_total(baseline.thumbs300 as i32);
+    w.set_process_meta_done(m_done as i32);
+    w.set_process_meta_total(baseline.metadata as i32);
     w.set_process_embed_done(e_done as i32);
     w.set_process_embed_total(baseline.embeddings as i32);
     w.set_process_full_done(f_done as i32);

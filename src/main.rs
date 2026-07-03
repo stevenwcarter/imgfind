@@ -426,7 +426,8 @@ fn launch_gui(args: &[std::ffi::OsString]) -> anyhow::Result<()> {
 }
 
 fn metadata(db: &mut Database, quiet: bool, count: usize) -> Result<()> {
-    extract_missing_metadata(db, quiet, count)
+    extract_missing_metadata(db, quiet, count)?;
+    Ok(())
 }
 
 fn index_directory(

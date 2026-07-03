@@ -1493,6 +1493,30 @@ impl Database {
     }
 
     /// Get images without metadata.
+    /// Count images that have no `image_metadata` row.
+    ///
+    /// Used to report the EXIF-backfill backlog during two-phase background
+    /// indexing, mirroring [`Database::count_images_without_embedding`] and
+    /// [`Database::count_images_without_thumbnails`].
+    pub async fn count_images_without_metadata(&self) -> Result<usize> {
+        let conn = self
+            .pool
+            .get()
+            .await
+            .context("get connection to count images without metadata")?;
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) \
+                 FROM images i \
+                 LEFT JOIN image_metadata m ON i.id = m.image_id \
+                 WHERE m.id IS NULL",
+                (),
+            )
+            .await?;
+        let row = rows.next().await?.context("COUNT returned no row")?;
+        Ok(col_i64(&row, 0, "count")? as usize)
+    }
+
     pub async fn get_images_without_metadata(
         &self,
         limit: usize,

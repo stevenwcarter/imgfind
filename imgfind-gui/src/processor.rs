@@ -1,11 +1,12 @@
 //! Background process-worker for the GUI.
 //!
-//! Drives the three-phase post-index pipeline on a dedicated thread that is
+//! Drives the four-phase post-index pipeline on a dedicated thread that is
 //! separate from the interactive [`crate::loader`] thumbnail-worker:
 //!
 //! 1. **Thumbnails (300 px)** — prerequisite for CLIP embedding.
-//! 2. **Embeddings** — CLIP-vectorise each image from its 300 px thumbnail.
-//! 3. **Full thumbnails** — generate 512 px and 2048 px renditions for the
+//! 2. **Metadata (EXIF)** — backfill file size / dimensions / GPS / camera.
+//! 3. **Embeddings** — CLIP-vectorise each image from its 300 px thumbnail.
+//! 4. **Full thumbnails** — generate 512 px and 2048 px renditions for the
 //!    GUI grid, detail panel, and lightbox.
 //!
 //! The worker processes one small batch at a time and sleeps between batches
@@ -93,6 +94,7 @@ impl ProcessController {
 pub fn phase_label(p: ProcessPhase) -> &'static str {
     match p {
         ProcessPhase::Thumbnails300 => "Thumbnails (300px)",
+        ProcessPhase::Metadata => "Metadata (EXIF)",
         ProcessPhase::Embeddings => "Embeddings",
         ProcessPhase::FullThumbnails => "Full thumbnails",
     }
@@ -121,6 +123,7 @@ pub fn overall(now: &ProcessCounts, baseline: &ProcessCounts) -> (usize, usize) 
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StuckPhases {
     thumbnails300: bool,
+    metadata: bool,
     embeddings: bool,
     full_thumbnails: bool,
 }
@@ -129,6 +132,7 @@ impl StuckPhases {
     pub fn mark(&mut self, phase: ProcessPhase) {
         match phase {
             ProcessPhase::Thumbnails300 => self.thumbnails300 = true,
+            ProcessPhase::Metadata => self.metadata = true,
             ProcessPhase::Embeddings => self.embeddings = true,
             ProcessPhase::FullThumbnails => self.full_thumbnails = true,
         }
@@ -142,6 +146,8 @@ impl StuckPhases {
 pub fn select_phase(counts: &ProcessCounts, stuck: &StuckPhases) -> Option<ProcessPhase> {
     if counts.thumbs300 > 0 && !stuck.thumbnails300 {
         Some(ProcessPhase::Thumbnails300)
+    } else if counts.metadata > 0 && !stuck.metadata {
+        Some(ProcessPhase::Metadata)
     } else if counts.embeddings > 0 && !stuck.embeddings {
         Some(ProcessPhase::Embeddings)
     } else if counts.full_thumbs > 0 && !stuck.full_thumbnails {
@@ -328,6 +334,7 @@ mod tests {
         use imgfind::processing::{ProcessCounts, ProcessPhase};
         let counts = ProcessCounts {
             thumbs300: 1,
+            metadata: 2,
             embeddings: 5,
             full_thumbs: 3,
         };
@@ -336,10 +343,13 @@ mod tests {
             select_phase(&counts, &StuckPhases::default()),
             Some(ProcessPhase::Thumbnails300)
         );
-        // Thumbnails300 stuck (the undecodable file) → must advance to Embeddings,
+        // Thumbnails300 stuck (the undecodable file) → must advance to Metadata,
         // NOT re-pick Thumbnails300 (this is the bug: next_phase() returned Thumbnails300 forever)
         let mut s = StuckPhases::default();
         s.mark(ProcessPhase::Thumbnails300);
+        assert_eq!(select_phase(&counts, &s), Some(ProcessPhase::Metadata));
+        // + Metadata stuck → Embeddings
+        s.mark(ProcessPhase::Metadata);
         assert_eq!(select_phase(&counts, &s), Some(ProcessPhase::Embeddings));
         // + Embeddings stuck → FullThumbnails
         s.mark(ProcessPhase::Embeddings);
@@ -353,6 +363,7 @@ mod tests {
         // nothing remaining → None
         let empty = ProcessCounts {
             thumbs300: 0,
+            metadata: 0,
             embeddings: 0,
             full_thumbs: 0,
         };
@@ -375,11 +386,13 @@ mod tests {
     fn overall_progress_done_total() {
         let baseline = ProcessCounts {
             thumbs300: 10,
+            metadata: 0,
             embeddings: 10,
             full_thumbs: 20,
         };
         let now = ProcessCounts {
             thumbs300: 0,
+            metadata: 0,
             embeddings: 4,
             full_thumbs: 20,
         };
@@ -392,6 +405,7 @@ mod tests {
         // now all-zero → all work complete
         let zero = ProcessCounts {
             thumbs300: 0,
+            metadata: 0,
             embeddings: 0,
             full_thumbs: 0,
         };

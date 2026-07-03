@@ -310,6 +310,8 @@ export component MainWindow inherits Window {
     in property <string> process-indexing-hint; // e.g. "12 still indexing" (empty when caught up)
     in property <int> process-thumbs300-done;
     in property <int> process-thumbs300-total;
+    in property <int> process-meta-done;
+    in property <int> process-meta-total;
     in property <int> process-embed-done;
     in property <int> process-embed-total;
     in property <int> process-full-done;
@@ -1107,6 +1109,11 @@ export component MainWindow inherits Window {
                                     label: "Thumbnails (300px)";
                                     done: root.process-thumbs300-done;
                                     total: root.process-thumbs300-total;
+                                }
+                                ProcessBar {
+                                    label: "Metadata (EXIF)";
+                                    done: root.process-meta-done;
+                                    total: root.process-meta-total;
                                 }
                                 ProcessBar {
                                     label: "Embeddings";

@@ -1,14 +1,16 @@
 //! Shared background-processing engine for the two-phase indexing pipeline.
 //!
 //! After `index_directory` (or the launcher's index workflow) populates the
-//! `images` table with row-only entries, this module drives the three phases
+//! `images` table with row-only entries, this module drives the four phases
 //! that make images searchable and viewable:
 //!
 //! 1. **`Thumbnails300`** — Generate 300 px thumbnails (used as embedding
 //!    source; mandatory before embeddings).
-//! 2. **`Embeddings`** — CLIP-embed each image from its 300 px thumbnail and
+//! 2. **`Metadata`** — Backfill EXIF metadata (dimensions, GPS, camera, and the
+//!    file size that size-sort and the size/GPS filters depend on).
+//! 3. **`Embeddings`** — CLIP-embed each image from its 300 px thumbnail and
 //!    store the vector.
-//! 3. **`FullThumbnails`** — Generate the 512 px and 2048 px renditions for
+//! 4. **`FullThumbnails`** — Generate the 512 px and 2048 px renditions for
 //!    the GUI grid, detail panel, and lightbox.
 //!
 //! `ProcessPhase` and `ProcessCounts` are pure value types; every function that
@@ -24,11 +26,13 @@ use crate::{
     ThumbnailSize, block_on, database::Database, metadata::extract_missing_metadata, thumbnail,
 };
 
-/// The three phases of background processing, in execution order.
+/// The four phases of background processing, in execution order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessPhase {
     /// Generate 300 px thumbnails (prerequisite for embedding).
     Thumbnails300,
+    /// Backfill EXIF metadata (file size, dimensions, GPS, camera).
+    Metadata,
     /// CLIP-embed images from their 300 px thumbnails.
     Embeddings,
     /// Generate 512 px and 2048 px renditions for the GUI.
@@ -39,6 +43,7 @@ impl fmt::Display for ProcessPhase {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Thumbnails300 => "300px thumbnails",
+            Self::Metadata => "EXIF metadata",
             Self::Embeddings => "Embeddings",
             Self::FullThumbnails => "Full thumbnails (512/2048)",
         })
@@ -50,6 +55,8 @@ impl fmt::Display for ProcessPhase {
 pub struct ProcessCounts {
     /// Images missing a 300 px thumbnail.
     pub thumbs300: usize,
+    /// Images missing an `image_metadata` row (EXIF backfill).
+    pub metadata: usize,
     /// Images missing a CLIP embedding in the active model's vector table.
     pub embeddings: usize,
     /// Sum of images missing 512 px and 2048 px thumbnails.
@@ -59,15 +66,17 @@ pub struct ProcessCounts {
 impl ProcessCounts {
     /// Total remaining work across all phases.
     pub fn total_remaining(&self) -> usize {
-        self.thumbs300 + self.embeddings + self.full_thumbs
+        self.thumbs300 + self.metadata + self.embeddings + self.full_thumbs
     }
 
     /// The first phase that still has remaining work, in the fixed execution
-    /// order: `Thumbnails300` → `Embeddings` → `FullThumbnails`.
+    /// order: `Thumbnails300` → `Metadata` → `Embeddings` → `FullThumbnails`.
     /// Returns `None` when every phase is drained.
     pub fn next_phase(&self) -> Option<ProcessPhase> {
         if self.thumbs300 > 0 {
             Some(ProcessPhase::Thumbnails300)
+        } else if self.metadata > 0 {
+            Some(ProcessPhase::Metadata)
         } else if self.embeddings > 0 {
             Some(ProcessPhase::Embeddings)
         } else if self.full_thumbs > 0 {
@@ -86,6 +95,10 @@ pub async fn counts(db: &Database) -> Result<ProcessCounts> {
         .count_images_without_thumbnails(ThumbnailSize(300))
         .await
         .context("count missing 300px thumbnails")?;
+    let metadata = db
+        .count_images_without_metadata()
+        .await
+        .context("count missing metadata")?;
     let embeddings = db
         .count_images_without_embedding()
         .await
@@ -100,6 +113,7 @@ pub async fn counts(db: &Database) -> Result<ProcessCounts> {
         .context("count missing 2048px thumbnails")?;
     Ok(ProcessCounts {
         thumbs300,
+        metadata,
         embeddings,
         full_thumbs: full512 + full2048,
     })
@@ -169,6 +183,8 @@ pub const FULL_THUMBNAIL_SIZES: [ThumbnailSize; 2] = [ThumbnailSize(512), Thumbn
 ///
 /// - `Thumbnails300` — generate up to `batch` missing 300 px thumbnails.
 ///   `sizes` is ignored.
+/// - `Metadata` — backfill EXIF metadata for up to `batch` images. `sizes` and
+///   `embedder` are ignored.
 /// - `Embeddings` — embed up to `batch` images; `embedder` must be `Some`.
 ///   `sizes` is ignored.
 /// - `FullThumbnails` — for *each* size in `sizes`, generate up to `batch`
@@ -189,6 +205,9 @@ pub fn process_next_batch(
             thumbnail::generate_missing_thumbnails_batch(db, ThumbnailSize(300), batch)
                 .context("generate missing 300px thumbnails batch")
         }
+        ProcessPhase::Metadata => {
+            extract_missing_metadata(db, true, batch).context("backfill EXIF metadata batch")
+        }
         ProcessPhase::Embeddings => {
             let embedder = embedder.context("embedder required for the Embeddings phase")?;
             process_embeddings_batch(db, embedder, batch)
@@ -204,12 +223,12 @@ pub fn process_next_batch(
     }
 }
 
-/// Drive all three processing phases to completion.
+/// Drive all four processing phases to completion.
 ///
-/// Processes phases in fixed order: `Thumbnails300` → `Embeddings` →
-/// `FullThumbnails`. EXIF metadata is backfilled after the 300 px phase drains.
-/// A per-phase zero-progress guard terminates processing if a batch makes no
-/// forward progress (preventing infinite loops on permanently undecodable images).
+/// Processes phases in fixed order: `Thumbnails300` → `Metadata` →
+/// `Embeddings` → `FullThumbnails`. A per-phase zero-progress guard terminates
+/// a phase if a batch makes no forward progress (preventing infinite loops on
+/// permanently undecodable images).
 ///
 /// Delegates all batch work to [`process_next_batch`].
 ///
@@ -249,10 +268,22 @@ pub fn run_to_completion(
         }
     }
 
-    // EXIF backfill immediately after the 300 px phase drains.
-    extract_missing_metadata(db, true, batch).context("EXIF backfill after 300px phase")?;
+    // Phase 2: EXIF metadata backfill (after the 300 px phase drains).
+    loop {
+        let remaining =
+            block_on(db.count_images_without_metadata()).context("count missing metadata")?;
+        if remaining == 0 {
+            break;
+        }
+        let done = process_next_batch(db, embedder, ProcessPhase::Metadata, batch, sizes)
+            .context("Metadata batch")?;
+        progress(ProcessPhase::Metadata, done);
+        if done == 0 {
+            break; // zero-progress guard
+        }
+    }
 
-    // Phase 2: Embeddings.
+    // Phase 3: Embeddings.
     if with_embeddings {
         let emb = embedder.context("embedder required when with_embeddings is set")?;
         loop {
@@ -270,7 +301,7 @@ pub fn run_to_completion(
         }
     }
 
-    // Phase 3: Full thumbnails (driven by the caller-specified `sizes`).
+    // Phase 4: Full thumbnails (driven by the caller-specified `sizes`).
     loop {
         let mut remaining = 0usize;
         for &size in sizes {
@@ -315,6 +346,7 @@ mod tests {
     fn next_phase_walks_in_order_then_none() {
         let c = ProcessCounts {
             thumbs300: 0,
+            metadata: 0,
             embeddings: 0,
             full_thumbs: 0,
         };
@@ -322,6 +354,7 @@ mod tests {
 
         let c = ProcessCounts {
             thumbs300: 0,
+            metadata: 0,
             embeddings: 3,
             full_thumbs: 5,
         };
@@ -329,6 +362,7 @@ mod tests {
 
         let c = ProcessCounts {
             thumbs300: 2,
+            metadata: 4,
             embeddings: 3,
             full_thumbs: 5,
         };
@@ -336,6 +370,7 @@ mod tests {
 
         let c = ProcessCounts {
             thumbs300: 0,
+            metadata: 0,
             embeddings: 0,
             full_thumbs: 4,
         };
@@ -343,16 +378,48 @@ mod tests {
     }
 
     #[test]
+    fn next_phase_metadata_runs_after_thumbs_before_embeddings() {
+        // 300px drained, metadata still pending → Metadata precedes Embeddings.
+        let c = ProcessCounts {
+            thumbs300: 0,
+            metadata: 4,
+            embeddings: 3,
+            full_thumbs: 5,
+        };
+        assert_eq!(c.next_phase(), Some(ProcessPhase::Metadata));
+
+        // 300px still pending → Thumbnails300 wins over a pending Metadata phase.
+        let c = ProcessCounts {
+            thumbs300: 1,
+            metadata: 4,
+            embeddings: 0,
+            full_thumbs: 0,
+        };
+        assert_eq!(c.next_phase(), Some(ProcessPhase::Thumbnails300));
+
+        // Only metadata remains.
+        let c = ProcessCounts {
+            thumbs300: 0,
+            metadata: 2,
+            embeddings: 0,
+            full_thumbs: 0,
+        };
+        assert_eq!(c.next_phase(), Some(ProcessPhase::Metadata));
+    }
+
+    #[test]
     fn total_remaining_sums_all_phases() {
         let c = ProcessCounts {
             thumbs300: 1,
+            metadata: 4,
             embeddings: 2,
             full_thumbs: 3,
         };
-        assert_eq!(c.total_remaining(), 6);
+        assert_eq!(c.total_remaining(), 10);
 
         let c = ProcessCounts {
             thumbs300: 0,
+            metadata: 0,
             embeddings: 0,
             full_thumbs: 0,
         };
@@ -360,10 +427,68 @@ mod tests {
 
         let c = ProcessCounts {
             thumbs300: 10,
+            metadata: 0,
             embeddings: 0,
             full_thumbs: 0,
         };
         assert_eq!(c.total_remaining(), 10);
+    }
+
+    // ── Metadata backfill (the GUI-worker regression guard) ──────────────────
+    //
+    // Pins the invariant that the shared processing model backfills EXIF
+    // metadata (populating `image_metadata.file_size`). Both the CLI `process`
+    // command and the GUI background worker drive this through the `Metadata`
+    // phase; if that phase ever disappears from the shared model again — the
+    // original bug — this test fails. No CLIP weights required.
+    #[test]
+    fn metadata_phase_backfills_file_size() {
+        let db_path = temp_db_path();
+        let mut db = block_on(crate::database::Database::new(&db_path)).expect("create test db");
+        let parent_dir = db_path
+            .parent()
+            .expect(".imgfind dir")
+            .parent()
+            .expect("parent dir")
+            .to_path_buf();
+
+        // Write one small decodable PNG on disk and insert a row-only entry.
+        // Paths are stored relative to the DB parent dir (relative-path invariant).
+        let rel = "meta_fixture.png";
+        let img_path = parent_dir.join(rel);
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+            ImageBuffer::from_fn(16, 16, |x, y| Rgb([(x * 16) as u8, (y * 16) as u8, 0]));
+        img.save(&img_path).expect("save fixture");
+        block_on(db.insert_image_rows_batch(&[(rel.to_string(), "meta_hash".to_string())]))
+            .expect("insert rows");
+
+        // Before processing the image has no metadata row.
+        let missing_before =
+            block_on(db.count_images_without_metadata()).expect("count metadata before");
+        assert_eq!(missing_before, 1, "fixture should be awaiting metadata");
+
+        // Drive the Metadata phase through the shared batch entry point (the same
+        // path the GUI worker uses). No embedder is needed for this phase.
+        let done = process_next_batch(&mut db, None, ProcessPhase::Metadata, 16, &[])
+            .expect("metadata batch");
+        assert_eq!(done, 1, "one image should be extracted this batch");
+
+        let missing_after =
+            block_on(db.count_images_without_metadata()).expect("count metadata after");
+        assert_eq!(missing_after, 0, "no images should remain without metadata");
+
+        // The load-bearing assertion: file_size is now populated and non-zero,
+        // which is what size-sort / the size filter / detail metadata depend on.
+        let meta = block_on(db.get_image_metadata(&crate::RelativePath(rel.into())))
+            .expect("read metadata")
+            .expect("metadata row present");
+        assert!(
+            matches!(meta.file_size, Some(n) if n > 0),
+            "file_size must be populated (> 0), got {:?}",
+            meta.file_size
+        );
+
+        let _ = std::fs::remove_dir_all(&parent_dir);
     }
 
     // ── Embedder round-trip test (requires CLIP model weights) ───────────────

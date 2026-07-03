@@ -7,10 +7,21 @@ use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use tracing::{debug, info, warn};
 
-pub fn extract_missing_metadata(db: &mut Database, quiet: bool, count: usize) -> Result<()> {
+/// Extract and store EXIF metadata for up to `count` images that currently have
+/// no `image_metadata` row. Returns the number of images whose metadata was
+/// successfully extracted and stored (drives the zero-progress guard in the
+/// background processing loop).
+///
+/// Extraction is parallel (rayon), DB writes are serial. `quiet` suppresses the
+/// progress bar and stdout summary (used by the background workers).
+pub fn extract_missing_metadata(db: &mut Database, quiet: bool, count: usize) -> Result<usize> {
     let images_without_metadata = block_on(db.get_images_without_metadata(count))?;
 
-    if !images_without_metadata.is_empty() {
+    if images_without_metadata.is_empty() {
+        return Ok(0);
+    }
+
+    {
         if !quiet {
             println!(
                 "Found {} images missing metadata, extracting...",
@@ -99,7 +110,7 @@ pub fn extract_missing_metadata(db: &mut Database, quiet: bool, count: usize) ->
             "Metadata backfill complete: {} extracted, {} failed",
             metadata_extracted, failed
         );
-    }
 
-    Ok(())
+        Ok(metadata_extracted)
+    }
 }
