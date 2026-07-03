@@ -477,7 +477,7 @@ export component MainWindow inherits Window {
                     root.lightbox-next();
                     return accept;
                 }
-                if (root.is-chord-key(event.text) && event.text != "g" && event.text != "G") {
+                if (root.is-chord-key(event.text)) {
                     root.key(event.text);
                     return accept;
                 }

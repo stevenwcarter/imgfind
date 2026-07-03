@@ -2570,6 +2570,12 @@ fn main() -> Result<()> {
                     );
                 }
                 chords::Action::JumpFirst | chords::Action::JumpLast => {
+                    // Grid-only: ignore the jump while the lightbox owns the
+                    // screen. g/G are still forwarded there so `m g` / `f g`
+                    // green-brush chords keep working on the lightbox image.
+                    if w.get_lightbox_open() {
+                        return;
+                    }
                     let len = state_ref.lock().results().len();
                     let target = if len == 0 {
                         None
