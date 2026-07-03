@@ -1442,6 +1442,24 @@ impl Database {
         Ok(n as usize)
     }
 
+    /// Count thumbnail-failure markers recorded for `hash` (across all sizes).
+    /// Test/diagnostic helper.
+    pub async fn thumbnail_failure_count(&self, hash: &str) -> Result<usize> {
+        let conn = self
+            .pool
+            .get()
+            .await
+            .context("get connection to count thumbnail failures")?;
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM thumbnail_failures WHERE image_hash = ?1",
+                (hash.to_string(),),
+            )
+            .await?;
+        let row = rows.next().await?.context("COUNT returned no row")?;
+        Ok(col_i64(&row, 0, "count")? as usize)
+    }
+
     /// Insert or update metadata for an image.
     pub async fn insert_or_update_metadata(
         &self,
