@@ -123,7 +123,7 @@ Click a thumbnail to open a **detail panel** on the right (512px thumbnail + met
 
 The **filter bar** beneath the search bar includes a "Hide failed" toggle that excludes images with a permanent thumbnail failure marker (images whose decode failed irreparably). Use this to hide broken files from the grid; use `imgfind process --retry-failed` on the command line to clear the markers and re-attempt.
 
-Keyboard navigation: `h/j/k/l` or arrow keys move the selection; `Enter` opens the detail panel; `Space` opens the lightbox; `Esc` closes the panel.
+Keyboard navigation: `h/j/k/l` or arrow keys move the selection; `gg` jumps to the first tile and `G` to the last (grid only); `Enter` opens the detail panel; `Space` opens the lightbox; `Esc` closes the panel.
 
 #### Tagging
 
