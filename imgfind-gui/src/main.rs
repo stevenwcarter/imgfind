@@ -33,6 +33,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use slint::{Image, Model, ModelRc, SharedString, Timer, TimerMode, VecModel, Weak};
 
+use crate::selection::Selection;
 use crate::sort_option::SortOption;
 use backend::Backend;
 use detail::{DetailState, filename_of, format_metadata, select};
@@ -1796,23 +1797,15 @@ fn main() -> Result<()> {
                 grid_index::GridCols(cols_i.max(0) as usize),
                 grid_index::ItemCount(len),
             );
-            *selected_ref.lock() = new;
-            // Move the multi-selection cursor so a Range selection grows/shrinks
-            // live as the cursor moves (a no-op in Normal mode). Drop the guard
-            // before any `invoke_*`/`set_*` to avoid re-entrant deadlock.
-            if let Some(i) = new {
-                selection_ref.lock().cursor_moved(i);
-            }
-            selection_dirty_ref.store(true, Ordering::Relaxed);
             if let Some(w) = weak.upgrade() {
-                w.set_selected_index(new.map(|i| i as i32).unwrap_or(-1));
-                // Live-update the detail panel only if it is already open.
-                if let Some(i) = new
-                    && w.get_detail_open()
-                {
-                    w.invoke_tile_selected(i as i32);
-                }
-                push_statusline(&w, &selection_ref, &state_ref);
+                apply_grid_target(
+                    new,
+                    &selected_ref,
+                    &selection_ref,
+                    &selection_dirty_ref,
+                    &state_ref,
+                    &w,
+                );
             }
         });
     }
@@ -2467,6 +2460,7 @@ fn main() -> Result<()> {
         let detail_ref = Arc::clone(&detail);
         let selected_ref = Arc::clone(&selected);
         let selection_ref = Arc::clone(&selection);
+        let selection_dirty_ref = Arc::clone(&selection_dirty);
         let sel_handles = sel_handles.clone();
         let lb_ref = Arc::clone(&lb_index);
         let state_ref = Arc::clone(&state);
@@ -2487,7 +2481,10 @@ fn main() -> Result<()> {
             };
 
             // Arm an ~800ms reset while a prefix is pending; otherwise cancel it.
-            if matches!(next, chords::Pending::AwaitM | chords::Pending::AwaitF) {
+            if matches!(
+                next,
+                chords::Pending::AwaitM | chords::Pending::AwaitF | chords::Pending::AwaitG
+            ) {
                 let pc = Arc::clone(&pending_chord);
                 chord_timer.start(
                     TimerMode::SingleShot,
@@ -2570,6 +2567,30 @@ fn main() -> Result<()> {
                         backend_key.clone(),
                         new_filters,
                         sel_handles.clone(),
+                    );
+                }
+                chords::Action::JumpFirst | chords::Action::JumpLast => {
+                    // Grid-only: ignore the jump while the lightbox owns the
+                    // screen. g/G are still forwarded there so `m g` / `f g`
+                    // green-brush chords keep working on the lightbox image.
+                    if w.get_lightbox_open() {
+                        return;
+                    }
+                    let len = state_ref.lock().results().len();
+                    let target = if len == 0 {
+                        None
+                    } else if matches!(action, chords::Action::JumpFirst) {
+                        Some(0)
+                    } else {
+                        Some(len - 1)
+                    };
+                    apply_grid_target(
+                        target,
+                        &selected_ref,
+                        &selection_ref,
+                        &selection_dirty_ref,
+                        &state_ref,
+                        &w,
                     );
                 }
             }
@@ -3707,7 +3728,7 @@ fn rebuild_window(
 /// only briefly and never across a re-entrant `invoke_*`.
 fn push_statusline(
     w: &MainWindow,
-    selection: &Arc<Mutex<selection::Selection>>,
+    selection: &Arc<Mutex<Selection>>,
     state: &Arc<Mutex<SearchState>>,
 ) {
     let line = {
@@ -3716,6 +3737,36 @@ fn push_statusline(
         format_statusline(&sel, s.results())
     };
     w.set_statusline(line.into());
+}
+
+/// Apply a grid cursor move to `target` (None = clear selection): updates the
+/// selected index, moves the multi-selection cursor (extends a Range/Free
+/// selection), marks the selection dirty, syncs `selected-index` (scrolls the
+/// tile into view via the `changed selected-index` hook), live-updates the
+/// detail panel if open, and refreshes the statusline. Shared by keyboard
+/// hjkl/arrow nav and the gg/G first/last jumps.
+fn apply_grid_target(
+    target: Option<usize>,
+    selected: &Arc<Mutex<Option<usize>>>,
+    selection: &Arc<Mutex<Selection>>,
+    selection_dirty: &Arc<AtomicBool>,
+    state: &Arc<Mutex<SearchState>>,
+    w: &MainWindow,
+) {
+    *selected.lock() = target;
+    // Move the multi-selection cursor so a Range selection grows/shrinks live
+    // (a no-op in Normal mode). Guard dropped before any invoke_*/set_*.
+    if let Some(i) = target {
+        selection.lock().cursor_moved(i);
+    }
+    selection_dirty.store(true, Ordering::Relaxed);
+    w.set_selected_index(target.map(|i| i as i32).unwrap_or(-1));
+    if let Some(i) = target
+        && w.get_detail_open()
+    {
+        w.invoke_tile_selected(i as i32);
+    }
+    push_statusline(w, selection, state);
 }
 
 fn status_text_for(vs: ViewState, error_msg: Option<&str>) -> slint::SharedString {

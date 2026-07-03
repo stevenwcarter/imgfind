@@ -279,7 +279,8 @@ export component MainWindow inherits Window {
     // Centralized so the lightbox branch and the grid branch forward the same set.
     pure function is-chord-key(t: string) -> bool {
         return t == "`" || t == "t" || t == "m" || t == "f"
-            || t == "r" || t == "g" || t == "y" || t == "p" || t == "b";
+            || t == "r" || t == "g" || t == "y" || t == "p" || t == "b"
+            || t == "G";
     }
 
     // Keyboard-navigation selection: index into `tiles` of the highlighted tile,
