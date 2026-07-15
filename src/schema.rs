@@ -552,7 +552,7 @@ mod tests {
             .unwrap()
             .as_integer()
             .copied();
-        assert_eq!(v, Some(LATEST_MIGRATION_VERSION as i64));
+        assert_eq!(v, Some(7i64));
     }
 
     #[tokio::test]
