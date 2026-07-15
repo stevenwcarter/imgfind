@@ -2,11 +2,14 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
+use image::DynamicImage;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
+use tokio::time;
 
 use crate::database::Database;
 use crate::decode::decode_image;
@@ -16,39 +19,78 @@ use crate::telnet::protocol::{TelnetEvent, TelnetParser, initial_negotiation};
 use crate::telnet::render::render_halfblock;
 use crate::units::{DistanceThreshold, MaxK};
 
-/// Which screen the client is currently looking at.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Screen {
-    Login,
-    SearchBox,
-    Results,
-    NoResults,
-}
-
 /// Map a cosine distance in [0, 2] to a 0-100 "match" percentage.
 pub fn match_percent(distance: f32) -> u8 {
     let pct = ((1.0 - distance / 2.0) * 100.0).round();
     pct.clamp(0.0, 100.0) as u8
 }
 
-/// Given the current screen and a pressed byte, decide the next screen.
-/// `has_art` is whether a result is currently rendered (affects Esc).
-pub fn next_screen_on_key(current: Screen, byte: u8, has_art: bool) -> Screen {
-    match current {
-        Screen::Results => Screen::SearchBox,
-        Screen::NoResults => Screen::SearchBox,
-        Screen::SearchBox => {
-            if byte == ESC {
-                if has_art {
-                    Screen::Results
-                } else {
-                    Screen::SearchBox
-                }
-            } else {
-                Screen::SearchBox
-            }
-        }
-        Screen::Login => Screen::Login,
+/// An action decoded from the leading key/escape-sequence of a results-screen
+/// input buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResultsAction {
+    /// Bare Esc while info is shown: hide the caption/hint chrome.
+    HideInfo,
+    /// `h` or Left-arrow (`ESC [ D`): previous image.
+    Prev,
+    /// `l` or Right-arrow (`ESC [ C`): next image.
+    Next,
+    /// Any other ordinary key: return to the search box.
+    ToSearch,
+    /// Bare Esc while info is already hidden, or an ignored escape sequence
+    /// (e.g. up/down arrow): do nothing.
+    Noop,
+    /// A possibly-incomplete escape sequence; the caller should read more
+    /// bytes before deciding.
+    NeedMore,
+}
+
+/// A bare Esc resolves to `HideInfo` if info is currently shown, else `Noop`.
+fn bare_esc(info_shown: bool) -> ResultsAction {
+    if info_shown {
+        ResultsAction::HideInfo
+    } else {
+        ResultsAction::Noop
+    }
+}
+
+/// Decode the first key/sequence from `data`. `info_shown` disambiguates a
+/// bare Esc (hide vs. no-op). `complete = true` means no more bytes will
+/// arrive, so a trailing lone Esc (or an incomplete CSI sequence) must be
+/// finalized rather than reported as `NeedMore`. Returns
+/// `(action, bytes_consumed)`; `NeedMore` always consumes 0.
+pub fn results_action(data: &[u8], info_shown: bool, complete: bool) -> (ResultsAction, usize) {
+    let Some(&first) = data.first() else {
+        return (ResultsAction::Noop, 0);
+    };
+    if first != ESC {
+        return match first {
+            b'h' => (ResultsAction::Prev, 1),
+            b'l' => (ResultsAction::Next, 1),
+            _ => (ResultsAction::ToSearch, 1),
+        };
+    }
+
+    // Leading byte is Esc: either a bare Esc, or the start of a CSI arrow
+    // sequence (`ESC [ <final>`).
+    let Some(&second) = data.get(1) else {
+        return if complete {
+            (bare_esc(info_shown), 1)
+        } else {
+            (ResultsAction::NeedMore, 0)
+        };
+    };
+    if second != b'[' {
+        // Esc followed by a byte other than '[' can't be an arrow sequence,
+        // so it resolves immediately regardless of `complete`.
+        return (bare_esc(info_shown), 1);
+    }
+    match data.get(2) {
+        None if complete => (ResultsAction::Noop, data.len()),
+        None => (ResultsAction::NeedMore, 0),
+        Some(b'D') => (ResultsAction::Prev, 3),
+        Some(b'C') => (ResultsAction::Next, 3),
+        Some(_) => (ResultsAction::Noop, 3),
     }
 }
 
@@ -173,57 +215,151 @@ pub async fn run(mut stream: TcpStream, ctx: SessionCtx) -> Result<()> {
             }
         };
 
-        // Search top result.
+        // Top 5 results, navigable.
         let engine = SearchEngine::new(&ctx.db);
         let results = engine
             .search(&embedding, 5, ctx.threshold, ctx.max_k)
             .await?;
 
-        // Find the first result whose image decodes.
-        let mut shown: Option<(String, f32, image::DynamicImage)> = None;
-        for (rel, dist) in &results {
-            let abs = relative_to_abs_path(Path::new(rel), &ctx.db.parent_dir);
-            let decoded = tokio::task::spawn_blocking({
-                let abs = abs.clone();
-                move || decode_image(&abs)
-            })
-            .await;
-            if let Ok(Ok(img)) = decoded {
-                shown = Some((rel.clone(), *dist, img));
-                break;
-            }
-        }
+        // Lazily decode each result on first visit, skipping ones that fail.
+        let mut cache: Vec<DecodeState> =
+            (0..results.len()).map(|_| DecodeState::NotTried).collect();
+        let Some(mut idx) = first_decodable(&mut cache, &results, &ctx.db.parent_dir, 0).await
+        else {
+            write_str(
+                &mut stream,
+                &format!(
+                    "\x1b[2J\x1b[H\r\nNo matches for \"{}\".\r\n(any key: search)",
+                    query.trim()
+                ),
+            )
+            .await?;
+            wait_any_key(&mut stream, &mut parser, &mut buf, &mut cols, &mut rows).await?;
+            continue;
+        };
 
-        match shown {
-            Some((rel, dist, img)) => {
-                let art = render_halfblock(&img, cols, rows.saturating_sub(2).max(1));
-                let filename = Path::new(&rel)
-                    .file_name()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| rel.clone());
-                let pct = match_percent(dist);
-                let screen = format!(
-                    "\x1b[2J\x1b[H{art}\x1b[0m\r\n{}\r\n(any key: search \u{00b7} Esc: dismiss)",
-                    caption(&filename, pct)
-                );
-                write_str(&mut stream, &screen).await?;
-                current_art = Some(screen);
-                // Any key returns to the search box (top of loop).
-                wait_any_key(&mut stream, &mut parser, &mut buf, &mut cols, &mut rows).await?;
-            }
-            None => {
-                write_str(
-                    &mut stream,
-                    &format!(
-                        "\x1b[2J\x1b[H\r\nNo matches for \"{}\".\r\n(any key: search)",
-                        query.trim()
-                    ),
-                )
-                .await?;
-                wait_any_key(&mut stream, &mut parser, &mut buf, &mut cols, &mut rows).await?;
+        // Results screen: navigate with h/l or arrow keys, Esc hides the
+        // caption/hint chrome, any other key returns to the search box.
+        let mut show_info = true;
+        loop {
+            let (rel, dist) = &results[idx];
+            let filename = Path::new(rel)
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| rel.clone());
+            let pct = match_percent(*dist);
+            let img = match &cache[idx] {
+                DecodeState::Decoded(img) => img,
+                DecodeState::NotTried | DecodeState::Failed => {
+                    unreachable!("idx always points at an already-decoded entry")
+                }
+            };
+            let screen = render_result_screen(img, cols, rows, &filename, pct, show_info);
+            write_str(&mut stream, &screen).await?;
+            current_art = Some(screen);
+
+            let action = match read_results_action(
+                &mut stream,
+                &mut parser,
+                &mut buf,
+                &mut cols,
+                &mut rows,
+                show_info,
+            )
+            .await?
+            {
+                Some(a) => a,
+                None => return Ok(()), // EOF
+            };
+
+            match action {
+                ResultsAction::HideInfo => show_info = false,
+                ResultsAction::Prev => {
+                    if let Some(new_idx) =
+                        step_decodable(&mut cache, &results, &ctx.db.parent_dir, idx, -1).await
+                    {
+                        idx = new_idx;
+                    }
+                }
+                ResultsAction::Next => {
+                    if let Some(new_idx) =
+                        step_decodable(&mut cache, &results, &ctx.db.parent_dir, idx, 1).await
+                    {
+                        idx = new_idx;
+                    }
+                }
+                ResultsAction::Noop => {}
+                ResultsAction::ToSearch => break,
+                ResultsAction::NeedMore => {
+                    unreachable!("read_results_action resolves NeedMore internally")
+                }
             }
         }
     }
+}
+
+/// Decode outcome for one search result, cached lazily since not every
+/// navigable position is visited in a session.
+enum DecodeState {
+    NotTried,
+    Failed,
+    Decoded(DynamicImage),
+}
+
+/// Decode result `i` on first visit and cache the outcome; a cache hit is
+/// free. Returns `true` if the image is (now) decodable.
+async fn ensure_decoded(
+    cache: &mut [DecodeState],
+    results: &[(String, f32)],
+    parent_dir: &Path,
+    i: usize,
+) -> bool {
+    if matches!(cache[i], DecodeState::NotTried) {
+        let abs = relative_to_abs_path(Path::new(&results[i].0), parent_dir);
+        let decoded = tokio::task::spawn_blocking(move || decode_image(&abs)).await;
+        cache[i] = match decoded {
+            Ok(Ok(img)) => DecodeState::Decoded(img),
+            _ => DecodeState::Failed,
+        };
+    }
+    matches!(cache[i], DecodeState::Decoded(_))
+}
+
+/// Find the first decodable index at or after `from` (inclusive), skipping
+/// results that fail to decode. Returns `None` if none decode.
+async fn first_decodable(
+    cache: &mut [DecodeState],
+    results: &[(String, f32)],
+    parent_dir: &Path,
+    from: usize,
+) -> Option<usize> {
+    for i in from..results.len() {
+        if ensure_decoded(cache, results, parent_dir, i).await {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Move one position from `from` in `dir` (+1 or -1), skipping results that
+/// fail to decode, with no wraparound. Returns `None` if `from` is already at
+/// that end (or every remaining candidate fails to decode).
+async fn step_decodable(
+    cache: &mut [DecodeState],
+    results: &[(String, f32)],
+    parent_dir: &Path,
+    from: usize,
+    dir: i32,
+) -> Option<usize> {
+    let mut i = from as i64 + i64::from(dir);
+    while i >= 0 && (i as usize) < results.len() {
+        let idx = i as usize;
+        if ensure_decoded(cache, results, parent_dir, idx).await {
+            return Some(idx);
+        }
+        i += i64::from(dir);
+    }
+    None
 }
 
 enum QueryOutcome {
@@ -356,6 +492,83 @@ async fn wait_any_key(
     }
 }
 
+/// Render one results-screen frame. When `show_info` the art is shrunk by 2
+/// rows to make room for a caption + hint line; when hidden the art alone
+/// fills the full terminal height. Always clears the screen first.
+fn render_result_screen(
+    img: &DynamicImage,
+    cols: u16,
+    rows: u16,
+    filename: &str,
+    pct: u8,
+    show_info: bool,
+) -> String {
+    let art_rows = if show_info {
+        rows.saturating_sub(2).max(1)
+    } else {
+        rows.max(1)
+    };
+    let art = render_halfblock(img, cols, art_rows);
+    if show_info {
+        format!(
+            "\x1b[2J\x1b[H{art}\x1b[0m\r\n{}\r\n(h/l: prev/next \u{00b7} Esc: hide info \u{00b7} any key: search)",
+            caption(filename, pct)
+        )
+    } else {
+        format!("\x1b[2J\x1b[H{art}")
+    }
+}
+
+/// Read one results-screen action, resolving the Esc/arrow ambiguity with a
+/// short follow-up read when the leading bytes could be either. Returns
+/// `Ok(None)` on EOF. Only the first key/sequence in a read is handled — a
+/// pasted burst of multiple keys is not expected on this interactive screen,
+/// and any trailing bytes are simply dropped rather than mis-attributed to a
+/// later render.
+async fn read_results_action(
+    stream: &mut TcpStream,
+    parser: &mut TelnetParser,
+    buf: &mut [u8],
+    cols: &mut u16,
+    rows: &mut u16,
+    info_shown: bool,
+) -> Result<Option<ResultsAction>> {
+    let mut data = loop {
+        match pump(stream, parser, buf, cols, rows).await? {
+            None => return Ok(None), // EOF
+            Some(d) if !d.is_empty() => break d,
+            Some(_) => continue, // only negotiation/NAWS arrived; keep waiting
+        }
+    };
+
+    let (action, _) = results_action(&data, info_shown, false);
+    if action != ResultsAction::NeedMore {
+        return Ok(Some(action));
+    }
+
+    // Possibly-incomplete escape sequence: give the client one short window
+    // to finish sending it (arrow keys arrive as 3 bytes in quick succession)
+    // before finalizing a trailing lone Esc as a real bare Esc.
+    match time::timeout(
+        Duration::from_millis(200),
+        pump(stream, parser, buf, cols, rows),
+    )
+    .await
+    {
+        Ok(Ok(Some(more))) => {
+            data.extend(more);
+            let (action, _) = results_action(&data, info_shown, true);
+            Ok(Some(action))
+        }
+        Ok(Ok(None)) => Ok(None), // EOF
+        Ok(Err(e)) => Err(e),
+        Err(_elapsed) => {
+            let (action, _) = results_action(&data, info_shown, true);
+            Ok(Some(action))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,46 +584,114 @@ mod tests {
     }
 
     #[test]
-    fn any_key_on_results_opens_search_box() {
-        assert_eq!(
-            next_screen_on_key(Screen::Results, b'x', true),
-            Screen::SearchBox
-        );
-        assert_eq!(
-            next_screen_on_key(Screen::Results, b' ', true),
-            Screen::SearchBox
-        );
-    }
-
-    #[test]
-    fn esc_in_search_box_returns_to_results_when_art_exists() {
-        // ESC = 0x1b
-        assert_eq!(
-            next_screen_on_key(Screen::SearchBox, 0x1b, true),
-            Screen::Results
-        );
-    }
-
-    #[test]
-    fn esc_in_search_box_with_no_art_stays_in_search_box() {
-        assert_eq!(
-            next_screen_on_key(Screen::SearchBox, 0x1b, false),
-            Screen::SearchBox
-        );
-    }
-
-    #[test]
-    fn any_key_on_no_results_opens_search_box() {
-        assert_eq!(
-            next_screen_on_key(Screen::NoResults, b'k', false),
-            Screen::SearchBox
-        );
-    }
-
-    #[test]
     fn caption_includes_filename_and_percent() {
         let c = caption("beach.jpg", 92);
         assert!(c.contains("beach.jpg"));
         assert!(c.contains("92%"));
+    }
+
+    #[test]
+    fn results_action_h_is_prev() {
+        assert_eq!(results_action(b"h", true, true), (ResultsAction::Prev, 1));
+    }
+
+    #[test]
+    fn results_action_l_is_next() {
+        assert_eq!(results_action(b"l", true, true), (ResultsAction::Next, 1));
+    }
+
+    #[test]
+    fn results_action_left_arrow_is_prev() {
+        assert_eq!(
+            results_action(b"\x1b[D", true, true),
+            (ResultsAction::Prev, 3)
+        );
+    }
+
+    #[test]
+    fn results_action_right_arrow_is_next() {
+        assert_eq!(
+            results_action(b"\x1b[C", true, true),
+            (ResultsAction::Next, 3)
+        );
+    }
+
+    #[test]
+    fn results_action_up_arrow_is_noop() {
+        assert_eq!(
+            results_action(b"\x1b[A", true, true),
+            (ResultsAction::Noop, 3)
+        );
+    }
+
+    #[test]
+    fn results_action_ordinary_key_goes_to_search() {
+        assert_eq!(results_action(b"x", true, true), (ResultsAction::ToSearch, 1));
+    }
+
+    #[test]
+    fn results_action_cr_goes_to_search() {
+        // CR/LF count as "any other key".
+        assert_eq!(results_action(b"\r", true, true), (ResultsAction::ToSearch, 1));
+    }
+
+    #[test]
+    fn results_action_finalized_bare_esc_hides_info_when_shown() {
+        assert_eq!(
+            results_action(b"\x1b", true, true),
+            (ResultsAction::HideInfo, 1)
+        );
+    }
+
+    #[test]
+    fn results_action_finalized_bare_esc_is_noop_when_already_hidden() {
+        assert_eq!(
+            results_action(b"\x1b", false, true),
+            (ResultsAction::Noop, 1)
+        );
+    }
+
+    #[test]
+    fn results_action_lone_esc_not_complete_needs_more() {
+        assert_eq!(
+            results_action(b"\x1b", true, false),
+            (ResultsAction::NeedMore, 0)
+        );
+    }
+
+    #[test]
+    fn results_action_incomplete_csi_not_complete_needs_more() {
+        assert_eq!(
+            results_action(b"\x1b[", true, false),
+            (ResultsAction::NeedMore, 0)
+        );
+    }
+
+    #[test]
+    fn results_action_incomplete_csi_finalized_is_noop() {
+        assert_eq!(
+            results_action(b"\x1b[", true, true),
+            (ResultsAction::Noop, 2)
+        );
+    }
+
+    #[test]
+    fn results_action_empty_is_noop() {
+        assert_eq!(results_action(b"", true, true), (ResultsAction::Noop, 0));
+    }
+
+    #[test]
+    fn results_action_esc_followed_by_non_csi_byte_resolves_immediately() {
+        // Esc immediately followed by a byte other than '[' can't be the
+        // start of an arrow sequence, so it resolves as a bare Esc without
+        // waiting for more bytes — even when `complete` is false.
+        assert_eq!(
+            results_action(b"\x1bq", true, false),
+            (ResultsAction::HideInfo, 1)
+        );
+        assert_eq!(
+            results_action(b"\x1bq", false, true),
+            (ResultsAction::Noop, 1)
+        );
     }
 }
