@@ -4,3 +4,4 @@
 //! See `docs/superpowers/specs/2026-07-14-telnet-search-server-design.md`.
 
 pub mod auth;
+pub mod protocol;
