@@ -17,7 +17,7 @@ use anyhow::{Context, Result};
 use crate::EmbeddingDim;
 
 /// The highest migration version applied by this module.
-pub const LATEST_MIGRATION_VERSION: i32 = 6;
+pub const LATEST_MIGRATION_VERSION: i32 = 7;
 
 /// Derive a safe SQL identifier from a model name.
 ///
@@ -133,6 +133,11 @@ pub async fn run_migrations(conn: &turso::Connection) -> Result<()> {
         migration_006_thumbnail_failures(conn)
             .await
             .context("migration 6 (thumbnail failures)")?;
+    }
+    if current < 7 {
+        migration_007_telnet_users(conn)
+            .await
+            .context("migration 7 (telnet users)")?;
     }
     if current < LATEST_MIGRATION_VERSION {
         conn.execute(
@@ -417,6 +422,22 @@ async fn migration_006_thumbnail_failures(conn: &turso::Connection) -> Result<()
     Ok(())
 }
 
+/// Migration 7: telnet user accounts (username + Argon2 password hash).
+async fn migration_007_telnet_users(conn: &turso::Connection) -> Result<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS telnet_users (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            username TEXT NOT NULL UNIQUE, \
+            password_hash TEXT NOT NULL, \
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP\
+        )",
+        (),
+    )
+    .await
+    .context("create telnet_users")?;
+    Ok(())
+}
+
 /// Migration 4: image edits table for brightness/exposure adjustments.
 async fn migration_004_image_edits(conn: &turso::Connection) -> Result<()> {
     conn.execute(
@@ -486,6 +507,13 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn migration_007_creates_telnet_users() {
+        let conn = mem().await;
+        run_migrations(&conn).await.unwrap();
+        assert!(table_exists(&conn, "telnet_users").await);
+    }
+
+    #[tokio::test]
     async fn migrations_are_idempotent_and_create_tables() {
         let conn = mem().await;
         run_migrations(&conn).await.unwrap();
@@ -505,6 +533,7 @@ mod tests {
             "models",
             "ui_state",
             "image_edits",
+            "telnet_users",
             "schema_meta",
         ] {
             assert!(table_exists(&conn, t).await, "missing table {t}");
@@ -523,7 +552,7 @@ mod tests {
             .unwrap()
             .as_integer()
             .copied();
-        assert_eq!(v, Some(6i64));
+        assert_eq!(v, Some(7i64));
     }
 
     #[tokio::test]

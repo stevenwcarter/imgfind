@@ -171,6 +171,13 @@ pub struct ModelInfo {
     pub table: String,
 }
 
+/// A telnet account row: username and its Argon2 password hash.
+#[derive(Debug, Clone)]
+pub struct TelnetUser {
+    pub username: String,
+    pub password_hash: String,
+}
+
 impl Database {
     /// The currently active embedding model (the single `models` row with
     /// `is_active = 1`).
@@ -1848,6 +1855,72 @@ impl Database {
             .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
             .collect())
     }
+
+    /// Insert a telnet user. Errors on duplicate username (UNIQUE constraint).
+    pub async fn add_telnet_user(&self, username: &str, password_hash: &str) -> Result<()> {
+        let conn = self.pool.get().await.context("get connection")?;
+        conn.execute(
+            "INSERT INTO telnet_users (username, password_hash) VALUES (?1, ?2)",
+            (username.to_string(), password_hash.to_string()),
+        )
+        .await
+        .with_context(|| format!("add telnet user '{username}'"))?;
+        Ok(())
+    }
+
+    /// Look up a telnet user by username.
+    pub async fn get_telnet_user(&self, username: &str) -> Result<Option<TelnetUser>> {
+        let conn = self.pool.get().await.context("get connection")?;
+        let mut rows = conn
+            .query(
+                "SELECT username, password_hash FROM telnet_users WHERE username = ?1",
+                (username.to_string(),),
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        Ok(Some(TelnetUser {
+            username: col_text(&row, 0, "username")?,
+            password_hash: col_text(&row, 1, "password_hash")?,
+        }))
+    }
+
+    /// List all telnet usernames, alphabetically.
+    pub async fn list_telnet_users(&self) -> Result<Vec<String>> {
+        let conn = self.pool.get().await.context("get connection")?;
+        let mut rows = conn
+            .query("SELECT username FROM telnet_users ORDER BY username", ())
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push(col_text(&row, 0, "username")?);
+        }
+        Ok(out)
+    }
+
+    /// Remove a telnet user. Returns true if a row was deleted.
+    pub async fn remove_telnet_user(&self, username: &str) -> Result<bool> {
+        let conn = self.pool.get().await.context("get connection")?;
+        let affected = conn
+            .execute(
+                "DELETE FROM telnet_users WHERE username = ?1",
+                (username.to_string(),),
+            )
+            .await
+            .with_context(|| format!("remove telnet user '{username}'"))?;
+        Ok(affected > 0)
+    }
+
+    /// Count telnet users.
+    pub async fn count_telnet_users(&self) -> Result<usize> {
+        let conn = self.pool.get().await.context("get connection")?;
+        let mut rows = conn.query("SELECT COUNT(*) FROM telnet_users", ()).await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(0);
+        };
+        Ok(col_i64(&row, 0, "count")? as usize)
+    }
 }
 
 /// Build a [`crate::sort::RowMeta`] from a `(id, path, file_size)` row, deriving
@@ -3478,5 +3551,33 @@ mod tests {
             1
         );
         assert_eq!(db.count_images_without_embedding().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn telnet_users_crud_roundtrip() {
+        let (db, db_path) = test_db().await;
+
+        assert_eq!(db.count_telnet_users().await.unwrap(), 0);
+        db.add_telnet_user("alice", "phc-hash-a").await.unwrap();
+        db.add_telnet_user("bob", "phc-hash-b").await.unwrap();
+        assert_eq!(db.count_telnet_users().await.unwrap(), 2);
+
+        let mut names = db.list_telnet_users().await.unwrap();
+        names.sort();
+        assert_eq!(names, vec!["alice".to_string(), "bob".to_string()]);
+
+        let alice = db.get_telnet_user("alice").await.unwrap().unwrap();
+        assert_eq!(alice.username, "alice");
+        assert_eq!(alice.password_hash, "phc-hash-a");
+        assert!(db.get_telnet_user("nobody").await.unwrap().is_none());
+
+        // Duplicate username errors.
+        assert!(db.add_telnet_user("alice", "x").await.is_err());
+
+        assert!(db.remove_telnet_user("alice").await.unwrap());
+        assert!(!db.remove_telnet_user("alice").await.unwrap());
+        assert_eq!(db.count_telnet_users().await.unwrap(), 1);
+
+        cleanup(&db_path);
     }
 }

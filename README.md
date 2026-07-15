@@ -15,6 +15,7 @@ The project ships as a **3-crate workspace**: a core `imgfind` binary (CLI + rat
 - **CLI Interface**: Simple command-line interface with helpful status information
 - **Interactive TUI**: Browse results in a ratatui-based terminal UI with inline image previews
 - **Native GUI**: Slint desktop app — virtualized thumbnail grid, detail panel, lightbox, filter bar (size/type/GPS/tags), keyboard navigation, and a keyboard-driven tagging system with color brushes; map view not yet ported
+- **Telnet Search Server (experimental)**: `imgfind telnet` serves search results as color ASCII art over plaintext telnet, with Argon2-hashed account login (`imgfind telnet-user add|list|remove`) — see [USAGE.md](USAGE.md#10-telnet-search-server-experimental)
 - **Shell Completions**: Generate completion scripts for bash, zsh, and fish
 
 ## Installation
