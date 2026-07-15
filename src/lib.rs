@@ -41,6 +41,7 @@ pub mod processing;
 pub mod schema;
 pub mod search;
 pub mod sort;
+pub mod telnet;
 pub mod thumbnail;
 #[cfg(feature = "tui")]
 pub mod tui;
