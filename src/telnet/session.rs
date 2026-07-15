@@ -1,7 +1,7 @@
 //! Per-connection telnet session: negotiate, login, search, render.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -127,6 +127,24 @@ const DEL: u8 = 0x7f;
 /// echoed); backspace/DEL and line-terminating keys still work at the cap.
 const MAX_INPUT_LEN: usize = 1024;
 
+/// Ceilings for client-reported NAWS window size. Far above any real
+/// terminal, but attacker-controlled `cols`/`rows` flow into
+/// `render_halfblock`'s pixel-buffer allocation, so an unclamped
+/// `u16::MAX x u16::MAX` report would try to allocate a multi-gigabyte
+/// buffer and OOM-abort the whole process (killing every connection, not
+/// just this one). `render_halfblock` also clamps defensively on its own
+/// (see `MAX_RENDER_DIM` in `render.rs`); this clamp additionally keeps
+/// `cols`/`rows` themselves sane for anything else that reads them.
+const MAX_TERM_COLS: u16 = 1000;
+const MAX_TERM_ROWS: u16 = 500;
+
+/// A fixed, precomputed Argon2 hash with no matching account, used to pay
+/// the same verification cost on a nonexistent username as on a real one
+/// (see the login loop below).
+static DUMMY_PHC: LazyLock<String> = LazyLock::new(|| {
+    crate::telnet::auth::hash_password("this-account-does-not-exist").unwrap_or_default()
+});
+
 /// Drive one connection to completion. Errors are logged by the caller.
 pub async fn run(mut stream: TcpStream, ctx: SessionCtx) -> Result<()> {
     stream.write_all(&initial_negotiation()).await?;
@@ -163,7 +181,14 @@ pub async fn run(mut stream: TcpStream, ctx: SessionCtx) -> Result<()> {
 
             let ok = match ctx.db.get_telnet_user(username.trim()).await? {
                 Some(u) => crate::telnet::auth::verify_password(&password, &u.password_hash),
-                None => false,
+                None => {
+                    // Pay the same Argon2 verification cost as a real user so
+                    // response timing doesn't leak whether the username
+                    // exists (best-effort mitigation for a plaintext LAN
+                    // service).
+                    let _ = crate::telnet::auth::verify_password(&password, &DUMMY_PHC);
+                    false
+                }
             };
             if ok {
                 break;
@@ -422,10 +447,10 @@ async fn pump(
             TelnetEvent::Data(b) => data.push(b),
             TelnetEvent::WindowSize { cols: c, rows: r } => {
                 if c > 0 {
-                    *cols = c;
+                    *cols = c.min(MAX_TERM_COLS);
                 }
                 if r > 0 {
-                    *rows = r;
+                    *rows = r.min(MAX_TERM_ROWS);
                 }
             }
             TelnetEvent::Negotiation => {}

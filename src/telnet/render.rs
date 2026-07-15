@@ -2,6 +2,15 @@
 
 use std::fmt::Write as _;
 
+/// Hard cap on `cols`/`rows`, applied defensively inside `render_halfblock`
+/// regardless of what the caller passes in. Guards both the pixel-buffer
+/// allocation and the ANSI-art output `String` (each cell emits ~30 bytes of
+/// truecolor escape codes plus the glyph, so text size dominates the raw
+/// pixel buffer) against an attacker-controlled NAWS window size — callers
+/// should already clamp before calling in, but this keeps the function
+/// itself safe on its own. Still far above any real terminal.
+const MAX_RENDER_DIM: u16 = 1200;
+
 /// Render `img` as ANSI truecolor half-blocks that fill `cols × rows`
 /// character cells (each cell is 1px wide and 2px tall). Uses a "cover" fit:
 /// the largest centered sub-rectangle of the *source* whose aspect ratio
@@ -15,6 +24,8 @@ use std::fmt::Write as _;
 /// with CRLF for telnet clients; an odd final pixel row (only possible from
 /// rounding) pairs with black for the missing bottom half.
 pub fn render_halfblock(img: &image::DynamicImage, cols: u16, rows: u16) -> String {
+    let cols = cols.min(MAX_RENDER_DIM);
+    let rows = rows.min(MAX_RENDER_DIM);
     let target_w = u32::from(cols.max(1));
     // Target pixel grid: cols wide, rows*2 tall (two vertical pixels per cell).
     let target_h = u32::from(rows.max(1)) * 2;
@@ -120,5 +131,16 @@ mod tests {
         let out = render_halfblock(&img, 40, 20);
         assert_eq!(out.matches("\r\n").count(), 20);
         assert!(out.contains("\u{1b}[38;2;80;160;240m"));
+    }
+
+    #[test]
+    fn attacker_controlled_max_dimensions_are_clamped() {
+        // A malicious/misreported NAWS window size (u16::MAX x u16::MAX)
+        // must not blow up the pixel buffer or output String: `render_halfblock`
+        // clamps internally to `MAX_RENDER_DIM` regardless of caller input.
+        let img = solid(4, 4, [255, 0, 0]);
+        let out = render_halfblock(&img, u16::MAX, u16::MAX);
+        assert!(out.len() < 50_000_000);
+        assert!(out.contains('\u{2580}')); // ▀
     }
 }

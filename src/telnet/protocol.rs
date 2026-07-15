@@ -13,6 +13,12 @@ const OPT_ECHO: u8 = 1;
 const OPT_SGA: u8 = 3;
 const OPT_NAWS: u8 = 31;
 
+/// Hard cap on a subnegotiation payload's length. Real subnegotiations we
+/// understand (NAWS) are a handful of bytes; this is generous headroom. A
+/// client that sends `IAC SB` and then streams bytes forever without a
+/// terminating `IAC SE` must not be able to grow `sb` without bound.
+const MAX_SUBNEG_LEN: usize = 64;
+
 /// One parsed event from the client byte stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TelnetEvent {
@@ -90,6 +96,12 @@ impl TelnetParser {
                 State::Subneg => {
                     if b == IAC {
                         self.state = State::SubnegIac;
+                    } else if self.sb.len() >= MAX_SUBNEG_LEN {
+                        // Runaway subnegotiation (no terminating IAC SE in
+                        // sight): abandon it rather than growing `sb`
+                        // unbounded, and fall back to normal data parsing.
+                        self.sb.clear();
+                        self.state = State::Data;
                     } else {
                         self.sb.push(b);
                     }
@@ -204,6 +216,25 @@ mod tests {
         // IAC DO NAWS then a data byte.
         let ev = p.feed(&[IAC, DO, NAWS, b'z']);
         assert_eq!(ev, vec![TelnetEvent::Negotiation, TelnetEvent::Data(b'z')]);
+    }
+
+    #[test]
+    fn runaway_subnegotiation_is_capped_and_recovers() {
+        // IAC SB NAWS then 200 arbitrary bytes with no terminating IAC SE:
+        // `sb` must never grow past `MAX_SUBNEG_LEN`, and once the cap is
+        // hit the parser abandons the subnegotiation and falls back to
+        // normal data parsing for whatever follows.
+        let mut p = TelnetParser::new();
+        assert!(p.feed(&[IAC, SB, NAWS]).is_empty());
+        let filler = [b'a'; 200];
+        for chunk in filler.chunks(7) {
+            p.feed(chunk);
+            assert!(p.sb.len() <= MAX_SUBNEG_LEN);
+        }
+        assert!(p.sb.len() <= MAX_SUBNEG_LEN);
+        // The parser has abandoned the subnegotiation and returned to
+        // State::Data, so a normal byte now parses as ordinary input.
+        assert_eq!(p.feed(b"x"), vec![TelnetEvent::Data(b'x')]);
     }
 
     #[test]
