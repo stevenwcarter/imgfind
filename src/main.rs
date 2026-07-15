@@ -174,6 +174,24 @@ enum Commands {
         #[arg(short, long)]
         dir: Option<String>,
     },
+    /// Start a telnet search server (plaintext; localhost by default)
+    Telnet {
+        /// Database directory (walk-up/global resolution)
+        #[arg(short, long)]
+        dir: Option<String>,
+        /// Bind address (use 0.0.0.0 to expose to your LAN)
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: std::net::IpAddr,
+        /// Port to listen on
+        #[arg(long, default_value_t = 2323)]
+        port: u16,
+        /// Run without login (open server)
+        #[arg(long)]
+        no_auth: bool,
+        /// Maximum simultaneous connections
+        #[arg(long, default_value_t = 16)]
+        max_connections: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -451,6 +469,34 @@ fn main() -> Result<()> {
                     }
                 }
             }
+        }
+        Commands::Telnet {
+            dir,
+            bind,
+            port,
+            no_auth,
+            max_connections,
+        } => {
+            let db_path = get_db_path(dir.as_deref())?;
+            let db = imgfind::block_on(Database::new(&db_path))?;
+            let auth = !no_auth;
+            if auth {
+                let count = imgfind::block_on(db.count_telnet_users())?;
+                if count == 0 {
+                    anyhow::bail!(
+                        "no telnet users exist. Add one with `imgfind telnet-user add <name>`, \
+                         or pass --no-auth to run without login."
+                    );
+                }
+            }
+            println!("Starting telnet server on {bind}:{port} (auth={auth}). Ctrl-C to stop.");
+            imgfind::block_on(imgfind::telnet::server::run_server(
+                db,
+                bind,
+                port,
+                auth,
+                max_connections,
+            ))?;
         }
     }
 
