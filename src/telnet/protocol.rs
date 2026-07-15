@@ -46,7 +46,10 @@ pub struct TelnetParser {
 
 impl TelnetParser {
     pub fn new() -> Self {
-        Self { state: State::Data, sb: Vec::new() }
+        Self {
+            state: State::Data,
+            sb: Vec::new(),
+        }
     }
 
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<TelnetEvent> {
@@ -154,7 +157,10 @@ mod tests {
     fn plain_data_passes_through() {
         let mut p = TelnetParser::new();
         let events = p.feed(b"hi");
-        assert_eq!(events, vec![TelnetEvent::Data(b'h'), TelnetEvent::Data(b'i')]);
+        assert_eq!(
+            events,
+            vec![TelnetEvent::Data(b'h'), TelnetEvent::Data(b'i')]
+        );
     }
 
     #[test]
@@ -163,7 +169,13 @@ mod tests {
         let mut p = TelnetParser::new();
         let bytes = [IAC, SB, NAWS, 0, 120, 0, 40, IAC, SE];
         let events = p.feed(&bytes);
-        assert_eq!(events, vec![TelnetEvent::WindowSize { cols: 120, rows: 40 }]);
+        assert_eq!(
+            events,
+            vec![TelnetEvent::WindowSize {
+                cols: 120,
+                rows: 40
+            }]
+        );
     }
 
     #[test]

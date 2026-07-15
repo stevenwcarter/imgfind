@@ -446,8 +446,9 @@ fn main() -> Result<()> {
                         anyhow::bail!("password must not be empty");
                     }
                     let hash = imgfind::telnet::auth::hash_password(&pw)?;
-                    imgfind::block_on(db.add_telnet_user(&name, &hash))
-                        .with_context(|| format!("failed to add user '{name}' (already exists?)"))?;
+                    imgfind::block_on(db.add_telnet_user(&name, &hash)).with_context(|| {
+                        format!("failed to add user '{name}' (already exists?)")
+                    })?;
                     println!("Added telnet user '{name}'.");
                 }
                 TelnetUserAction::List => {
