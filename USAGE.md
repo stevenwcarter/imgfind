@@ -223,6 +223,37 @@ Remove entries for images that no longer exist:
 imgfind clean
 ```
 
+### 10. Telnet Search Server (experimental)
+
+Start a plaintext telnet server that returns the top match as color ASCII art:
+
+```bash
+imgfind telnet-user add alice     # create an account (prompts for password)
+imgfind telnet                    # start (localhost:2323, login required)
+imgfind telnet --no-auth          # open server, no login
+imgfind telnet --bind 0.0.0.0 --port 2323   # expose to the LAN (plaintext!)
+```
+
+Connect with any telnet client:
+
+```bash
+telnet 127.0.0.1 2323
+```
+
+Type a query and press Enter to see the top matching image rendered as ANSI
+truecolor half-block ASCII art that fills the terminal (cover-fit: the image
+is cropped to the terminal's aspect ratio and scaled to fill it completely —
+it never letterboxes). Press any key to search again; press Esc in the search
+box to dismiss it and redraw the current art. Manage accounts with
+`imgfind telnet-user list` / `imgfind telnet-user remove <name>`.
+
+Telnet is unencrypted; the default bind is localhost (`127.0.0.1`) and
+`--bind 0.0.0.0` is an explicit opt-in to exposing the server to your LAN.
+Login is required by default — the server refuses to start if auth is on and
+no telnet users exist yet, and 3 failed login attempts drop the connection.
+Multiple clients can connect at once (up to `--max-connections`, default 16)
+and share one loaded CLIP model via a dedicated embedder worker thread.
+
 ## Database Location
 
 The database is stored at `~/.imgfind/imgfind.db` by default. The tool will also search up the directory tree for an existing database.
