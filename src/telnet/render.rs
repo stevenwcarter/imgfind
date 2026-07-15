@@ -4,12 +4,16 @@ use std::fmt::Write as _;
 
 /// Render `img` as ANSI truecolor half-blocks that fill `cols × rows`
 /// character cells (each cell is 1px wide and 2px tall). Uses a "cover" fit:
-/// the image is scaled by a single factor for both axes (so it is never
-/// distorted) until it fully covers the `cols × rows*2` pixel budget, then
-/// centered and cropped to that exact size — the output never exceeds the
-/// requested bounds. Lines end with CRLF for telnet clients; an odd final
-/// pixel row (only possible from rounding) pairs with black for the missing
-/// bottom half.
+/// the largest centered sub-rectangle of the *source* whose aspect ratio
+/// matches the `cols × rows*2` pixel budget is cropped out first, then that
+/// crop is resized to exactly fill the budget — so the image is never
+/// distorted and the output never exceeds the requested bounds. Cropping in
+/// source space before resizing (rather than upscaling the whole source and
+/// cropping afterwards) keeps the intermediate buffer bounded by the source
+/// image's own size instead of by `scale * source`, which for an
+/// extreme-aspect source could otherwise balloon to hundreds of MB. Lines end
+/// with CRLF for telnet clients; an odd final pixel row (only possible from
+/// rounding) pairs with black for the missing bottom half.
 pub fn render_halfblock(img: &image::DynamicImage, cols: u16, rows: u16) -> String {
     let target_w = u32::from(cols.max(1));
     // Target pixel grid: cols wide, rows*2 tall (two vertical pixels per cell).
@@ -17,18 +21,27 @@ pub fn render_halfblock(img: &image::DynamicImage, cols: u16, rows: u16) -> Stri
 
     let (iw, ih) = (img.width().max(1), img.height().max(1));
 
-    // Cover fit: scale uniformly so the image covers the target box, then
-    // crop the overflow. A single shared scale factor (unlike independently
-    // clamping each axis) never stretches the image out of proportion.
-    let scale = (target_w as f32 / iw as f32).max(target_h as f32 / ih as f32);
-    let scaled_w = ((iw as f32 * scale).round() as u32).max(target_w);
-    let scaled_h = ((ih as f32 * scale).round() as u32).max(target_h);
-    let crop_x = (scaled_w - target_w) / 2;
-    let crop_y = (scaled_h - target_h) / 2;
+    // Cover fit, crop-first: pick the largest centered source rectangle whose
+    // aspect ratio equals the target's, then resize that (bounded) crop to
+    // exactly fill the target. Cross-multiply (in u64, to avoid u32 overflow
+    // on large dimensions) instead of comparing floating-point ratios.
+    let source_wider_than_target =
+        u64::from(iw) * u64::from(target_h) > u64::from(ih) * u64::from(target_w);
+    let (crop_w, crop_h) = if source_wider_than_target {
+        // Source is wider than the target aspect: height-limited.
+        let crop_w = (u64::from(ih) * u64::from(target_w) / u64::from(target_h)) as u32;
+        (crop_w.clamp(1, iw), ih)
+    } else {
+        // Source is taller/narrower than the target aspect: width-limited.
+        let crop_h = (u64::from(iw) * u64::from(target_h) / u64::from(target_w)) as u32;
+        (iw, crop_h.clamp(1, ih))
+    };
+    let crop_x = (iw - crop_w) / 2;
+    let crop_y = (ih - crop_h) / 2;
 
     let rgb = img
-        .resize_exact(scaled_w, scaled_h, image::imageops::FilterType::Triangle)
-        .crop_imm(crop_x, crop_y, target_w, target_h)
+        .crop_imm(crop_x, crop_y, crop_w, crop_h)
+        .resize_exact(target_w, target_h, image::imageops::FilterType::Triangle)
         .to_rgb8();
 
     let mut out = String::new();
@@ -39,6 +52,8 @@ pub fn render_halfblock(img: &image::DynamicImage, cols: u16, rows: u16) -> Stri
             let bottom = if y + 1 < target_h {
                 rgb.get_pixel(x, y + 1).0
             } else {
+                // Defensive/unreachable: `target_h` is always `rows * 2`, so
+                // it is always even and this branch never actually runs.
                 [0, 0, 0]
             };
             let _ = write!(
@@ -94,5 +109,16 @@ mod tests {
         let img = solid(4, 4, [1, 2, 3]);
         let out = render_halfblock(&img, 2, 2);
         assert!(out.trim_end().ends_with("\u{1b}[0m") || out.contains("\u{1b}[0m"));
+    }
+
+    #[test]
+    fn extreme_aspect_source_fills_exact_row_count_without_distortion() {
+        // A 1000x4 (very wide) source into a 40x20 cell budget must still
+        // produce exactly `rows` rows and fill each; the crop-then-resize path
+        // keeps the intermediate bounded by the source, not by scale*source.
+        let img = solid(1000, 4, [80, 160, 240]);
+        let out = render_halfblock(&img, 40, 20);
+        assert_eq!(out.matches("\r\n").count(), 20);
+        assert!(out.contains("\u{1b}[38;2;80;160;240m"));
     }
 }
