@@ -1148,6 +1148,16 @@ mod gui_cli_tests {
         assert!(matches!(cli.command, Commands::Status));
     }
 
+    /// `debug_assert` validates the entire derived command tree (duplicate/
+    /// short-flag collisions, malformed subcommands, arg conflicts) — a
+    /// regression guard for the whole CLI, including the `telnet` and
+    /// `telnet-user` subcommands.
+    #[test]
+    fn cli_command_tree_is_valid() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+    }
+
     #[test]
     fn resolve_sizes_default_is_300() {
         assert_eq!(

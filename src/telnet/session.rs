@@ -120,6 +120,13 @@ const LF: u8 = b'\n';
 const BS: u8 = 0x08;
 const DEL: u8 = 0x7f;
 
+/// Resource-exhaustion guard: on a LAN-exposed (`--bind 0.0.0.0`) server, a
+/// client that streams printable bytes without ever sending CR/LF/Esc must
+/// not be able to grow a line buffer without bound. Once a line reaches this
+/// length, further printable bytes are silently dropped (not pushed, not
+/// echoed); backspace/DEL and line-terminating keys still work at the cap.
+const MAX_INPUT_LEN: usize = 1024;
+
 /// Drive one connection to completion. Errors are logged by the caller.
 pub async fn run(mut stream: TcpStream, ctx: SessionCtx) -> Result<()> {
     stream.write_all(&initial_negotiation()).await?;
@@ -452,10 +459,14 @@ async fn read_line(
                 }
                 0 => {}
                 _ => {
-                    line.push(b as char);
-                    if echo {
-                        stream.write_all(&[b]).await?;
-                        stream.flush().await?;
+                    // Drop printable bytes once at the cap instead of growing
+                    // the buffer further (see `MAX_INPUT_LEN`).
+                    if line.len() < MAX_INPUT_LEN {
+                        line.push(b as char);
+                        if echo {
+                            stream.write_all(&[b]).await?;
+                            stream.flush().await?;
+                        }
                     }
                 }
             }
@@ -488,9 +499,13 @@ async fn read_query(
                 }
                 0 => {}
                 _ => {
-                    line.push(b as char);
-                    stream.write_all(&[b]).await?;
-                    stream.flush().await?;
+                    // Drop printable bytes once at the cap instead of growing
+                    // the buffer further (see `MAX_INPUT_LEN`).
+                    if line.len() < MAX_INPUT_LEN {
+                        line.push(b as char);
+                        stream.write_all(&[b]).await?;
+                        stream.flush().await?;
+                    }
                 }
             }
         }
