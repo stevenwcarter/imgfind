@@ -239,60 +239,82 @@ pub async fn run(mut stream: TcpStream, ctx: SessionCtx) -> Result<()> {
         };
 
         // Results screen: navigate with h/l or arrow keys, Esc hides the
-        // caption/hint chrome, any other key returns to the search box.
+        // caption/hint chrome, any other key returns to the search box. Input
+        // is drained from a `pending` byte buffer so multiple keys landing in
+        // one socket read (fast key-repeat, or a key pressed mid-render) are
+        // all handled instead of only the first.
         let mut show_info = true;
+        let mut pending: Vec<u8> = Vec::new();
+        current_art = Some(
+            render_results_frame(&mut stream, &results, &cache, idx, cols, rows, show_info).await?,
+        );
         loop {
-            let (rel, dist) = &results[idx];
-            let filename = Path::new(rel)
-                .file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| rel.clone());
-            let pct = match_percent(*dist);
-            let img = match &cache[idx] {
-                DecodeState::Decoded(img) => img,
-                DecodeState::NotTried | DecodeState::Failed => {
-                    unreachable!("idx always points at an already-decoded entry")
+            if pending.is_empty() {
+                match pump(&mut stream, &mut parser, &mut buf, &mut cols, &mut rows).await? {
+                    Some(d) if !d.is_empty() => pending = d,
+                    Some(_) => continue, // only negotiation/NAWS arrived; keep waiting
+                    None => return Ok(()), // EOF: connection closed
                 }
-            };
-            let screen = render_result_screen(img, cols, rows, &filename, pct, show_info);
-            write_str(&mut stream, &screen).await?;
-            current_art = Some(screen);
+            }
 
-            let action = match read_results_action(
-                &mut stream,
-                &mut parser,
-                &mut buf,
-                &mut cols,
-                &mut rows,
-                show_info,
+            let (probe, probe_consumed) = results_action(&pending, show_info, false);
+            let action = if probe == ResultsAction::NeedMore {
+                // Possibly-incomplete escape sequence at the end of the
+                // buffer: give the client one short window to finish sending
+                // it (arrow keys arrive as 3 bytes in quick succession)
+                // before finalizing a trailing lone Esc as a real bare Esc.
+                match time::timeout(
+                    Duration::from_millis(200),
+                    pump(&mut stream, &mut parser, &mut buf, &mut cols, &mut rows),
+                )
+                .await
+                {
+                    Ok(Ok(Some(d))) if !d.is_empty() => {
+                        pending.extend(d);
+                        continue; // re-interpret with the fuller buffer
+                    }
+                    Ok(Ok(Some(_))) => continue, // NAWS-only: retry the read
+                    _ => {
+                        // Timeout, EOF, or error: finalize (complete = true)
+                        // so a lone trailing Esc becomes a real bare Esc.
+                        let (fin, fin_consumed) = results_action(&pending, show_info, true);
+                        let take = fin_consumed.max(1).min(pending.len());
+                        pending.drain(0..take);
+                        fin
+                    }
+                }
+            } else {
+                let take = probe_consumed.max(1).min(pending.len());
+                pending.drain(0..take);
+                probe
+            };
+
+            match apply_results_action(
+                action,
+                &results,
+                &mut cache,
+                &ctx.db.parent_dir,
+                &mut idx,
+                &mut show_info,
             )
-            .await?
+            .await
             {
-                Some(a) => a,
-                None => return Ok(()), // EOF
-            };
-
-            match action {
-                ResultsAction::HideInfo => show_info = false,
-                ResultsAction::Prev => {
-                    if let Some(new_idx) =
-                        step_decodable(&mut cache, &results, &ctx.db.parent_dir, idx, -1).await
-                    {
-                        idx = new_idx;
-                    }
+                ResultsEffect::Leave => break,
+                ResultsEffect::Redraw => {
+                    current_art = Some(
+                        render_results_frame(
+                            &mut stream,
+                            &results,
+                            &cache,
+                            idx,
+                            cols,
+                            rows,
+                            show_info,
+                        )
+                        .await?,
+                    );
                 }
-                ResultsAction::Next => {
-                    if let Some(new_idx) =
-                        step_decodable(&mut cache, &results, &ctx.db.parent_dir, idx, 1).await
-                    {
-                        idx = new_idx;
-                    }
-                }
-                ResultsAction::Noop => {}
-                ResultsAction::ToSearch => break,
-                ResultsAction::NeedMore => {
-                    unreachable!("read_results_action resolves NeedMore internally")
-                }
+                ResultsEffect::Unchanged => {}
             }
         }
     }
@@ -519,52 +541,80 @@ fn render_result_screen(
     }
 }
 
-/// Read one results-screen action, resolving the Esc/arrow ambiguity with a
-/// short follow-up read when the leading bytes could be either. Returns
-/// `Ok(None)` on EOF. Only the first key/sequence in a read is handled — a
-/// pasted burst of multiple keys is not expected on this interactive screen,
-/// and any trailing bytes are simply dropped rather than mis-attributed to a
-/// later render.
-async fn read_results_action(
+/// Render the frame for `results[idx]`, write it to the socket, and return
+/// it (for the caller to stash as `current_art`, redrawn on Esc-to-search
+/// dismissal).
+async fn render_results_frame(
     stream: &mut TcpStream,
-    parser: &mut TelnetParser,
-    buf: &mut [u8],
-    cols: &mut u16,
-    rows: &mut u16,
-    info_shown: bool,
-) -> Result<Option<ResultsAction>> {
-    let mut data = loop {
-        match pump(stream, parser, buf, cols, rows).await? {
-            None => return Ok(None), // EOF
-            Some(d) if !d.is_empty() => break d,
-            Some(_) => continue, // only negotiation/NAWS arrived; keep waiting
+    results: &[(String, f32)],
+    cache: &[DecodeState],
+    idx: usize,
+    cols: u16,
+    rows: u16,
+    show_info: bool,
+) -> Result<String> {
+    let (rel, dist) = &results[idx];
+    let filename = Path::new(rel)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| rel.clone());
+    let pct = match_percent(*dist);
+    let img = match &cache[idx] {
+        DecodeState::Decoded(img) => img,
+        DecodeState::NotTried | DecodeState::Failed => {
+            unreachable!("idx always points at an already-decoded entry")
         }
     };
+    let screen = render_result_screen(img, cols, rows, &filename, pct, show_info);
+    write_str(stream, &screen).await?;
+    Ok(screen)
+}
 
-    let (action, _) = results_action(&data, info_shown, false);
-    if action != ResultsAction::NeedMore {
-        return Ok(Some(action));
-    }
+/// Outcome of applying a fully-resolved (non-`NeedMore`) [`ResultsAction`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResultsEffect {
+    /// Nothing changed (e.g. `Noop`, or `Prev`/`Next` already at an edge).
+    Unchanged,
+    /// The visible index or `show_info` changed: redraw the frame.
+    Redraw,
+    /// Return to the search box.
+    Leave,
+}
 
-    // Possibly-incomplete escape sequence: give the client one short window
-    // to finish sending it (arrow keys arrive as 3 bytes in quick succession)
-    // before finalizing a trailing lone Esc as a real bare Esc.
-    match time::timeout(
-        Duration::from_millis(200),
-        pump(stream, parser, buf, cols, rows),
-    )
-    .await
-    {
-        Ok(Ok(Some(more))) => {
-            data.extend(more);
-            let (action, _) = results_action(&data, info_shown, true);
-            Ok(Some(action))
+/// Apply the state-changing effect of a resolved results-screen action.
+/// Rendering itself is left to the caller (it happens once, at the call
+/// site, when the returned effect is `Redraw`).
+async fn apply_results_action(
+    action: ResultsAction,
+    results: &[(String, f32)],
+    cache: &mut [DecodeState],
+    parent_dir: &Path,
+    idx: &mut usize,
+    show_info: &mut bool,
+) -> ResultsEffect {
+    match action {
+        ResultsAction::HideInfo => {
+            *show_info = false;
+            ResultsEffect::Redraw
         }
-        Ok(Ok(None)) => Ok(None), // EOF
-        Ok(Err(e)) => Err(e),
-        Err(_elapsed) => {
-            let (action, _) = results_action(&data, info_shown, true);
-            Ok(Some(action))
+        ResultsAction::Prev => match step_decodable(cache, results, parent_dir, *idx, -1).await {
+            Some(new_idx) => {
+                *idx = new_idx;
+                ResultsEffect::Redraw
+            }
+            None => ResultsEffect::Unchanged,
+        },
+        ResultsAction::Next => match step_decodable(cache, results, parent_dir, *idx, 1).await {
+            Some(new_idx) => {
+                *idx = new_idx;
+                ResultsEffect::Redraw
+            }
+            None => ResultsEffect::Unchanged,
+        },
+        ResultsAction::Noop => ResultsEffect::Unchanged,
+        ResultsAction::ToSearch => ResultsEffect::Leave,
+        ResultsAction::NeedMore => {
+            unreachable!("NeedMore is resolved by the caller before applying")
         }
     }
 }
@@ -626,13 +676,19 @@ mod tests {
 
     #[test]
     fn results_action_ordinary_key_goes_to_search() {
-        assert_eq!(results_action(b"x", true, true), (ResultsAction::ToSearch, 1));
+        assert_eq!(
+            results_action(b"x", true, true),
+            (ResultsAction::ToSearch, 1)
+        );
     }
 
     #[test]
     fn results_action_cr_goes_to_search() {
         // CR/LF count as "any other key".
-        assert_eq!(results_action(b"\r", true, true), (ResultsAction::ToSearch, 1));
+        assert_eq!(
+            results_action(b"\r", true, true),
+            (ResultsAction::ToSearch, 1)
+        );
     }
 
     #[test]

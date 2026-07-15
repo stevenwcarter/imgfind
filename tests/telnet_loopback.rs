@@ -162,8 +162,16 @@ async fn telnet_results_screen_navigates_and_hides_info() -> Result<()> {
     RgbImage::from_pixel(8, 8, Rgb([40, 40, 200])).save(&blue_path)?;
 
     db.insert_images_batch(&[
-        ("red.png".to_string(), "redhash".to_string(), embedding.clone()),
-        ("blue.png".to_string(), "bluehash".to_string(), embedding.clone()),
+        (
+            "red.png".to_string(),
+            "redhash".to_string(),
+            embedding.clone(),
+        ),
+        (
+            "blue.png".to_string(),
+            "bluehash".to_string(),
+            embedding.clone(),
+        ),
     ])
     .await?;
 
@@ -209,14 +217,29 @@ async fn telnet_results_screen_navigates_and_hides_info() -> Result<()> {
     // `l` steps to the next navigable result: a new screen should be drawn.
     client.write_all(b"l").await?;
     client.flush().await?;
+    // Wait not just for the clear-screen escape but for the newest screen's
+    // trailing caption/hint text to have fully arrived (it can land in a
+    // later TCP read than the leading `\x1b[2J`), so the marker check below
+    // doesn't race a partially-received screen.
     read_until(&mut client, &mut collected, |text| {
+        let newest = text.rsplit("\x1b[2J").next().unwrap_or_default();
         text.matches("\x1b[2J").count() > screens_after_search
+            && (newest.contains("h/l") || newest.contains("% match"))
     })
     .await?;
     let text = String::from_utf8_lossy(&collected).into_owned();
     assert!(
         text.matches("\x1b[2J").count() > screens_after_search,
         "expected a new screen after 'l', got: {text:?}"
+    );
+    // A search-box redraw (e.g. from a mis-routed `ToSearch`) also clears the
+    // screen, so pin down that the *newest* screen is still the results
+    // screen: it must carry the "h/l" nav hint or the "% match" caption,
+    // neither of which appears on the search box.
+    let newest_screen = text.rsplit("\x1b[2J").next().unwrap_or_default();
+    assert!(
+        newest_screen.contains("h/l") || newest_screen.contains("% match"),
+        "expected the results screen (not the search box) after 'l', got: {newest_screen:?}"
     );
     let screens_after_next = text.matches("\x1b[2J").count();
 
