@@ -166,6 +166,14 @@ enum Commands {
     },
     /// Generate a shell completion script
     Completions { shell: clap_complete::Shell },
+    /// Manage telnet server accounts
+    TelnetUser {
+        #[command(subcommand)]
+        action: TelnetUserAction,
+        /// Database directory (walk-up/global resolution)
+        #[arg(short, long)]
+        dir: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -178,6 +186,22 @@ enum ModelsAction {
         /// Also save this model as the global default for new databases.
         #[arg(long)]
         default: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum TelnetUserAction {
+    /// Add a user (prompts for a password, stored Argon2-hashed)
+    Add {
+        /// Username
+        name: String,
+    },
+    /// List usernames
+    List,
+    /// Remove a user
+    Remove {
+        /// Username
+        name: String,
     },
 }
 
@@ -387,6 +411,46 @@ fn main() -> Result<()> {
                 "imgfind",
                 &mut std::io::stdout(),
             );
+        }
+        Commands::TelnetUser { action, dir } => {
+            let db_path = get_db_path(dir.as_deref())?;
+            let db = imgfind::block_on(Database::new(&db_path))?;
+            match action {
+                TelnetUserAction::Add { name } => {
+                    let pw = rpassword::prompt_password(format!("Password for '{name}': "))
+                        .context("failed to read password")?;
+                    let confirm = rpassword::prompt_password("Confirm password: ")
+                        .context("failed to read password")?;
+                    if pw != confirm {
+                        anyhow::bail!("passwords do not match");
+                    }
+                    if pw.is_empty() {
+                        anyhow::bail!("password must not be empty");
+                    }
+                    let hash = imgfind::telnet::auth::hash_password(&pw)?;
+                    imgfind::block_on(db.add_telnet_user(&name, &hash))
+                        .with_context(|| format!("failed to add user '{name}' (already exists?)"))?;
+                    println!("Added telnet user '{name}'.");
+                }
+                TelnetUserAction::List => {
+                    let users = imgfind::block_on(db.list_telnet_users())?;
+                    if users.is_empty() {
+                        println!("No telnet users. Add one with: imgfind telnet-user add <name>");
+                    } else {
+                        for u in users {
+                            println!("{u}");
+                        }
+                    }
+                }
+                TelnetUserAction::Remove { name } => {
+                    let removed = imgfind::block_on(db.remove_telnet_user(&name))?;
+                    if removed {
+                        println!("Removed telnet user '{name}'.");
+                    } else {
+                        println!("No such telnet user '{name}'.");
+                    }
+                }
+            }
         }
     }
 
