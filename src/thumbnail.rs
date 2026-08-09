@@ -734,6 +734,57 @@ mod tests {
         let _ = std::fs::remove_dir_all(parent_dir);
     }
 
+    /// One undecodable image must not take down the whole batch.
+    ///
+    /// This is the seam that failed in production: a RAW that `rawler` panicked on
+    /// unwound out of the `par_iter` closure below, and rayon re-raised it on the
+    /// calling thread, aborting the entire `imgfind process` run. Worse, no
+    /// failure marker was written, so the next run hit the same file and died
+    /// again. `decode::guard_decoder_panic` now turns a decoder panic into an
+    /// ordinary `Err`, which this batch already knows how to handle: skip the
+    /// image, mark it failed, keep going.
+    #[test]
+    fn batch_survives_an_undecodable_image_and_marks_it_failed() {
+        let db_path = temp_db_path();
+        let mut db = block_on(Database::new(&db_path)).expect("create test db");
+        let parent_dir = db_path.parent().unwrap().parent().unwrap().to_path_buf();
+
+        // A decodable image and a file that no decoder will accept. The `.orf`
+        // extension routes the bad one through rawler, exactly like the real case.
+        let good = parent_dir.join("good.png");
+        ImageBuffer::<Rgb<u8>, Vec<u8>>::from_pixel(32, 32, Rgb([1, 2, 3]))
+            .save(&good)
+            .unwrap();
+        let bad = parent_dir.join("bad.orf");
+        std::fs::write(&bad, b"not a RAW file at all").unwrap();
+
+        block_on(db.insert_image_rows_batch(&[
+            ("good.png".to_string(), "hash_good".to_string()),
+            ("bad.orf".to_string(), "hash_bad".to_string()),
+        ]))
+        .expect("insert image rows");
+
+        let generated = generate_missing_thumbnails_batch(&mut db, ThumbnailSize(300), 10)
+            .expect("batch must complete, not propagate the bad image's failure");
+
+        assert_eq!(
+            generated, 1,
+            "the decodable image must still get its thumbnail"
+        );
+        assert_eq!(
+            block_on(db.thumbnail_failure_count("hash_bad")).unwrap(),
+            1,
+            "the undecodable image must be marked failed so later passes skip it"
+        );
+        assert_eq!(
+            block_on(db.thumbnail_failure_count("hash_good")).unwrap(),
+            0,
+            "a healthy image must not be marked failed"
+        );
+
+        let _ = std::fs::remove_dir_all(&parent_dir);
+    }
+
     /// `get_or_generate_thumbnail` records a failure marker for a `ScaleSize`
     /// request on an undecodable file, but does NOT record one for `FullSize`
     /// (only `ScaleSize` failures are recorded — see `generate_thumbnail_bytes`

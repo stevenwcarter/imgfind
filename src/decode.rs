@@ -4,9 +4,18 @@
 //! first, full demosaic as a fallback (see `decode_raw`). All other extensions use
 //! the `image` crate. Either way, `decode_image` then applies the file's EXIF
 //! orientation tag so the returned image is upright.
+//!
+//! Because imgfind decodes arbitrary user files with third-party decoders that
+//! `panic!` on some malformed input, every public entry point here runs under
+//! `guard_decoder_panic`: a decoder panic comes back as an ordinary `Err` naming
+//! the file, so one bad image is marked failed instead of killing the run.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
+use std::any::Any;
+use std::cell::Cell;
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
+use std::sync::Once;
 
 /// Lowercased extensions the `image` crate decodes (imgfind's historical set).
 pub const STILL_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp"];
@@ -42,6 +51,81 @@ pub fn is_supported_extension(ext: &str) -> bool {
     STILL_EXTENSIONS.contains(&ext.as_str()) || RAW_EXTENSIONS.contains(&ext.as_str())
 }
 
+thread_local! {
+    /// Set while this thread is inside [`guard_decoder_panic`]. Read by the hook
+    /// installed by [`install_decoder_panic_hook`] so a contained decoder panic
+    /// does not print a panic message + backtrace for every corrupt file.
+    static IN_GUARDED_DECODE: Cell<bool> = const { Cell::new(false) };
+}
+
+static DECODER_PANIC_HOOK: Once = Once::new();
+
+/// Install a process-wide panic hook that stays quiet for panics raised inside
+/// [`guard_decoder_panic`] and delegates everything else to the previous hook.
+///
+/// Without this, a library holding many corrupt RAWs prints a full panic message
+/// per file even though each one is caught and turned into an ordinary error.
+/// Contained panics are still visible at `RUST_LOG=debug`, and the resulting
+/// `Err` always names the offending path. Genuine bugs elsewhere keep the
+/// default hook's output, including backtraces.
+fn install_decoder_panic_hook() {
+    DECODER_PANIC_HOOK.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            // `try_with` because a thread tearing down may have destroyed the
+            // thread-local already; treat that as "not contained".
+            if IN_GUARDED_DECODE.try_with(Cell::get).unwrap_or(false) {
+                tracing::debug!("contained decoder panic: {info}");
+            } else {
+                previous(info);
+            }
+        }));
+    });
+}
+
+/// Best-effort human-readable text from a panic payload (`&str` or `String`).
+fn panic_message(payload: &(dyn Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "non-string panic payload".to_string())
+}
+
+/// Run `decode`, converting a panic raised by the underlying image decoder into
+/// an ordinary `Err` that names `path`.
+///
+/// Third-party decoders are not panic-free on malformed input. `rawler`'s ORF
+/// path is the known case: `OrfDecoder::decode_compressed` returns a plain
+/// `PixU16` (no error channel at all) and calls `panic!("Can't refill bitpump,
+/// buffer exhausted")` when the dimensions declared in the file's IFDs demand
+/// more compressed data than the strip actually holds — i.e. on any truncated or
+/// corrupt ORF. `image` has had similar panics on malformed input.
+///
+/// imgfind decodes arbitrary user files, so a decoder panic is a property of the
+/// *file*, not a bug in imgfind, and must be handled exactly like a decode error:
+/// report the path, mark the image failed, keep going. Left uncaught it unwinds
+/// through rayon (which re-raises it on the calling thread) and kills the whole
+/// `index`/`process` run — and because no failure marker is written, the next run
+/// hits the same file and dies again.
+fn guard_decoder_panic<T>(path: &Path, decode: impl FnOnce() -> Result<T>) -> Result<T> {
+    install_decoder_panic_hook();
+    let outer = IN_GUARDED_DECODE.with(|flag| flag.replace(true));
+    // AssertUnwindSafe: `decode` only borrows `path` and returns an owned value.
+    // A decoder that unwinds leaves no imgfind state observably half-updated —
+    // the caller either gets the decoded image or this error, never both.
+    let outcome = std::panic::catch_unwind(AssertUnwindSafe(decode));
+    IN_GUARDED_DECODE.with(|flag| flag.set(outer));
+
+    outcome.unwrap_or_else(|payload| {
+        Err(anyhow!(
+            "image decoder panicked on {}: {}",
+            path.display(),
+            panic_message(&*payload)
+        ))
+    })
+}
+
 /// Read the EXIF Orientation tag (0x0112, primary IFD) as its raw 1–8 value.
 /// Best-effort: returns `None` on any read failure or when the tag is absent —
 /// never propagates an error, so a missing/broken EXIF block can't fail a decode.
@@ -75,7 +159,14 @@ fn preview_meets_full_threshold(width: u32, height: u32) -> bool {
 
 /// Decode any supported still or RAW image to a `DynamicImage`, corrected for
 /// EXIF orientation (0x0112) so the result is upright.
+///
+/// A panic inside the underlying decoder is contained and returned as an `Err`
+/// naming `path` (see [`guard_decoder_panic`]).
 pub fn decode_image(path: &Path) -> Result<image::DynamicImage> {
+    guard_decoder_panic(path, || decode_image_inner(path))
+}
+
+fn decode_image_inner(path: &Path) -> Result<image::DynamicImage> {
     let is_raw = path
         .extension()
         .and_then(|e| e.to_str())
@@ -96,7 +187,13 @@ pub fn decode_image(path: &Path) -> Result<image::DynamicImage> {
 /// Non-RAW: the original (already full-res). RAW: the largest embedded preview if its
 /// long edge is >= `FULL_RAW_MIN_LONG_EDGE`, else a full sensor demosaic. EXIF
 /// orientation applied. For thumbnails/embeddings use the faster `decode_image` instead.
+/// A panic inside the underlying decoder is contained and returned as an `Err`
+/// naming `path` (see [`guard_decoder_panic`]).
 pub fn decode_full_image(path: &Path) -> Result<image::DynamicImage> {
+    guard_decoder_panic(path, || decode_full_image_inner(path))
+}
+
+fn decode_full_image_inner(path: &Path) -> Result<image::DynamicImage> {
     let is_raw = path
         .extension()
         .and_then(|e| e.to_str())
@@ -172,7 +269,13 @@ fn decode_raw_full(path: &Path) -> Result<image::DynamicImage> {
 /// via a custom `RawDevelop` that omits the final sRGB gamma step, so highlight
 /// headroom above the camera-JPEG white point is preserved. Non-RAW files are
 /// decoded normally and converted sRGB -> linear. EXIF orientation is applied.
+/// A panic inside the underlying decoder is contained and returned as an `Err`
+/// naming `path` (see [`guard_decoder_panic`]).
 pub fn decode_linear(path: &Path) -> Result<crate::edits::LinearRgb> {
+    guard_decoder_panic(path, || decode_linear_inner(path))
+}
+
+fn decode_linear_inner(path: &Path) -> Result<crate::edits::LinearRgb> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -261,6 +364,125 @@ fn decode_raw(path: &Path) -> Result<image::DynamicImage> {
     intermediate
         .to_dynamic_image()
         .with_context(|| format!("converting developed RAW to image for {}", path.display()))
+}
+
+/// Panic containment at the decode seam.
+///
+/// These pin the load-bearing behaviour: a decoder that panics must surface as an
+/// `Err` naming the file, because `thumbnail::generate_missing_thumbnails_batch`
+/// only records a `thumbnail_failures` marker on the `Err` path. A panic that
+/// escapes instead unwinds through rayon and aborts the whole `process` run.
+#[cfg(test)]
+mod panic_guard_tests {
+    use super::*;
+
+    /// The exact production failure: `rawler`'s ORF decoder walks off the end of
+    /// its bit pump when the dimensions declared in the file demand more
+    /// compressed data than the strip holds. Driving the real rawler function
+    /// (rather than a synthetic `panic!`) makes this a canary too — if a future
+    /// rawler returns an error instead of panicking, this test says so.
+    ///
+    /// `bps = 14` makes the decoder skip 8 header bytes, so 32 bytes of payload
+    /// leaves 24 for a 64x64 image and the pump runs dry in both debug and release
+    /// builds — reproducing the shipped panic verbatim. (At `bps = 12` a release
+    /// build instead returns silent garbage pixels, so it is no good as a fixture.)
+    #[test]
+    fn contains_real_rawler_orf_panic() {
+        use rawler::buffer::PaddedBuf;
+        use rawler::decoders::orf::OrfDecoder;
+
+        let path = Path::new("/library/tmp/_2100062.ORF");
+        let err = guard_decoder_panic(path, || {
+            let buf = PaddedBuf::new_owned(vec![0u8; 32], 32);
+            let _ = OrfDecoder::decode_compressed(&buf, 64, 64, 14, false);
+            Ok(())
+        })
+        .expect_err("a panicking decoder must yield Err, not unwind");
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Can't refill bitpump, buffer exhausted"),
+            "error must carry the decoder's own panic message, got: {msg}"
+        );
+        assert!(
+            msg.contains("_2100062.ORF"),
+            "error must name the offending file so the run can report it, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn passes_through_success_and_ordinary_errors() {
+        let path = Path::new("/some/file.orf");
+
+        assert_eq!(guard_decoder_panic(path, || Ok(7)).unwrap(), 7);
+
+        let err = guard_decoder_panic(path, || -> Result<u8> { Err(anyhow!("plain failure")) })
+            .expect_err("ordinary errors must pass through unchanged");
+        assert!(format!("{err:#}").contains("plain failure"));
+        assert!(
+            !format!("{err:#}").contains("panicked"),
+            "a non-panic error must not be relabelled as a panic"
+        );
+    }
+
+    #[test]
+    fn reports_both_str_and_string_payloads() {
+        let path = Path::new("/f.orf");
+
+        let e = guard_decoder_panic(path, || -> Result<()> { panic!("static payload") })
+            .expect_err("panic must be contained");
+        assert!(format!("{e:#}").contains("static payload"));
+
+        let e = guard_decoder_panic(path, || -> Result<()> {
+            panic!("{}", String::from("owned payload"))
+        })
+        .expect_err("panic must be contained");
+        assert!(format!("{e:#}").contains("owned payload"));
+    }
+
+    /// `decode_linear` delegates to `decode_image` for non-RAW files, so the guard
+    /// nests. The inner guard must not clear the outer one's containment flag.
+    #[test]
+    fn nested_guards_restore_the_outer_flag() {
+        let path = Path::new("/f.orf");
+        let outcome = guard_decoder_panic(path, || {
+            guard_decoder_panic(path, || Ok(())).expect("inner guard succeeds");
+            assert!(
+                IN_GUARDED_DECODE.with(Cell::get),
+                "inner guard must restore, not clear, the outer flag"
+            );
+            Ok(())
+        });
+        assert!(outcome.is_ok());
+        assert!(
+            !IN_GUARDED_DECODE.with(Cell::get),
+            "flag must be clear once the outermost guard returns"
+        );
+    }
+
+    /// A contained panic must leave the flag clear, or every later panic on this
+    /// thread would be silently swallowed by the hook.
+    #[test]
+    fn flag_is_cleared_after_a_contained_panic() {
+        let path = Path::new("/f.orf");
+        let _ = guard_decoder_panic(path, || -> Result<()> { panic!("boom") });
+        assert!(!IN_GUARDED_DECODE.with(Cell::get));
+    }
+
+    /// The public entry points must stay wired to the guard — that wiring is what
+    /// makes every caller (thumbnails, embeddings, TUI, GUI, telnet) panic-safe.
+    #[test]
+    fn public_entry_points_return_err_on_undecodable_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // A RAW extension whose content is not a RAW at all: routed to rawler,
+        // which declines it. Must be an error, never a panic or a hang.
+        let path = dir.path().join("garbage.orf");
+        std::fs::write(&path, b"definitely not an ORF").unwrap();
+
+        assert!(decode_image(&path).is_err());
+        assert!(decode_full_image(&path).is_err());
+        assert!(decode_linear(&path).is_err());
+    }
 }
 
 #[cfg(test)]
