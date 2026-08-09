@@ -1,3 +1,80 @@
+## [0.2.5] - 2026-08-09
+
+### Bug Fixes
+
+- *(processing)* Apply Task 3 review findings (all 5)([`e6e0a2a`](https://github.com/stevenwcarter/imgfind/commit/e6e0a2ad40d7b3dc08d78bc5bde76f529cc94bba))
+- *(thumbnail)* Write thumbnails to the passed db, not the cwd-resolved db([`48adc5a`](https://github.com/stevenwcarter/imgfind/commit/48adc5a0d4fb06983fbef5c4b8d45485c22c7142))
+- *(gui)* Process-worker advances past undecodable files instead of looping([`967774b`](https://github.com/stevenwcarter/imgfind/commit/967774ba93d1d141b36b431909bb4ebdb31bb258))
+- *(gui)* Group processing-status rows so labels sit with their bars([`c2b935e`](https://github.com/stevenwcarter/imgfind/commit/c2b935e6254d1dd62de551f3e433edbbaf081431))
+- *(gui)* Keep keyboard shortcuts alive after committing a tag editor([`6f07ac4`](https://github.com/stevenwcarter/imgfind/commit/6f07ac45158dce4a43fd94c7a6622a5409a51ad1))
+- *(gui)* Seamless inline tag editor input([`14872b4`](https://github.com/stevenwcarter/imgfind/commit/14872b415efa6845c8cdd3ae9146af4f4681c0c6))
+- *(thumbnail)* Reattach fn rustdoc, add failure-recording test, restore debug log([`d3b2f65`](https://github.com/stevenwcarter/imgfind/commit/d3b2f65511191d442bd683314e79ba3a8b8f9b93))
+- *(gui)* Keep green-brush chords working in the lightbox([`c2abb41`](https://github.com/stevenwcarter/imgfind/commit/c2abb411be99fe75dd3e8128188cfe98b93bb604))
+- *(processing)* Backfill EXIF as a shared phase so GUI-indexed libraries get file_size([`cde2b13`](https://github.com/stevenwcarter/imgfind/commit/cde2b13ba746c0947f9dad7d0d45ae6173b34c24))
+- *(telnet)* Bound render cover-fit intermediate by cropping in source space([`a433f56`](https://github.com/stevenwcarter/imgfind/commit/a433f560e70c2242349d3a2bbe0ff15502d85e3d))
+- *(telnet)* Drain all buffered keys per read on results screen + rustfmt([`fe55e3d`](https://github.com/stevenwcarter/imgfind/commit/fe55e3d4bc9b5a9f72bc2330d9c1229f0e7279ef))
+- *(telnet)* Clamp NAWS render size, cap subneg buffer, close login timing oracle([`e235f5c`](https://github.com/stevenwcarter/imgfind/commit/e235f5c3aa4905770ac0ea32abb204908a021c87))
+- *(decode)* Contain third-party decoder panics at the decode seam([`ede3256`](https://github.com/stevenwcarter/imgfind/commit/ede325631f4dd82a4eade7d6fbfd623181409749))
+
+### Documentation
+
+- *(spec)* Fast index + background processing design([`9b72b56`](https://github.com/stevenwcarter/imgfind/commit/9b72b566d83b21c5f0b2168bd547a6db43605633))
+- *(plan)* Fast index + background processing implementation plan([`521b5b6`](https://github.com/stevenwcarter/imgfind/commit/521b5b6b145f4e2d294e461c7c8a5805f38bb274))
+- Fast index + background processing([`812a14d`](https://github.com/stevenwcarter/imgfind/commit/812a14d700b0865e4a1929388e90b3d20e79b0e9))
+- Fix stale USAGE.md thumbnails-during-index claim([`479f865`](https://github.com/stevenwcarter/imgfind/commit/479f86564f326b056a0dddc5111c77d07f40a169))
+- Spec for tag-editor inline input polish([`3dd12ea`](https://github.com/stevenwcarter/imgfind/commit/3dd12ea56f8f0c295569ebbe7c4dfdaffd26ef60))
+- Spec for small-file md5 hash fallback([`50a1a60`](https://github.com/stevenwcarter/imgfind/commit/50a1a60b2fd4efe7bedf07a8b21d0d141ff5cbfd))
+- Implementation plan for small-file md5 fallback([`b4cec10`](https://github.com/stevenwcarter/imgfind/commit/b4cec105bf465e0ab0efe351804e6bd561cef714))
+- Note md5 fallback for sub-128KB files in CLAUDE.md([`29be910`](https://github.com/stevenwcarter/imgfind/commit/29be9106af07c21aac85cebf8444c3eb8f050c9c))
+- Spec for thumbnail failure marking + hide-failed filter([`8e89222`](https://github.com/stevenwcarter/imgfind/commit/8e89222d46f68da8f1e97ae4fe6cf5ef0d9c3fad))
+- Implementation plan for thumbnail failure marking([`8caafd6`](https://github.com/stevenwcarter/imgfind/commit/8caafd65a730744789f6e05b9e671e252e479d0e))
+- Thumbnail failure marking, --retry-failed, hide-failed filter([`2db2f57`](https://github.com/stevenwcarter/imgfind/commit/2db2f57880bfa85c2f771c23745f98b28c4780bc))
+- Spec for grid gg/G first/last navigation([`dec15bc`](https://github.com/stevenwcarter/imgfind/commit/dec15bcb8f9467642af299bd8e087c75af637766))
+- Implementation plan for grid gg/G navigation([`7ffde9e`](https://github.com/stevenwcarter/imgfind/commit/7ffde9e701b6272a3ee209303c588150d0e8d377))
+- *(telnet)* Design spec for telnet search server with ASCII-art results([`b30bf17`](https://github.com/stevenwcarter/imgfind/commit/b30bf170491127812173c54ed27d4227ce7b26e5))
+- *(telnet)* Implementation plan + executing-agent handoff([`8fd7129`](https://github.com/stevenwcarter/imgfind/commit/8fd71298ae6f979b5e1218a4de40b288ea13d57d))
+- *(telnet)* Document telnet server and account management([`7837962`](https://github.com/stevenwcarter/imgfind/commit/783796254e873e3b205345e57bd716c671e0e503))
+
+### Features
+
+- *(db)* Row-only insert + missing-embedding queries([`08818e7`](https://github.com/stevenwcarter/imgfind/commit/08818e7327f0e103d3c7d04f1e46570384a390fb))
+- *(index)* Fast row-only index; defer heavy work to process([`57d2611`](https://github.com/stevenwcarter/imgfind/commit/57d26116a3216a1a86ee910092b196cd8fa25ce5))
+- *(processing)* Shared engine (counts, phases, embed-from-thumbnail)([`31da073`](https://github.com/stevenwcarter/imgfind/commit/31da0738b403fd86844120dd70d580805839b808))
+- *(cli)* Add \`imgfind process\` command([`c3e4a4c`](https://github.com/stevenwcarter/imgfind/commit/c3e4a4ce131612409fcafe832288690d9a330c5c))
+- *(gui)* Background process-worker + pause controller([`ad456d8`](https://github.com/stevenwcarter/imgfind/commit/ad456d8e0dececabdec03b64a86fee4b608feeb6))
+- *(cli)* Status reports unprocessed counts([`1fccea2`](https://github.com/stevenwcarter/imgfind/commit/1fccea26ee365d06dacbbdba71f738903e8c7381))
+- *(gui)* Processing status panel, pill, \ toggle; launcher drops thumbnails spawn([`b1126c3`](https://github.com/stevenwcarter/imgfind/commit/b1126c325b1d2fea6586bc079d70a5c3174f0c53))
+- *(index)* Md5 fallback hash for sub-128KB files([`f4fb6b9`](https://github.com/stevenwcarter/imgfind/commit/f4fb6b9d9a2dfe3b7bb331532be87e1683ca635a))
+- *(schema)* Migration 006 thumbnail_failures table([`945bbdf`](https://github.com/stevenwcarter/imgfind/commit/945bbdf3ce15c3cb6b295bd03783a5e2de7193b1))
+- *(db)* Thumbnail failure markers exclude images from work queues([`67a0d80`](https://github.com/stevenwcarter/imgfind/commit/67a0d8096d678615475b20651ae1aa93aa713155))
+- *(thumbnail)* Record failure markers on decode/encode failure([`8d21bf1`](https://github.com/stevenwcarter/imgfind/commit/8d21bf1ed9b277394d737b7ac176085e8e4b1309))
+- *(cli)* Process --retry-failed clears failure markers([`e0d8c21`](https://github.com/stevenwcarter/imgfind/commit/e0d8c21d8d7118b089a5158e56e0f1899dfe6930))
+- *(filters)* Hide_failed filter excludes images with failure markers([`a9b4741`](https://github.com/stevenwcarter/imgfind/commit/a9b47414a6886e21598cc176393700efdc0cbac6))
+- *(gui)* Hide-failed filter toggle in the filter bar([`83af167`](https://github.com/stevenwcarter/imgfind/commit/83af167c01a191cdce4ef2d409e5fa37defc24c5))
+- *(gui)* Gg/G chord resolution in the chord state machine([`0ccf07b`](https://github.com/stevenwcarter/imgfind/commit/0ccf07b5ebfd58bee473d7bc3419bb3ff6fedca5))
+- *(gui)* Gg/G jump grid cursor to first/last tile([`82b90ec`](https://github.com/stevenwcarter/imgfind/commit/82b90ec8367acf417cafbd639c8115b2065c91ef))
+- *(telnet)* Add argon2 password hashing for telnet accounts([`2d2e344`](https://github.com/stevenwcarter/imgfind/commit/2d2e3441bce602489479f81c85564eebdf43bcc3))
+- *(telnet)* IAC/NAWS telnet protocol parser([`3508c8a`](https://github.com/stevenwcarter/imgfind/commit/3508c8a0c2b03df72040e1452e0ba1897d29e09f))
+- *(telnet)* Color half-block ASCII art renderer([`ed8658b`](https://github.com/stevenwcarter/imgfind/commit/ed8658b6a8e0856b1dd83c3b1d4d36de975786fe))
+- *(telnet)* Telnet_users table (migration 007) + DB accessors([`dffa10e`](https://github.com/stevenwcarter/imgfind/commit/dffa10eac9bda12bbf1769e4daee894e59226730))
+- *(telnet)* Telnet-user add/list/remove CLI subcommands([`651f5eb`](https://github.com/stevenwcarter/imgfind/commit/651f5eb7c460d70ebd06cefcc3571d242dfa7246))
+- *(telnet)* Pure session-state helpers (screen transitions, match %)([`c478317`](https://github.com/stevenwcarter/imgfind/commit/c4783176a706089c05922ebac3803b1f9d6c2ad7))
+- *(telnet)* Async per-connection session runner (login, search, render loop)([`67bc280`](https://github.com/stevenwcarter/imgfind/commit/67bc2809514c95ea3381a0e6243f0ad77b848f04))
+- *(telnet)* TCP server with shared embedder worker + telnet CLI command([`60de5dc`](https://github.com/stevenwcarter/imgfind/commit/60de5dc623f73356bfefba800e46302da5eeb2fb))
+- *(telnet)* Results-screen image navigation + info toggle([`4f20b10`](https://github.com/stevenwcarter/imgfind/commit/4f20b1080c1c2b273eec8e7ff6d4d3c0ed843d5e))
+- *(telnet)* Cap session input length + add CLI command-tree wiring test([`adc10b8`](https://github.com/stevenwcarter/imgfind/commit/adc10b8378d5c72841037da4a158d0c5a619a281))
+
+### Merge
+
+- Seamless inline tag editor input([`2b9ef9b`](https://github.com/stevenwcarter/imgfind/commit/2b9ef9bf3833a266f59dfe3fdd013bc679b4cd69))
+- Md5 fallback hash for sub-128KB files([`acaaceb`](https://github.com/stevenwcarter/imgfind/commit/acaaceb2e9771565abd26dace0f612fed8bdd69b))
+- Cross-platform fast-index test([`0d0bb0f`](https://github.com/stevenwcarter/imgfind/commit/0d0bb0fd77896c926d8f68cfb7a9c9e81ec15f3f))
+- Thumbnail failure marking + hide-failed filter([`854a6b6`](https://github.com/stevenwcarter/imgfind/commit/854a6b6f11eeeadff4da264fbcf65f786b4efe40))
+- Grid gg/G first/last navigation([`93c240e`](https://github.com/stevenwcarter/imgfind/commit/93c240ebe312a36ff73ef48886f54de079e10776))
+
+### Polish
+
+- Visible index hint, accurate index help, Display for ProcessPhase([`404d678`](https://github.com/stevenwcarter/imgfind/commit/404d67856d8349f5aa5b1fc2012852261bbd8164))
 ## [0.2.4] - 2026-06-28
 
 ### Bug Fixes
